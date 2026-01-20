@@ -1,0 +1,114 @@
+{
+  "config_name": "optimistic",
+  "config": {
+    "N_binaries": 4000,
+    "mass_exp_damp_flag": false,
+    "power_law": true,
+    "m_c_con": 1000000000.0,
+    "z_max": 2.0,
+    "description": "Larger mass, higher spread in distance, small population"
+  },
+  "target_SNR": 4.0,
+  "n_realizations": 5,
+  "N_needed_list": [
+    2272,
+    4000,
+    3311
+  ],
+  "all_results": [
+    {
+      "error": "Even max N gives SNR=-5.62 < target=4.0",
+      "N_tested": [
+        4000,
+        4000
+      ],
+      "SNR_tested": [
+        -5.6210424229972915,
+        -5.6210424229972915
+      ],
+      "realization": 0,
+      "success": false
+    },
+    {
+      "N_tested": [
+        4000,
+        1,
+        1742,
+        2828,
+        2175,
+        2272
+      ],
+      "SNR_tested": [
+        9.186338684860978,
+        1.2173561500903413e-11,
+        -0.810278064010735,
+        11.233773482865342,
+        2.7243282923981957,
+        4.570252916794567
+      ],
+      "iterations": 5,
+      "realization": 1,
+      "success": true
+    },
+    {
+      "N_tested": [
+        4000,
+        1,
+        2979,
+        3543,
+        3266,
+        3092
+      ],
+      "SNR_tested": [
+        5.371388648603378,
+        3.864592556371821e-14,
+        2.3065393956972504,
+        5.623871232269351,
+        6.604130302078899,
+        6.097807880249642
+      ],
+      "iterations": 5,
+      "max_iterations_reached": true,
+      "realization": 2,
+      "success": true
+    },
+    {
+      "error": "Even max N gives SNR=0.66 < target=4.0",
+      "N_tested": [
+        4000,
+        4000
+      ],
+      "SNR_tested": [
+        0.6620124489057123,
+        0.6620124489057123
+      ],
+      "realization": 3,
+      "success": false
+    },
+    {
+      "N_tested": [
+        4000,
+        1,
+        2393,
+        3311
+      ],
+      "SNR_tested": [
+        6.685544782236455,
+        -1.578883600913367e-15,
+        0.41835282091237114,
+        3.774963922233695
+      ],
+      "iterations": 3,
+      "realization": 4,
+      "success": true
+    }
+  ],
+  "total_time": 590.0726201534271,
+  "statistics": {
+    "mean": 3194.3333333333335,
+    "median": 3311.0,
+    "std": 710.2602027113412,
+    "min": 2272,
+    "max": 4000
+  }
+}

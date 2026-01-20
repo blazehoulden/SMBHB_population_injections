@@ -1,0 +1,132 @@
+import os
+import pickle
+import json
+import numpy as np
+from copy import deepcopy
+from enterprise.pulsar import Pulsar
+from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
+
+
+def tim_has_toas(tim_path):
+    """Quick check if .tim file contains valid TOA data."""
+    try:
+        with open(tim_path, 'r') as fh:
+            lines = [ln.strip() for ln in fh 
+                    if ln.strip() and not ln.strip().startswith(('*', 'FORMAT', 'C'))]
+        for ln in lines:
+            parts = ln.split()
+            for p in parts:
+                try:
+                    float(p)
+                    return True
+                except Exception:
+                    continue
+        return False
+    except Exception:
+        return False
+
+
+def load_pulsars(verbose=True):
+    """Load NANOGrav pulsars with caching."""
+    if verbose:
+        print("="*70)
+        print("LOADING NANOGRAV PULSARS")
+        print("="*70)
+    
+    psrs = None
+
+    # Try cache
+    if USE_PULSAR_CACHE and os.path.exists(NANOGRAV_PULSAR_CACHE):
+        if verbose:
+            print(f"\n📦 Loading from cache: {NANOGRAV_PULSAR_CACHE}")
+        try:
+            with open(NANOGRAV_PULSAR_CACHE, 'rb') as f:
+                psrs = pickle.load(f)
+            if verbose:
+                print(f"✓ Loaded {len(psrs)} pulsars from cache\n")
+            return psrs
+        except Exception as e:
+            if verbose:
+                print(f"⚠ Cache load failed: {e}")
+            psrs = None
+
+    # Load from files
+    if verbose:
+        print(f"Loading pulsars from {PAR_DIR}...")
+    
+    parfiles = sorted([f for f in os.listdir(PAR_DIR) if f.endswith(".par")])
+    psrs = []
+    failed_pulsars = []
+    
+    for par in parfiles:
+        tim = par.replace(".par", ".tim")
+        par_path = os.path.join(PAR_DIR, par)
+        tim_path = os.path.join(TIM_DIR, tim)
+
+        if not os.path.exists(tim_path) or not tim_has_toas(tim_path):
+            failed_pulsars.append(par)
+            continue
+
+        try:
+            psr = Pulsar(par_path, tim_path)
+        except Exception:
+            try:
+                psr = Pulsar(par_path, tim_path, use_pint=True, ephem="DE440", 
+                            clk_corr=False, maxobs=None)
+            except Exception:
+                failed_pulsars.append(par)
+                continue
+
+        if len(np.asarray(psr.toas, dtype=float)) == 0:
+            failed_pulsars.append(par)
+            continue
+
+        psrs.append(psr)
+        if verbose:
+            print(f"✓ Loaded {par}")
+
+    # Save cache
+    if USE_PULSAR_CACHE and len(psrs) > 0:
+        try:
+            with open(NANOGRAV_PULSAR_CACHE, 'wb') as f:
+                pickle.dump(psrs, f, protocol=pickle.HIGHEST_PROTOCOL)
+            if verbose:
+                print(f"\n💾 Saved cache: {NANOGRAV_PULSAR_CACHE}")
+        except Exception as e:
+            if verbose:
+                print(f"⚠ Could not save cache: {e}")
+
+    if verbose:
+        print(f"\n✓ Loaded {len(psrs)} pulsars")
+    
+    return psrs
+
+
+def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
+    """Filter to 15yr pulsars with sufficient baseline."""
+    with open(NOISEFILE, 'r') as f:
+        params = json.load(f)
+    
+    pulsars_in_15yr = list(set([k.split('_')[0] for k in params.keys() if '_' in k]))
+    
+    psrs_after_15yr = [psr for psr in psrs if psr.name in pulsars_in_15yr]
+    
+    psrs_filtered = []
+    for psr in psrs_after_15yr:
+        baseline_years = (psr.toas.max() - psr.toas.min()) / (365.25 * 86400)
+        if baseline_years >= min_baseline_years:
+            psrs_filtered.append(psr)
+    
+    if verbose:
+        print(f"\nFiltered: {len(psrs)} → {len(psrs_filtered)} pulsars")
+    
+    return psrs_filtered, params
+
+
+def get_clean_pulsars_and_tspan(psrs_filtered):
+    """Get clean copies and calculate Tspan."""
+    psrs_clean = [deepcopy(psr) for psr in psrs_filtered]
+    tmin = min(p.toas.min() for p in psrs_filtered)
+    tmax = max(p.toas.max() for p in psrs_filtered)
+    Tspan = tmax - tmin
+    return psrs_clean, Tspan

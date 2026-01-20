@@ -1,0 +1,47 @@
+{
+  "config": {
+    "N_binaries": 65000,
+    "mass_exp_damp_flag": true,
+    "power_law": false,
+    "m_c_con": 10000000000.0,
+    "z_max": 1.2,
+    "description": "Medium mass, medium spread in distance, medium population"
+  },
+  "target_SNR": 3.75,
+  "n_realizations": 1,
+  "N_needed_list": [
+    107424
+  ],
+  "all_results": [
+    {
+      "N_tested": [
+        65000,
+        90071,
+        107424
+      ],
+      "SNR_tested": [
+        -0.19503785333291848,
+        0.5076288684707261,
+        3.8440405136121485
+      ],
+      "expansions": 1,
+      "total_binaries_generated": 200000,
+      "final_SNR": 3.8440405136121485,
+      "iterations": 2,
+      "realization": 0,
+      "success": true,
+      "N_needed": 107424
+    }
+  ],
+  "statistics": {
+    "mean": 107424.0,
+    "median": 107424.0,
+    "std": 0.0,
+    "min": 107424,
+    "max": 107424,
+    "percentile_16": 107424,
+    "percentile_84": 107424,
+    "success_rate": 1.0
+  },
+  "total_time": 3559.54141998291
+}
