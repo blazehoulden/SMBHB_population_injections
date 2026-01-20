@@ -1,1 +1,21 @@
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Virtual envs
+venv/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Big binary outputs
 *.pkl
+*.hdf5
+*.npz
+
+# Local data
+data/
+cache/
+
+nanograv_pulsars_cache.pkl
