@@ -62,7 +62,7 @@ RUN_NG_RG_COMPARISON = False
 RUN_CONSISTENT_POP_SYNTH = True
 
 
-def load_smbhb_module(module_path="../SMBHB_pop_synth.py"):
+def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     """Load the SMBHB population synthesis module."""
     file_path = Path(module_path)
     module_name = "SMBHB_pop_synth"
