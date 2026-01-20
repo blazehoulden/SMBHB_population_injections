@@ -577,50 +577,72 @@ def find_N_binaries_for_target_snr(
                     N_high, SNR_high = N_mid, snr_mid
     
     # =====================================================================
-    # Phase 5: Return optimal N based on target or range
+    # Phase 5: Return optimal N based on target or range  - finds the closest not the closest above the SNR range
     # =====================================================================
-    if use_range:
-        valid_indices = [i for i, snr in enumerate(SNR_tested_list) 
-                        if SNR_min <= snr <= SNR_max]
+    # if use_range:
+    #     valid_indices = [i for i, snr in enumerate(SNR_tested_list) 
+    #                     if SNR_min <= snr <= SNR_max]
         
-        if valid_indices:
-            best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
-            N_needed = N_tested_list[best_idx]
-            snr_needed = SNR_tested_list[best_idx]
+    #     if valid_indices:
+    #         best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
+    #         N_needed = N_tested_list[best_idx]
+    #         snr_needed = SNR_tested_list[best_idx]
             
-            if verbose:
-                print(f"\n✓ Optimal N found: N = {N_needed}, SNR = {snr_needed:.3f}")
-                print(f"  (Within range [{SNR_min}, {SNR_max}])\n")
-        else:
-            range_mid = (SNR_min + SNR_max) / 2
-            closest_idx = min(range(len(SNR_tested_list)), 
-                            key=lambda i: abs(SNR_tested_list[i] - range_mid))
-            N_needed = N_tested_list[closest_idx]
-            snr_needed = SNR_tested_list[closest_idx]
+    #         if verbose:
+    #             print(f"\n✓ Optimal N found: N = {N_needed}, SNR = {snr_needed:.3f}")
+    #             print(f"  (Within range [{SNR_min}, {SNR_max}])\n")
+    #     else:
+    #         range_mid = (SNR_min + SNR_max) / 2
+    #         closest_idx = min(range(len(SNR_tested_list)), 
+    #                         key=lambda i: abs(SNR_tested_list[i] - range_mid))
+    #         N_needed = N_tested_list[closest_idx]
+    #         snr_needed = SNR_tested_list[closest_idx]
             
-            if verbose:
-                print(f"\n⚠ No point strictly in range, using closest:")
-                print(f"  N = {N_needed}, SNR = {snr_needed:.3f}\n")
+    #         if verbose:
+    #             print(f"\n⚠ No point strictly in range, using closest:")
+    #             print(f"  N = {N_needed}, SNR = {snr_needed:.3f}\n")
+    # else:
+    #     if target_positive:
+    #         valid_indices = [i for i, snr in enumerate(SNR_tested_list) if snr >= target_SNR]
+    #     else:
+    #         valid_indices = [i for i, snr in enumerate(SNR_tested_list) if snr <= target_SNR]
+        
+    #     if valid_indices:
+    #         closest_idx = min(valid_indices, key=lambda i: abs(SNR_tested_list[i] - target_SNR))
+    #         N_needed = N_tested_list[closest_idx]
+    #         snr_needed = SNR_tested_list[closest_idx]
+            
+    #         if verbose:
+    #             print(f"\n✓ Optimal N found: N = {N_needed}, SNR = {snr_needed:.3f}")
+    #             print(f"  (Error from target: {abs(snr_needed - target_SNR):.3f})\n")
+    #     else:
+    #         N_needed = N_high
+    #         snr_needed = SNR_high
+            
+    #         if verbose:
+    #             print(f"\n⚠ Using bracket point: N = {N_needed}, SNR = {snr_needed:.3f}\n")
+    # Phase 5: Return the minimum N that reaches the target (above for positive target)
+    if target_positive:
+        valid_indices = [i for i, snr in enumerate(SNR_tested_list) if snr >= target_SNR]
     else:
-        if target_positive:
-            valid_indices = [i for i, snr in enumerate(SNR_tested_list) if snr >= target_SNR]
-        else:
-            valid_indices = [i for i, snr in enumerate(SNR_tested_list) if snr <= target_SNR]
-        
-        if valid_indices:
-            closest_idx = min(valid_indices, key=lambda i: abs(SNR_tested_list[i] - target_SNR))
-            N_needed = N_tested_list[closest_idx]
-            snr_needed = SNR_tested_list[closest_idx]
-            
-            if verbose:
-                print(f"\n✓ Optimal N found: N = {N_needed}, SNR = {snr_needed:.3f}")
-                print(f"  (Error from target: {abs(snr_needed - target_SNR):.3f})\n")
-        else:
-            N_needed = N_high
-            snr_needed = SNR_high
-            
-            if verbose:
-                print(f"\n⚠ Using bracket point: N = {N_needed}, SNR = {snr_needed:.3f}\n")
+        valid_indices = [i for i, snr in enumerate(SNR_tested_list) if snr <= target_SNR]
+
+    if valid_indices:
+        # NEW BEHAVIOR:
+        # choose the **minimum N** that meets threshold (not nearest)
+        best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
+        N_needed = N_tested_list[best_idx]
+        snr_needed = SNR_tested_list[best_idx]
+
+        if verbose:
+            print(f"\n✓ Minimum N above target: N = {N_needed}, SNR = {snr_needed:.3f}\n")
+    else:
+        # fallback if never reached (use bracket high)
+        N_needed = N_high
+        snr_needed = SNR_high
+
+        if verbose:
+            print(f"\n⚠ Target not reached; using upper bracket: N = {N_needed}, SNR = {snr_needed:.3f}\n")
     
     return N_needed, {
         'N_tested': N_tested_list,

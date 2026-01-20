@@ -408,28 +408,74 @@ def generate_snr_consistent_population(
             found_in_range = True
             N_high, SNR_high = N_mid, snr_mid
     
+    # # =====================================================================
+    # # Phase 5: Select final population - finds the closest not the closest above the SNR range
+    # # =====================================================================
+    # # Find lowest N where SNR is in range
+    # valid_indices = [i for i, snr in enumerate(SNR_tested_list) 
+    #                 if SNR_min <= snr <= SNR_max]
+    
+    # if valid_indices:
+    #     best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
+    #     N_final = N_tested_list[best_idx]
+    #     SNR_final = SNR_tested_list[best_idx]
+    # else:
+    #     # Use closest to range midpoint
+    #     range_mid = (SNR_min + SNR_max) / 2
+    #     closest_idx = min(range(len(SNR_tested_list)), 
+    #                     key=lambda i: abs(SNR_tested_list[i] - range_mid))
+    #     N_final = N_tested_list[closest_idx]
+    #     SNR_final = SNR_tested_list[closest_idx]
+    
+    # if verbose:
+    #     print(f"\n✓ Population generated: N = {N_final}, SNR = {SNR_final:.3f}")
+    #     print(f"  (Target range: [{SNR_min}, {SNR_max}])\n")
+
     # =====================================================================
     # Phase 5: Select final population
     # =====================================================================
-    # Find lowest N where SNR is in range
-    valid_indices = [i for i, snr in enumerate(SNR_tested_list) 
-                    if SNR_min <= snr <= SNR_max]
-    
+
+    # Find all tested N that land inside the target SNR range
+    valid_indices = [
+        i for i, snr in enumerate(SNR_tested_list)
+        if SNR_min <= snr <= SNR_max
+    ]
+
     if valid_indices:
+        # NEW BEHAVIOR:
+        # pick the minimum N that is in-range (not nearest to midpoint)
         best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
         N_final = N_tested_list[best_idx]
         SNR_final = SNR_tested_list[best_idx]
+
     else:
-        # Use closest to range midpoint
-        range_mid = (SNR_min + SNR_max) / 2
-        closest_idx = min(range(len(SNR_tested_list)), 
-                        key=lambda i: abs(SNR_tested_list[i] - range_mid))
-        N_final = N_tested_list[closest_idx]
-        SNR_final = SNR_tested_list[closest_idx]
-    
+        # Fall back if target range never reached:
+        # choose first N whose SNR exceeds upper bound (if any)
+        above_indices = [
+            i for i, snr in enumerate(SNR_tested_list)
+            if snr > SNR_max
+        ]
+
+        if above_indices:
+            # pick smallest N above range (monotonic upward fallback)
+            best_idx = min(above_indices, key=lambda i: N_tested_list[i])
+            N_final = N_tested_list[best_idx]
+            SNR_final = SNR_tested_list[best_idx]
+        else:
+            # final fallback: closest to midpoint (original behavior)
+            range_mid = 0.5 * (SNR_min + SNR_max)
+            closest_idx = min(
+                range(len(SNR_tested_list)),
+                key=lambda i: abs(SNR_tested_list[i] - range_mid)
+            )
+            N_final = N_tested_list[closest_idx]
+            SNR_final = SNR_tested_list[closest_idx]
+
     if verbose:
         print(f"\n✓ Population generated: N = {N_final}, SNR = {SNR_final:.3f}")
         print(f"  (Target range: [{SNR_min}, {SNR_max}])\n")
+
+    
     
     # Return the first N_final binaries from the population
     final_population = population[:N_final]
