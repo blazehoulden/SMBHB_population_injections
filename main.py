@@ -202,7 +202,7 @@ def main():
         consistent_results = generate_snr_consistent_populations(
             selected_config, smbhb_module, psrs_clean, noise_params, Tspan,
             SNR_range=(SNR_low, SNR_high),
-            N_sims=args.realisations,
+            N_sims=args.simulations,
             N_initial_guess=N_initial_guess,
             N_max_initial=selected_config['N_binaries'] * 3,
             verbose=True,
