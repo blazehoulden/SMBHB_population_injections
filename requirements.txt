@@ -1,6 +1,6 @@
 ads==0.12.7
 appdirs==1.4.4
-astropy==6.1.7
+astropy
 astropy-iers-data==2025.2
 asttokens==2.3.15
 beautifulsoup4==4.14.2
