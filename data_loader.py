@@ -4,9 +4,7 @@ import json
 import numpy as np
 from copy import deepcopy
 from enterprise.pulsar import Pulsar
-from config import USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
-if USE_PULSAR_CACHE == False:
-    from config import PAR_DIR, TIM_DIR
+from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
 
 
 def tim_has_toas(tim_path):
