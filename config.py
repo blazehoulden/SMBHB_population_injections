@@ -41,8 +41,8 @@ POPULATION_CONFIGS = {
 NANOGRAV_PULSARS = True
 
 if NANOGRAV_PULSARS:
-    PAR_DIR = "psars_narrowband/par/"
-    TIM_DIR = "psars_narrowband/tim/"
+    PAR_DIR = "./psars_narrowband/par/"
+    TIM_DIR = "./psars_narrowband/tim/"
     USE_PULSAR_CACHE = True
     NANOGRAV_PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
 else:
