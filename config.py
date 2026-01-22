@@ -41,17 +41,19 @@ POPULATION_CONFIGS = {
 NANOGRAV_PULSARS = True
 
 if NANOGRAV_PULSARS:
-    PAR_DIR = "../psars_narrowband/par/"
-    TIM_DIR = "../psars_narrowband/tim/"
     USE_PULSAR_CACHE = True
-    NANOGRAV_PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
+    if USE_PULSAR_CACHE:
+        NANOGRAV_PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
+    else:
+        PAR_DIR = "../psars_narrowband/par/"
+        TIM_DIR = "../psars_narrowband/tim/"
 else:
     PAR_DIR = "pulsars/"
     TIM_DIR = "pulsars/"
     USE_PULSAR_CACHE = False
 
 # Noise file
-NOISEFILE = '../15yr_cw_analysis-main/data/v1p1_all_dict.json'
+NOISEFILE = '15yr_noise.json'
 
 # Analysis flags
 RUN_INITIAL_INJECTION_ANALYSIS = False
