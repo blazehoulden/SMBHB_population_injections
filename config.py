@@ -44,6 +44,8 @@ if NANOGRAV_PULSARS:
     USE_PULSAR_CACHE = True
     if USE_PULSAR_CACHE:
         NANOGRAV_PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
+        PAR_DIR = None
+        TIM_DIR = None
     else:
         PAR_DIR = "../psars_narrowband/par/"
         TIM_DIR = "../psars_narrowband/tim/"
