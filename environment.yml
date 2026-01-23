@@ -11,9 +11,6 @@ dependencies:
   - astropy=7.2.0
   - healpy=1.19.0
   - scikit-learn=1.7.2
-  - ipython=8.17.0
-  - jupyter-client=8.4.0
-  - jupyter-core=5.3.0
   - ipywidgets=8.1.8
   - bqplot=0.12.37
   - numba=0.63.1
@@ -42,10 +39,13 @@ dependencies:
       - flexparser==0.4
       - fonttools==4.43.1
       - importlib-metadata==6.8.0
-      - ipykernel=6.27.0
+      - ipykernel==6.27.0
+      - ipython==8.17.0
       - ipython-pygments-lexers==1.1.0
       - jedi==0.19.0
       - joblib==1.5.2
+      - jupyter-client==8.4.0
+      - jupyter-core==5.3.0
       - kiwisolver==1.4.5
       - libstempo==2.5.1
       - loguru==0.7.3
