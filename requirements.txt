@@ -15,7 +15,7 @@ dill==0.4.0
 emcee==3.1.6
 enterprise-pulsar>=3.0
 enterprise_extensions @ git+https://github.com/nanograv/enterprise_extensions@3493fab2e3cdc1cab5c6de65a98a8749d16321b3
-ephem==4.1
+ephem==4.2
 executing==2.2.1
 flexcache==0.3
 flexparser==0.4
