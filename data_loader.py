@@ -97,13 +97,20 @@ def load_pulsars(verbose=True):
             continue
 
         try:
-            psr = Pulsar(par_path, tim_path)
+            psr = Pulsar(par_path, tim_path, timing_package='tempo2', drop_t2pulse=True)
         except Exception as e:
             if verbose:
                 print(f"[DEBUG] enterprise failed on {par}: {e}")
             try:
-                psr = Pulsar(par_path, tim_path, use_pint=True, ephem="DE440",
-                            clk_corr=False, maxobs=None)
+                psr = Pulsar(
+                par_path, 
+                tim_path,
+                ephem="DE440",           # Use local DE440 if available
+                clk_corr=False,          # Disable clock corrections (requires internet)
+                bipm_version=None,       # Don't try to download BIPM
+                planets=False,           # Don't load planet ephemerides
+                timing_package='tempo2'  # Use tempo2 instead of PINT (more offline-friendly)
+            )
             except Exception as e2:
                 if verbose:
                     print(f"[DEBUG] fallback also failed on {par}: {e2}")
