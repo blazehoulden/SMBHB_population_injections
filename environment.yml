@@ -20,6 +20,7 @@ dependencies:
   - pytz=2025.2
   - pyzmq=27.1.0
   - pyyaml=6.0.3
+  - libstempo=2.5.1
   - pip
   - pip:
       - ads==0.12.7
@@ -47,7 +48,6 @@ dependencies:
       - jupyter-client==8.4.0
       - jupyter-core==5.3.0
       - kiwisolver==1.4.5
-      - libstempo==2.5.1
       - loguru==0.7.3
       - matplotlib-inline==0.1.6
       - mock==5.2.0
