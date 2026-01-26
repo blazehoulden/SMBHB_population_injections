@@ -5,7 +5,22 @@ Memory profiling script - run this locally to estimate HPC memory needs
 
 import psutil
 import os
+from pympler import asizeof
 import sys
+
+import psutil
+import os
+
+def get_memory_mb():
+    """Get current process memory usage in MB."""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+def log_memory(label=""):
+    """Print current memory usage with optional label."""
+    mem_mb = get_memory_mb()
+    print(f"[MEM] {label}: {mem_mb:.1f} MB")
+    return mem_mb
 
 def get_memory_usage():
     """Get current memory usage in MB"""
@@ -56,7 +71,7 @@ def monitor_script():
     
     # Load pulsars
     print("Loading pulsars...")
-    psrs = load_pulsars(verbose=False)
+    psrs = load_pulsars(verbose=True)
     
     mem_after_psrs = get_memory_usage()
     max_mem = max(max_mem, mem_after_psrs)
@@ -64,7 +79,7 @@ def monitor_script():
     
     # Filter pulsars
     print("Filtering pulsars...")
-    psrs_filtered, noise_params = filter_pulsars_15yr(psrs, verbose=False)
+    psrs_filtered, noise_params = filter_pulsars_15yr(psrs, verbose=True)
     psrs_clean, Tspan = get_clean_pulsars_and_tspan(psrs_filtered)
     
     mem_after_filter = get_memory_usage()

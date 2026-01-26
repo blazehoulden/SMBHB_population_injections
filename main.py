@@ -12,9 +12,11 @@ from signal_injection import inject_population_into_psrs
 from pta_builder import build_pta_and_params
 from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
+from memory_profile import log_memory
 from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, print_population_diagnostics, print_scaling_summary
+import gc
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -59,6 +61,8 @@ def parse_args():
 def main():
     """Main analysis workflow."""
     args = parse_args()
+
+    log_memory("Start")
     
     # ========== SETUP ==========
     print("\n" + "="*70)
@@ -85,12 +89,19 @@ def main():
     # ========== LOAD PULSARS ==========
     print("\n📡 Loading pulsars...")
     psrs = load_pulsars(verbose=True)
+    log_memory("After loading pulsars")
     
     print("\n🔍 Filtering pulsars...")
     psrs_filtered, noise_params = filter_pulsars_15yr(psrs, verbose=True)
+    log_memory("After filtering")
     
     psrs_clean, Tspan = get_clean_pulsars_and_tspan(psrs_filtered)
     print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan/(365.25*86400):.1f} years")
+    log_memory("After deepcopy (psrs_clean)")
+
+    # Force garbage collection
+    gc.collect()
+    log_memory("After garbage collection")
     
     # ========== INITIAL INJECTION (OPTIONAL) ==========
     if config.RUN_INITIAL_INJECTION_ANALYSIS:

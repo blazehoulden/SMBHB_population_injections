@@ -1,7 +1,9 @@
+import gc
 import numpy as np
 import time
 from signal_injection import precompute_binary_signals, inject_population_subset_cached, inject_population_into_psrs
 from pta_builder import build_pta_and_params
+from memory_profile import log_memory
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 
 def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False, timer=False, profile=False):
@@ -181,6 +183,7 @@ def generate_snr_consistent_population(
     
     def compute_and_cache(N):
         """Compute SNR for N binaries, use cache if available."""
+        log_memory(f"  Before injection N={N}")
         if N in snr_cache:
             return snr_cache[N]
         
@@ -233,6 +236,8 @@ def generate_snr_consistent_population(
         if profile:
             t_compute_os = time.time() - t0
         snr = OS / OS_sig
+
+        log_memory(f"  After compute N={N}")
         
         if profile:
             timing = {
@@ -243,6 +248,12 @@ def generate_snr_consistent_population(
                 'total': t_inject + t_pta + t_ostat_init + t_compute_os
             }
             timing_list.append({'N': N, 'timing': timing})
+
+        # CRITICAL: Clean up heavy objects immediately
+        del pta, ostat, psrs_injected
+        gc.collect()
+
+        log_memory(f"  After cleanup N={N}")
         snr_cache[N] = snr
         N_tested_list.append(N)
         SNR_tested_list.append(snr)
