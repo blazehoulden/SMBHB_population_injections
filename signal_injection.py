@@ -1,5 +1,4 @@
 import numpy as np
-from copy import deepcopy
 from config import c, G, Msun, pc
 
 
@@ -72,29 +71,28 @@ def population_residuals(t, psr, population):
 
 
 def inject_population_into_psrs(psrs, population, pure_signal=True, add=False, verbose=False):
-    """Inject SMBHB population signals into pulsar residuals."""
-    psrs_injected = []
-
+    """
+    Inject SMBHB population signals into pulsar residuals.
+    
+    IMPORTANT: Modifies pulsars IN-PLACE since TEMPO2 objects can't be copied.
+    Use restore_original_residuals() before each new injection.
+    """
     for psr in psrs:
-        psr_inj = deepcopy(psr)
-        t_sec = np.asarray(psr_inj.toas, dtype=float)
-        r_pop = population_residuals(t_sec, psr_inj, population)
+        t_sec = np.asarray(psr.toas, dtype=float)
+        r_pop = population_residuals(t_sec, psr, population)
 
         if verbose:
             print(f"{psr.name}: signal RMS = {np.sqrt(np.var(r_pop))*1e6:.3f} μs")
 
         if pure_signal:
             if add:
-                psr_inj._residuals = psr_inj.residuals + r_pop
+                psr._residuals = psr.residuals + r_pop
             else:
-                psr_inj._residuals = r_pop
+                psr._residuals = r_pop
         else:
-            psr_inj._residuals = psr_inj.residuals + r_pop
+            psr._residuals = psr.residuals + r_pop
 
-        psrs_injected.append(psr_inj)
-
-    return psrs_injected
-
+    return psrs
 
 
 # CACHING STRATEGY FOR ENSEMBLE SEARCHES
@@ -133,11 +131,15 @@ def inject_population_subset_cached(psrs, population, N_binaries,
     """
     Inject first N binaries using pre-computed cached signals.
     
+    IMPORTANT: Modifies pulsars IN-PLACE. Use restore_original_residuals() 
+    before calling this for each new N value.
+    
     Usage:
         # First call: compute cache
         cache = precompute_binary_signals(psrs, population)
         
         # Then for each N in your search:
+        restore_original_residuals(psrs)  # Reset to clean state
         psrs_N = inject_population_subset_cached(psrs, population, N, 
                                                   psrs_injected_cache=cache)
     """
@@ -146,15 +148,13 @@ def inject_population_subset_cached(psrs, population, N_binaries,
         return inject_population_into_psrs(psrs, population[:N_binaries], 
                                           pure_signal=pure_signal, verbose=verbose)
     
-    psrs_injected = []
-    
+    # Modify pulsars in-place (no copying)
     for psr in psrs:
         psr_name = psr.name
-        psr_inj = deepcopy(psr)
         
         # Sum up individual binary signals up to N
         if psr_name in psrs_injected_cache:
-            total_r = np.zeros_like(psr_inj.toas, dtype=float)
+            total_r = np.zeros(len(psr.toas), dtype=float)
             for bin_idx in range(N_binaries):
                 if bin_idx in psrs_injected_cache[psr_name]:
                     total_r += psrs_injected_cache[psr_name][bin_idx]
@@ -162,17 +162,17 @@ def inject_population_subset_cached(psrs, population, N_binaries,
             r_pop = total_r
         else:
             # Fallback: compute fresh
-            t_sec = np.asarray(psr_inj.toas, dtype=float)
-            r_pop = population_residuals(t_sec, psr_inj, population[:N_binaries])
+            t_sec = np.asarray(psr.toas, dtype=float)
+            r_pop = population_residuals(t_sec, psr, population[:N_binaries])
         
         if verbose:
             print(f"{psr.name}: signal RMS = {np.sqrt(np.var(r_pop))*1e6:.3f} μs")
         
+        # Modify residuals in-place
         if pure_signal:
-            psr_inj._residuals = r_pop
+            psr._residuals = r_pop
         else:
-            psr_inj._residuals = psr_inj.residuals + r_pop
-        
-        psrs_injected.append(psr_inj)
+            psr._residuals = psr.residuals + r_pop
     
-    return psrs_injected
+    # Return the modified pulsars (same objects)
+    return psrs

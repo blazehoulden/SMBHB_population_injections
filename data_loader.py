@@ -1,10 +1,96 @@
 import os
-import pickle
 import json
 import numpy as np
-from copy import deepcopy
 from enterprise.pulsar import Pulsar
-from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
+from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NOISEFILE
+
+
+# Use NPZ format instead of pickle - portable and works across machines
+PULSAR_DATA_CACHE = "./cache/pulsar_data.npz"
+
+
+def extract_pulsar_data(psr):
+    """Extract essential data from pulsar object into portable dict."""
+    return {
+        'name': psr.name,
+        'toas': np.asarray(psr.toas, dtype=float),
+        'toaerrs': np.asarray(psr.toaerrs, dtype=float),
+        'residuals': np.asarray(psr.residuals, dtype=float),
+        'freqs': np.asarray(psr.freqs, dtype=float),
+        'raj': float(psr._raj),
+        'decj': float(psr._decj),
+        # Add any other arrays you need
+    }
+
+
+def save_pulsar_cache(psrs, cache_file=PULSAR_DATA_CACHE, verbose=True):
+    """Save pulsar data to portable NPZ format."""
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    
+    # Extract data from all pulsars
+    cache_data = {}
+    for i, psr in enumerate(psrs):
+        data = extract_pulsar_data(psr)
+        # Store each field with pulsar index
+        for key, value in data.items():
+            cache_key = f"psr{i}_{key}"
+            cache_data[cache_key] = value
+    
+    # Save metadata
+    cache_data['n_pulsars'] = len(psrs)
+    cache_data['pulsar_names'] = [psr.name for psr in psrs]
+    
+    np.savez_compressed(cache_file, **cache_data)
+    
+    if verbose:
+        size_mb = os.path.getsize(cache_file) / (1024**2)
+        print(f"💾 Saved cache: {cache_file} ({size_mb:.1f} MB)")
+
+
+def load_pulsar_cache(cache_file=PULSAR_DATA_CACHE, verbose=True):
+    """Load pulsar data from NPZ cache."""
+    if not os.path.exists(cache_file):
+        return None
+    
+    try:
+        data = np.load(cache_file, allow_pickle=True)
+        n_pulsars = int(data['n_pulsars'])
+        
+        # Reconstruct pulsar-like objects
+        class CachedPulsar:
+            """Lightweight pulsar object from cached data."""
+            def __init__(self, data_dict):
+                for key, value in data_dict.items():
+                    setattr(self, key if not key.startswith('_') else key, value)
+                # Make sure residuals are accessible as both attribute and _residuals
+                if hasattr(self, 'residuals'):
+                    self._residuals = self.residuals
+                    self._original_residuals = np.copy(self.residuals)
+        
+        psrs = []
+        for i in range(n_pulsars):
+            psr_data = {}
+            for key in ['name', 'toas', 'toaerrs', 'residuals', 'freqs', 'raj', 'decj']:
+                cache_key = f"psr{i}_{key}"
+                if cache_key in data:
+                    value = data[cache_key]
+                    # Convert numpy strings to Python strings
+                    if isinstance(value, np.ndarray) and value.dtype.kind in ['U', 'S', 'O']:
+                        value = str(value)
+                    psr_data[key if key != 'raj' else '_raj'] = value
+                    psr_data[key if key != 'decj' else '_decj'] = value
+            
+            psrs.append(CachedPulsar(psr_data))
+        
+        if verbose:
+            print(f"✓ Loaded {len(psrs)} pulsars from cache")
+        
+        return psrs
+        
+    except Exception as e:
+        if verbose:
+            print(f"⚠ Cache load failed: {e}")
+        return None
 
 
 def tim_has_toas(tim_path):
@@ -27,113 +113,86 @@ def tim_has_toas(tim_path):
 
 
 def load_pulsars(verbose=True):
-    """Load NANOGrav pulsars with caching."""
+    """Load NANOGrav pulsars with efficient caching."""
     if verbose:
         print("="*70)
         print("LOADING NANOGRAV PULSARS")
         print("="*70)
-    psrs = None
-    # Try cache
-    if USE_PULSAR_CACHE and os.path.exists(NANOGRAV_PULSAR_CACHE):
-        if verbose:
-            print(f"\n📦 Loading from cache: {NANOGRAV_PULSAR_CACHE}")
-        try:
-            with open(NANOGRAV_PULSAR_CACHE, 'rb') as f:
-                psrs = pickle.load(f)
-            if verbose:
-                print(f"✓ Loaded {len(psrs)} pulsars from cache\n")
+    
+    # Try cache first
+    if USE_PULSAR_CACHE:
+        psrs = load_pulsar_cache(verbose=verbose)
+        if psrs is not None:
             return psrs
-        except Exception as e:
-            if verbose:
-                print(f"⚠ Cache load failed: {e}")
-            psrs = None
-
+    
     # Load from files
     if verbose:
-        print(f"Loading pulsars from {PAR_DIR}...")
-    # 🔍 DEBUG: check contents of PAR_DIR
-    if verbose:
-        print(f"[DEBUG] PAR_DIR exists: {os.path.exists(PAR_DIR)}")
-        if os.path.exists(PAR_DIR):
-            print(f"[DEBUG] PAR_DIR contains: {os.listdir(PAR_DIR)}")
+        print(f"\nLoading pulsars from {PAR_DIR}...")
 
     parfiles = sorted([f for f in os.listdir(PAR_DIR) if f.endswith(".par")])
 
-    # 🔍 DEBUG: show parfiles found
     if verbose:
-        print(f"[DEBUG] Found {len(parfiles)} .par files: {parfiles}")
+        print(f"Found {len(parfiles)} .par files")
 
     psrs = []
     failed_pulsars = []
 
     for par in parfiles:
-        tim = par.replace(".par", ".tim")
+        # Extract pulsar name by removing tempo2 date suffix
+        psr_name = par.split("_tempo2_")[0] if "_tempo2_" in par else par.replace(".par", "")
         par_path = os.path.join(PAR_DIR, par)
-        tim_path = os.path.join(TIM_DIR, tim)
-
-        # 🔍 DEBUG: pairing check
-        if verbose:
-            print(f"[DEBUG] pairing: {par} → {tim}")
-            print(f"        par_exists={os.path.exists(par_path)}, tim_exists={os.path.exists(tim_path)}")
-
-        # 🔍 DEBUG: display tim header if exists
-        if verbose and os.path.exists(tim_path):
-            print(f"[DEBUG] Checking {tim_path}")
-            print(f"        size={os.path.getsize(tim_path)} bytes")
-            with open(tim_path, 'r') as fh:
-                for i, ln in enumerate(fh):
-                    if i > 3:
-                        break
-                    print("        > ", ln.strip())
+        
+        # Look for matching .tim file
+        tim_candidates = [
+            f for f in os.listdir(TIM_DIR) 
+            if f.startswith(psr_name) and f.endswith(".tim")
+        ]
+        
+        if not tim_candidates:
+            if verbose:
+                print(f"  ⚠ No .tim file found for {par}")
+            failed_pulsars.append(par)
+            continue
+        
+        tim_path = os.path.join(TIM_DIR, tim_candidates[0])
 
         # TIM validation
         if not os.path.exists(tim_path) or not tim_has_toas(tim_path):
-            if verbose:
-                print(f"[DEBUG] tim_has_toas() returned False for {tim_path}")
             failed_pulsars.append(par)
             continue
 
         try:
-            psr = Pulsar(par_path, tim_path)
+            psr = Pulsar(
+                par_path, 
+                tim_path, 
+                timing_package='tempo2',
+                drop_t2pulsar=False
+            )
+            
         except Exception as e:
             if verbose:
-                print(f"[DEBUG] enterprise failed on {par}: {e}")
-            try:
-                psr = Pulsar(par_path, tim_path, use_pint=True, ephem="DE440",
-                            clk_corr=False, maxobs=None)
-            except Exception as e2:
-                if verbose:
-                    print(f"[DEBUG] fallback also failed on {par}: {e2}")
-                failed_pulsars.append(par)
-                continue
+                print(f"  ✗ Failed {par}: {str(e)[:80]}")
+            failed_pulsars.append(par)
+            continue
 
         if len(np.asarray(psr.toas, dtype=float)) == 0:
-            if verbose:
-                print(f"[DEBUG] Pulsar {par} has zero TOAs after load")
             failed_pulsars.append(par)
             continue
 
         psrs.append(psr)
-        if verbose:
-            print(f"✓ Loaded {par}")
+        if verbose and len(psrs) % 10 == 0:
+            print(f"  Loaded {len(psrs)} pulsars...")
 
     # Save cache
     if USE_PULSAR_CACHE and len(psrs) > 0:
-        try:
-            with open(NANOGRAV_PULSAR_CACHE, 'wb') as f:
-                pickle.dump(psrs, f, protocol=pickle.HIGHEST_PROTOCOL)
-            if verbose:
-                print(f"\n💾 Saved cache: {NANOGRAV_PULSAR_CACHE}")
-        except Exception as e:
-            if verbose:
-                print(f"⚠ Could not save cache: {e}")
+        save_pulsar_cache(psrs, verbose=verbose)
 
     if verbose:
         print(f"\n✓ Loaded {len(psrs)} pulsars")
-        print(f"❌ Failed on {len(failed_pulsars)} pars: {failed_pulsars}")
+        if failed_pulsars:
+            print(f"❌ Failed on {len(failed_pulsars)} pulsars: {failed_pulsars[:5]}")
 
     return psrs
-
 
 
 def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
@@ -143,24 +202,57 @@ def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
     
     pulsars_in_15yr = list(set([k.split('_')[0] for k in params.keys() if '_' in k]))
     
+    if verbose:
+        print(f"\nFiltering pulsars...")
+        print(f"Pulsars in noise file: {len(pulsars_in_15yr)}")
+    
     psrs_after_15yr = [psr for psr in psrs if psr.name in pulsars_in_15yr]
     
+    if verbose:
+        missing_from_noise = [psr.name for psr in psrs if psr.name not in pulsars_in_15yr]
+        if missing_from_noise:
+            print(f"⚠ {len(missing_from_noise)} pulsars not in noise file:")
+            for name in missing_from_noise[:5]:
+                print(f"  - {name}")
+            if len(missing_from_noise) > 5:
+                print(f"  ... and {len(missing_from_noise) - 5} more")
+    
     psrs_filtered = []
+    short_baseline = []
     for psr in psrs_after_15yr:
         baseline_years = (psr.toas.max() - psr.toas.min()) / (365.25 * 86400)
         if baseline_years >= min_baseline_years:
             psrs_filtered.append(psr)
+        else:
+            short_baseline.append((psr.name, baseline_years))
     
     if verbose:
+        if short_baseline:
+            print(f"⚠ {len(short_baseline)} pulsars with baseline < {min_baseline_years} years:")
+            for name, baseline in short_baseline[:5]:
+                print(f"  - {name}: {baseline:.2f} years")
         print(f"\nFiltered: {len(psrs)} → {len(psrs_filtered)} pulsars")
     
     return psrs_filtered, params
 
 
 def get_clean_pulsars_and_tspan(psrs_filtered):
-    """Get clean copies and calculate Tspan."""
-    psrs_clean = [deepcopy(psr) for psr in psrs_filtered]
+    """Get clean pulsars and calculate Tspan."""
+    # Calculate Tspan
     tmin = min(p.toas.min() for p in psrs_filtered)
     tmax = max(p.toas.max() for p in psrs_filtered)
     Tspan = tmax - tmin
-    return psrs_clean, Tspan
+    
+    # Save original residuals for restoration between injections
+    for psr in psrs_filtered:
+        if not hasattr(psr, '_original_residuals'):
+            psr._original_residuals = np.copy(psr.residuals)
+    
+    return psrs_filtered, Tspan
+
+
+def restore_original_residuals(psrs):
+    """Restore original residuals before next injection."""
+    for psr in psrs:
+        if hasattr(psr, '_original_residuals'):
+            psr._residuals = np.copy(psr._original_residuals)
