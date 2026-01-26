@@ -205,7 +205,7 @@ def main():
         from consistent_pop_synth import generate_snr_consistent_populations
         # auto guess: default = 0.5 * N_binaries
         if args.initial_guess == "auto":
-            N_initial_guess = int(0.5 * selected_config['N_binaries'])
+            N_initial_guess = int(selected_config['N_binaries'])
         else:
             N_initial_guess = int(args.initial_guess)
         SNR_low, SNR_high = args.snr_range
@@ -217,7 +217,9 @@ def main():
             N_initial_guess=N_initial_guess,
             N_max_initial=selected_config['N_binaries'] * 3,
             verbose=True,
-            profile=False
+            profile=False,
+            use_cache=False,
+            cache_threshold=0
         )
         
         save_results(consistent_results, f'data/consistent_pop_synth_{CONFIG_NAME}.json')
