@@ -1,7 +1,6 @@
 import numpy as np
 import time
 from signal_injection import precompute_binary_signals, inject_population_subset_cached, inject_population_into_psrs
-from data_loader import restore_original_residuals
 from pta_builder import build_pta_and_params
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 
@@ -193,9 +192,6 @@ def generate_snr_consistent_population(
         
         if profile:
             t0 = time.time()
-        
-        # CRITICAL: Restore before each injection
-        restore_original_residuals(psrs_clean)
         
         # Choose injection method based on caching
         if use_cached_injection and signal_cache is not None:
