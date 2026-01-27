@@ -4,7 +4,8 @@ Main execution script for SMBHB population analysis.
 Run with: python main.py
 """
 import argparse
-# from memory_profiler import profile
+import os
+from datetime import datetime
 import config
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from data_loader import load_pulsars, filter_pulsars_15yr, get_clean_pulsars_and_tspan
@@ -55,12 +56,59 @@ def parse_args():
         help="Number of simulations for consistent population synthesis"
     )
 
+    parser.add_argument(
+        "--save-name", type=str, default=None,
+        help="Optional custom save name (e.g., 'run_001' or job array index)"
+    )
+
+    parser.add_argument(
+        "--save-dir", type=str, default=None,
+        help="Optional custom save directory (default: data/YYYY-MM-DD/)"
+    )
+
     return parser.parse_args()
 
-# @profile
+
+def setup_save_directory(args):
+    """
+    Setup organized save directory structure.
+    
+    Creates: data/{date}/{config}_{savename}/
+    
+    Returns:
+        save_dir: full path to save directory
+        run_name: name for this run (config_savename)
+    """
+    # Determine run name
+    if args.save_name:
+        run_name = f"{args.config}_{args.save_name}"
+    else:
+        run_name = args.config
+    
+    # Determine save directory
+    if args.save_dir:
+        # User-specified directory
+        save_dir = args.save_dir
+    else:
+        # Default: data/{date}/{run_name}/
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        save_dir = os.path.join("data", date_str, run_name)
+    
+    # Create directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
+    
+    print(f"\n📁 Save directory: {save_dir}")
+    print(f"📝 Run name: {run_name}\n")
+    
+    return save_dir, run_name
+
+
 def main():
     """Main analysis workflow."""
     args = parse_args()
+    
+    # Setup save directory
+    save_dir, run_name = setup_save_directory(args)
 
     toggle_memory_profiling = config.MEMORY_PROFILE_ENABLED
     if toggle_memory_profiling:
@@ -75,8 +123,7 @@ def main():
     smbhb_module = config.load_smbhb_module()
     
     # Select configuration
-    CONFIG_NAME = args.config  # Change as needed
-    # CONFIG_NAME = 'realistic'  # Change as needed
+    CONFIG_NAME = args.config
     selected_config = config.POPULATION_CONFIGS[CONFIG_NAME]
     
     print(f"\nConfiguration: {CONFIG_NAME}")
@@ -124,17 +171,17 @@ def main():
         )
         
         print(f"✓ PTA built with {len(pta.params)} parameters")
-        # Compute SNR and other diagnostics
-        # Initialize Optimal Statistic with Hellings-Downs correlation
         ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
-
-        # Compute OS
-        # Returns: xi (ORF), rho (correlations), sig (uncertainties), OS, OS_sig
         xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_complete)
 
         snr = OS / OS_sig
         print(f"\n✓ Initial Injection SNR: {snr:.3f}")
-        plot_initial_injection_analysis(psrs_injected, population, snr, xi, rho)
+        
+        # Save with organized naming
+        plot_initial_injection_analysis(
+            psrs_injected, population, snr, xi, rho,
+            save_dir=save_dir, run_name=run_name
+        )
     
     # ========== SCALING ANALYSIS ==========
     if config.RUN_SCALING_ANALYSIS:
@@ -148,9 +195,16 @@ def main():
         )
         
         print_scaling_summary(results, N_needed, target_SNR=4.0)
-        plot_scaling_results(results, N_needed, 4.0, CONFIG_NAME)
-        save_results({'scaling': results, 'N_needed': N_needed}, 
-                    f'data/scaling_results_{CONFIG_NAME}.json')
+        
+        # Save results
+        save_path = os.path.join(save_dir, f'scaling_results.json')
+        save_results({'scaling': results, 'N_needed': N_needed}, save_path)
+        
+        # Save plots
+        plot_scaling_results(
+            results, N_needed, 4.0, 
+            save_dir=save_dir, run_name=run_name
+        )
     
     # ========== INDIVIDUAL BINARY ANALYSIS ==========
     if config.RUN_INDIVIDUAL_BINARY_ANALYSIS:
@@ -167,9 +221,17 @@ def main():
             print_binary_statistics(df, top_n=10)
             print(f"\n✓ Analyzed {len(df)} binaries")
             print(f"  Loudest SNR: {df.iloc[0]['SNR']:+.3f}")
-            plot_individual_binaries(df, psrs_injected=psrs_clean, top_N=20)
-            df.to_csv('data/individual_binary_results.csv', index=False)
-            print("💾 Saved: data/individual_binary_results.csv")
+            
+            # Save results
+            csv_path = os.path.join(save_dir, 'individual_binary_results.csv')
+            df.to_csv(csv_path, index=False)
+            print(f"💾 Saved: {csv_path}")
+            
+            # Save plots
+            plot_individual_binaries(
+                df, psrs_injected=psrs_clean, top_N=20,
+                save_dir=save_dir, run_name=run_name
+            )
     
     # ========== ENSEMBLE ANALYSIS ==========
     if config.RUN_ENSEMBLE_ANALYSIS:
@@ -193,6 +255,7 @@ def main():
             N_initial_guess=N_initial_guess,
             N_max_initial=selected_config['N_binaries'] * 3
         )
+        
         if 'statistics' in ensemble_results:
             stats = ensemble_results['statistics']
             print(f"\nN_binaries statistics:")
@@ -200,20 +263,24 @@ def main():
             print(f"  Median: {stats['median']:.0f}")
             print(f"  Std: {stats['std']:.0f}")
 
-
-        save_results(ensemble_results, f'data/ensemble_results_{CONFIG_NAME}.json')
+        # Save results
+        save_path = os.path.join(save_dir, 'ensemble_results.json')
+        save_results(ensemble_results, save_path)
         
+    # ========== CONSISTENT POPULATION SYNTHESIS ==========
     if config.RUN_CONSISTENT_POP_SYNTH:
         print("\n" + "="*70)
         print("CONSISTENT POPULATION SYNTHESIS")
         print("="*70)
         
         from consistent_pop_synth import generate_snr_consistent_populations
-        # auto guess: default = 0.5 * N_binaries
+        
+        # auto guess: default = full N_binaries for consistent pop
         if args.initial_guess == "auto":
             N_initial_guess = int(selected_config['N_binaries'])
         else:
             N_initial_guess = int(args.initial_guess)
+        
         SNR_low, SNR_high = args.snr_range
         
         consistent_results = generate_snr_consistent_populations(
@@ -228,17 +295,27 @@ def main():
             cache_threshold=0
         )
         
-        save_results(consistent_results, f'data/consistent_pop_synth_{CONFIG_NAME}.json')
+        # Save results
+        save_path = os.path.join(save_dir, 'consistent_pop_synth.json')
+        save_results(consistent_results, save_path)
 
+    # ========== NG R&G COMPARISON ==========
     if config.RUN_NG_RG_COMPARISON:
         print("\n" + "="*70)
         print("NANOGrav Rohan & Gondor COMPARISON")
         print("="*70)
-        plot_binaries_vs_frequency(population, subset_name=CONFIG_NAME, candidate_frequencies=[14e-9, 21e-9],  # optional
-            candidate_labels=['Gondor 14 nHz', 'Rohan 21 nHz'], candidate_masses=[9.75, 10.05])  # NEW
+        
+        plot_binaries_vs_frequency(
+            population, subset_name=run_name,
+            candidate_frequencies=[14e-9, 21e-9],
+            candidate_labels=['Gondor 14 nHz', 'Rohan 21 nHz'],
+            candidate_masses=[9.75, 10.05],
+            save_dir=save_dir
+        )
 
     print("\n" + "="*70)
     print("ANALYSIS COMPLETE")
+    print(f"Results saved to: {save_dir}")
     print("="*70)
 
 

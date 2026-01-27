@@ -132,26 +132,53 @@ def antenna_response_vectorized(psr_ra, psr_dec, src_ra_arr, src_dec_arr, psi_ar
     return Fp_arr, Fx_arr
 
 
-def population_residuals_vectorized(t, psr, population, use_vectorized=True):
+def population_residuals_vectorized(t, psr, population, use_vectorized=True, batch_size=5000):
     """
     Vectorized computation of timing residuals from SMBHB population.
     
-    Speedup: 10-50x faster than loop-based version for large populations.
+    Automatically batches for large populations to avoid memory issues.
+    
+    Speedup: 10-50x faster than loop-based version for populations < 50k.
+    For larger populations, uses batching to balance speed and memory.
     
     Args:
         t: TOA times (N_toas,)
         psr: pulsar object
         population: list of binary dicts
         use_vectorized: if False, fall back to loop (for debugging)
+        batch_size: max binaries to process at once (default: 5000)
     
     Returns:
         total_r: timing residuals (N_toas,)
     """
-    if not use_vectorized or len(population) < 10:
+    N_binaries = len(population)
+    
+    # MEMORY PROTECTION: Batch large populations
+    # Matrix size: N_toas × N_binaries × 8 bytes
+    # 3000 TOAs × 5000 binaries × 8 = 120 MB per batch (safe)
+    # 3000 TOAs × 50000 binaries × 8 = 1.2 GB (risky)
+    if N_binaries > batch_size:
+        # Process in batches to avoid memory issues
+        total_r = np.zeros_like(t, dtype=float)
+        
+        n_batches = int(np.ceil(N_binaries / batch_size))
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, N_binaries)
+            batch_pop = population[start_idx:end_idx]
+            
+            # Recursively call with batch (won't re-batch since batch_size < limit)
+            total_r += population_residuals_vectorized(
+                t, psr, batch_pop, use_vectorized=True, batch_size=batch_size
+            )
+        
+        return total_r
+    
+    if not use_vectorized or N_binaries < 10:
         # Fall back to loop for small populations or debugging
         return population_residuals(t, psr, population)
     
-    N_binaries = len(population)
+    # VECTORIZED COMPUTATION (for populations ≤ batch_size)
     N_toas = len(t)
     
     # Extract all parameters into arrays (vectorized)
@@ -194,7 +221,6 @@ def population_residuals_vectorized(t, psr, population, use_vectorized=True):
     total_r = np.sum(r_matrix, axis=1)  # Shape: (N_toas,)
     
     return total_r
-
 
 # =====================================================================
 # UPDATE YOUR INJECTION FUNCTIONS TO USE VECTORIZATION
