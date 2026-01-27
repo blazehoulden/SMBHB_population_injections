@@ -158,9 +158,26 @@ def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
 
 
 def get_clean_pulsars_and_tspan(psrs_filtered):
-    """Get clean copies and calculate Tspan."""
-    psrs_clean = [deepcopy(psr) for psr in psrs_filtered]
+    """
+    Get pulsars and calculate Tspan.
+    
+    Note: Returns original pulsars (not copies) to save memory.
+    Original residuals are saved for restoration between injections.
+    """
+    # Calculate Tspan
     tmin = min(p.toas.min() for p in psrs_filtered)
     tmax = max(p.toas.max() for p in psrs_filtered)
     Tspan = tmax - tmin
-    return psrs_clean, Tspan
+    
+    # Save original residuals ONCE for each pulsar
+    for psr in psrs_filtered:
+        if not hasattr(psr, '_original_residuals'):
+            psr._original_residuals = np.copy(psr.residuals)
+    
+    return psrs_filtered, Tspan
+
+def restore_original_residuals(psrs):
+    """Restore pulsars to original state before next injection."""
+    for psr in psrs:
+        if hasattr(psr, '_original_residuals'):
+            psr._residuals = np.copy(psr._original_residuals)

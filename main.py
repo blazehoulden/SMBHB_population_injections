@@ -84,7 +84,7 @@ def main():
     print(f"  N_binaries: {selected_config['N_binaries']}")
     
     # Generate population
-    print("\n📊 Generating SMBHB population...")
+    print("\n📊 Generating sample SMBHB population...")
     population = config.generate_population(selected_config, smbhb_module)
     print_population_diagnostics(population)
     

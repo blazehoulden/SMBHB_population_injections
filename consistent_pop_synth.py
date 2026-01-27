@@ -4,6 +4,7 @@ import time
 import config
 from signal_injection import precompute_binary_signals, inject_population_subset_cached, inject_population_into_psrs
 from pta_builder import build_pta_and_params
+from data_loader import restore_original_residuals
 from memory_profile import log_memory
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 
@@ -87,7 +88,7 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
 def generate_snr_consistent_population(
     config_template, smbhb_module, psrs_clean, params, Tspan,
     SNR_range, N_initial_guess=2000, N_max_initial=10000,
-    max_iterations=20, tolerance=0.05, verbose=True, profile=False,
+    max_iterations=10, tolerance=0.05, verbose=True, profile=False,
     use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=False,
     convergence_threshold=0.05
 ):
@@ -199,31 +200,35 @@ def generate_snr_consistent_population(
         if profile:
             t0 = time.time()
         
+        # CRITICAL: Restore original residuals before each injection
+        restore_original_residuals(psrs_clean)
+        
         # Choose injection method based on caching
         if use_cached_injection and signal_cache is not None:
-            # Use pre-computed cached signals
             psrs_injected = inject_population_subset_cached(
                 psrs_clean, population, N,
                 psrs_injected_cache=signal_cache,
                 pure_signal=True, verbose=False
             )
         else:
-            # Compute signals on-the-fly
             subset_population = population[:N]
             psrs_injected = inject_population_into_psrs(
                 psrs_clean, subset_population,
                 pure_signal=True, verbose=False
             )
+        
         if profile:
             t_inject = time.time() - t0
 
         if profile:
             t0 = time.time()
+        
         # Build PTA and compute OS
         pta, _, params_out = build_pta_and_params(
             psrs=psrs_injected, noise_params_15yr=params, 
             Tspan=Tspan, use_efac_only=True
         )
+        
         if profile:
             t_pta = time.time() - t0
         
@@ -238,10 +243,14 @@ def generate_snr_consistent_population(
         xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_out)
         if profile:
             t_compute_os = time.time() - t0
+        
         snr = OS / OS_sig
-
-        if toggle_memory_profiling:
-            log_memory(f"  After compute_os N={N}")
+        
+        # CRITICAL: Aggressive cleanup to free memory
+        del pta, ostat, xi, rho, sig, OS, OS_sig, params_out
+        import gc
+        gc.collect()
+        gc.collect()
         
         if profile:
             timing = {
@@ -252,15 +261,7 @@ def generate_snr_consistent_population(
                 'total': t_inject + t_pta + t_ostat_init + t_compute_os
             }
             timing_list.append({'N': N, 'timing': timing})
-
-        # CRITICAL: Clean up heavy objects immediately
-        del pta, ostat, psrs_injected
-        gc.collect()
-        gc.collect()
-        gc.collect()
-
-        if toggle_memory_profiling:
-            log_memory(f"  After cleanup N={N}")
+        
         snr_cache[N] = snr
         N_tested_list.append(N)
         SNR_tested_list.append(snr)
@@ -586,7 +587,8 @@ def generate_snr_consistent_populations(
             profile=profile,
             use_cache=use_cache,
             cache_threshold=cache_threshold,
-            batch_size=batch_size
+            batch_size=batch_size,
+            toggle_memory_profiling=toggle_memory_profiling
         )
         
         if result is not None:

@@ -64,7 +64,7 @@ RUN_NG_RG_COMPARISON = False
 RUN_CONSISTENT_POP_SYNTH = True
 
 # Memory profiling
-MEMORY_PROFILE_ENABLED = False
+MEMORY_PROFILE_ENABLED = True
 
 def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     """Load the SMBHB population synthesis module."""
