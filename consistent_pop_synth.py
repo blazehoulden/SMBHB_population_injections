@@ -279,7 +279,7 @@ def generate_snr_consistent_population(
     # Determine search direction
     if SNR_min <= snr_test <= SNR_max:
         search_direction = "verify"
-        N_low = 1
+        N_low = int(N_test / 2)
         SNR_low = None
         N_high = N_test
         SNR_high = snr_test
@@ -293,7 +293,7 @@ def generate_snr_consistent_population(
         search_direction = "downward"
         N_high = N_test
         SNR_high = snr_test
-        N_low = 1
+        N_low = int(N_test / 2)
         SNR_low = None
     
     if verbose:
@@ -306,7 +306,6 @@ def generate_snr_consistent_population(
     # =====================================================================
     expansion_count = 0
     max_expansions = 6
-    
     while expansion_count < max_expansions:
         if search_direction == "upward":
             if N_high is None:
@@ -318,17 +317,17 @@ def generate_snr_consistent_population(
             if verbose:
                 print(f"  N = {N_high}: SNR = {snr_high:.3f}")
             
-            # FIX: Properly update bracket based on where SNR falls
-            if snr_high > SNR_max:
-                # Found upper bound - we have a valid bracket if N_low is below range
+            # Update bracket based on where SNR falls
+            if snr_high >= SNR_min and snr_high <= SNR_max:
+                # In range! Use this as upper bound and stop
                 SNR_high = snr_high
                 if SNR_low is not None and SNR_low < SNR_min:
-                    break  # Valid bracket found
-            elif snr_high >= SNR_min:
-                # SNR is in range - this could be our upper bound, but keep searching
-                # Update the bracket to use this tighter bound
+                    break  # Valid bracket found: [below_range, in_range]
+            elif snr_high > SNR_max:
+                # Above range - we have a valid bracket if N_low is below range
                 SNR_high = snr_high
-                # Don't break - keep searching to see if we can find something above range
+                if SNR_low is not None and SNR_low < SNR_min:
+                    break  # Valid bracket found: [below_range, above_range]
             else:
                 # snr_high < SNR_min - still below target, update lower bound
                 N_low = N_high
@@ -359,7 +358,7 @@ def generate_snr_consistent_population(
                         print(f"  Population exceeded cache threshold, disabling cache")
                     signal_cache = None
                     use_cached_injection = False
-        
+            
         elif search_direction == "downward":
             if N_low == 1 and SNR_low is None:
                 snr_low = compute_and_cache(1)
@@ -385,7 +384,7 @@ def generate_snr_consistent_population(
                 
                 N_high = N_new
                 SNR_high = snr_new
-    
+        
     # =====================================================================
     # Phase 3: Verify bracket
     # =====================================================================
@@ -394,7 +393,8 @@ def generate_snr_consistent_population(
             print(f"✗ Could not bracket target range")
         return None
     
-    if not (SNR_low < SNR_min and SNR_high > SNR_max):
+    # Updated validation: Accept bracket if upper bound is in range OR above range
+    if not (SNR_low < SNR_min and SNR_high >= SNR_min):
         if verbose:
             print(f"✗ Invalid bracket for range [{SNR_min}, {SNR_max}]")
         return None
