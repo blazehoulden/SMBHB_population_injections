@@ -20,7 +20,7 @@ POPULATION_CONFIGS = {
         'description': 'Larger mass, higher spread in distance, small population'
     },
     'realistic': {
-        'N_binaries': 65_000,
+        'N_binaries': 120_000,
         'mass_exp_damp_flag': True,
         'power_law': False,
         'm_c_con': 1e10,

@@ -88,7 +88,8 @@ def generate_snr_consistent_population(
     config_template, smbhb_module, psrs_clean, params, Tspan,
     SNR_range, N_initial_guess=2000, N_max_initial=10000,
     max_iterations=20, tolerance=0.05, verbose=True, profile=False,
-    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=False
+    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=False,
+    convergence_threshold=0.05
 ):
     """
     Generate a single SMBHB population consistent with target SNR range.
@@ -406,9 +407,15 @@ def generate_snr_consistent_population(
     found_in_range = False
     
     for iteration in range(max_iterations):
+        # Check convergence: either N difference ≤ 1 OR within 5% when in range
         if N_high - N_low <= 1:
             if verbose:
-                print(f"✓ Bracket converged")
+                print(f"✓ Bracket converged (difference ≤ 1)")
+            break
+        
+        if found_in_range and (N_high - N_low) / N_high <= convergence_threshold:
+            if verbose:
+                print(f"✓ Bracket converged (within {convergence_threshold*100:.0f}% of N={N_high})")
             break
         
         # Adaptive step size
