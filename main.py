@@ -62,7 +62,9 @@ def main():
     """Main analysis workflow."""
     args = parse_args()
 
-    log_memory("Start")
+    toggle_memory_profiling = config.MEMORY_PROFILE_ENABLED
+    if toggle_memory_profiling:
+        log_memory("Start")
     
     # ========== SETUP ==========
     print("\n" + "="*70)
@@ -89,19 +91,23 @@ def main():
     # ========== LOAD PULSARS ==========
     print("\n📡 Loading pulsars...")
     psrs = load_pulsars(verbose=True)
-    log_memory("After loading pulsars")
+    if toggle_memory_profiling:
+        log_memory("After loading pulsars")
     
     print("\n🔍 Filtering pulsars...")
     psrs_filtered, noise_params = filter_pulsars_15yr(psrs, verbose=True)
-    log_memory("After filtering")
+    if toggle_memory_profiling:
+        log_memory("After filtering pulsars")
     
     psrs_clean, Tspan = get_clean_pulsars_and_tspan(psrs_filtered)
     print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan/(365.25*86400):.1f} years")
-    log_memory("After deepcopy (psrs_clean)")
+    if toggle_memory_profiling:
+        log_memory("After getting clean pulsars and Tspan")
 
     # Force garbage collection
     gc.collect()
-    log_memory("After garbage collection")
+    if toggle_memory_profiling:
+        log_memory("After garbage collection")
     
     # ========== INITIAL INJECTION (OPTIONAL) ==========
     if config.RUN_INITIAL_INJECTION_ANALYSIS:

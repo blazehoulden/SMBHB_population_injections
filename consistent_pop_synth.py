@@ -1,6 +1,7 @@
 import gc
 import numpy as np
 import time
+import config
 from signal_injection import precompute_binary_signals, inject_population_subset_cached, inject_population_into_psrs
 from pta_builder import build_pta_and_params
 from memory_profile import log_memory
@@ -87,7 +88,7 @@ def generate_snr_consistent_population(
     config_template, smbhb_module, psrs_clean, params, Tspan,
     SNR_range, N_initial_guess=2000, N_max_initial=10000,
     max_iterations=20, tolerance=0.05, verbose=True, profile=False,
-    use_cache=True, cache_threshold=7000, batch_size=10000
+    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=False
 ):
     """
     Generate a single SMBHB population consistent with target SNR range.
@@ -183,7 +184,8 @@ def generate_snr_consistent_population(
     
     def compute_and_cache(N):
         """Compute SNR for N binaries, use cache if available."""
-        log_memory(f"  Before injection N={N}")
+        if toggle_memory_profiling:
+            log_memory(f"  Before injection N={N}")
         if N in snr_cache:
             return snr_cache[N]
         
@@ -237,7 +239,8 @@ def generate_snr_consistent_population(
             t_compute_os = time.time() - t0
         snr = OS / OS_sig
 
-        log_memory(f"  After compute N={N}")
+        if toggle_memory_profiling:
+            log_memory(f"  After compute_os N={N}")
         
         if profile:
             timing = {
@@ -252,8 +255,11 @@ def generate_snr_consistent_population(
         # CRITICAL: Clean up heavy objects immediately
         del pta, ostat, psrs_injected
         gc.collect()
+        gc.collect()
+        gc.collect()
 
-        log_memory(f"  After cleanup N={N}")
+        if toggle_memory_profiling:
+            log_memory(f"  After cleanup N={N}")
         snr_cache[N] = snr
         N_tested_list.append(N)
         SNR_tested_list.append(snr)
@@ -310,10 +316,21 @@ def generate_snr_consistent_population(
             if verbose:
                 print(f"  N = {N_high}: SNR = {snr_high:.3f}")
             
-            # Check if bracketed
-            if SNR_low < SNR_min and snr_high > SNR_max:
+            # FIX: Properly update bracket based on where SNR falls
+            if snr_high > SNR_max:
+                # Found upper bound - we have a valid bracket if N_low is below range
                 SNR_high = snr_high
-                break
+                if SNR_low is not None and SNR_low < SNR_min:
+                    break  # Valid bracket found
+            elif snr_high >= SNR_min:
+                # SNR is in range - this could be our upper bound, but keep searching
+                # Update the bracket to use this tighter bound
+                SNR_high = snr_high
+                # Don't break - keep searching to see if we can find something above range
+            else:
+                # snr_high < SNR_min - still below target, update lower bound
+                N_low = N_high
+                SNR_low = snr_high
             
             # Expand if needed
             if N_high >= N_current:
@@ -418,29 +435,6 @@ def generate_snr_consistent_population(
             # In range! Search downward for minimum
             found_in_range = True
             N_high, SNR_high = N_mid, snr_mid
-    
-    # # =====================================================================
-    # # Phase 5: Select final population - finds the closest not the closest above the SNR range
-    # # =====================================================================
-    # # Find lowest N where SNR is in range
-    # valid_indices = [i for i, snr in enumerate(SNR_tested_list) 
-    #                 if SNR_min <= snr <= SNR_max]
-    
-    # if valid_indices:
-    #     best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
-    #     N_final = N_tested_list[best_idx]
-    #     SNR_final = SNR_tested_list[best_idx]
-    # else:
-    #     # Use closest to range midpoint
-    #     range_mid = (SNR_min + SNR_max) / 2
-    #     closest_idx = min(range(len(SNR_tested_list)), 
-    #                     key=lambda i: abs(SNR_tested_list[i] - range_mid))
-    #     N_final = N_tested_list[closest_idx]
-    #     SNR_final = SNR_tested_list[closest_idx]
-    
-    # if verbose:
-    #     print(f"\n✓ Population generated: N = {N_final}, SNR = {SNR_final:.3f}")
-    #     print(f"  (Target range: [{SNR_min}, {SNR_max}])\n")
 
     # =====================================================================
     # Phase 5: Select final population
@@ -510,7 +504,7 @@ def generate_snr_consistent_populations(
     config_template, smbhb_module, psrs_clean, params, Tspan,
     SNR_range, N_sims=20, N_initial_guess=2000, N_max_initial=10000,
     verbose=True, save_populations=True, profile=False,
-    use_cache=True, cache_threshold=7000, batch_size=10000
+    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=config.MEMORY_PROFILE_ENABLED
 ):
     """
     Generate multiple SMBHB populations, each consistent with target SNR range.
