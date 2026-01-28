@@ -245,12 +245,8 @@ def generate_snr_consistent_population(
             t_compute_os = time.time() - t0
         
         snr = OS / OS_sig
-        
-        # CRITICAL: Aggressive cleanup to free memory
-        del pta, ostat, xi, rho, sig, OS, OS_sig, params_out
-        import gc
-        gc.collect()
-        gc.collect()
+        if toggle_memory_profiling:
+            log_memory(f"  After compute_os N={N}")
         
         if profile:
             timing = {
@@ -261,7 +257,15 @@ def generate_snr_consistent_population(
                 'total': t_inject + t_pta + t_ostat_init + t_compute_os
             }
             timing_list.append({'N': N, 'timing': timing})
-        
+
+        # CRITICAL: Clean up heavy objects immediately
+        del pta, ostat, psrs_injected
+        gc.collect()
+        gc.collect()
+        gc.collect()
+
+        if toggle_memory_profiling:
+            log_memory(f"  After cleanup N={N}")
         snr_cache[N] = snr
         N_tested_list.append(N)
         SNR_tested_list.append(snr)
@@ -279,7 +283,7 @@ def generate_snr_consistent_population(
     # Determine search direction
     if SNR_min <= snr_test <= SNR_max:
         search_direction = "verify"
-        N_low = int(N_test / 2)
+        N_low = 1
         SNR_low = None
         N_high = N_test
         SNR_high = snr_test
@@ -293,7 +297,7 @@ def generate_snr_consistent_population(
         search_direction = "downward"
         N_high = N_test
         SNR_high = snr_test
-        N_low = int(N_test / 2)
+        N_low = 1
         SNR_low = None
     
     if verbose:
