@@ -80,11 +80,11 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, compute_strain=False):
+def generate_population(config, smbhb_module, compute_strain=False, T_obs_years=15):
     """Generate SMBHB population with given configuration."""
     if compute_strain:
 
-        population, strain_data = smbhb_module.generate_SMBHB_population(
+        population, strain_data = smbhb_module.generate_smbhb_population(
             N_binaries=config['N_binaries'],
             mass_exp_damp_flag=config['mass_exp_damp_flag'],
             alpha_con=1.21,
@@ -96,7 +96,8 @@ def generate_population(config, smbhb_module, compute_strain=False):
             m_c_z=0.11e9,
             z_max=config['z_max'],
             compute_strain=compute_strain,
-            rng=None
+            rng=None, 
+            T_obs=T_obs_years
         )
         # Convert masses if needed
         if max([b['Mc'] for b in population]) < 1e20:

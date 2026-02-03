@@ -173,10 +173,10 @@ def find_N_binaries_for_target_snr(
             if verbose:
                 print(f"  Batch {batch_idx+1}/{n_batches}: generating {batch_n} binaries...")
             config_batch = {**config_template, 'N_binaries': batch_n}
-            population.extend(generate_population(config_batch, smbhb_module))
+            population.extend(generate_population(config_batch, smbhb_module, T_obs_years=Tspan/(365.25*86400)))
     else:
         config = {**config_template, 'N_binaries': N_current}
-        population = generate_population(config, smbhb_module)
+        population = generate_population(config, smbhb_module, T_obs_years=Tspan/(365.25*86400))
     
     # =====================================================================
     # Optionally pre-compute signal cache
@@ -379,7 +379,7 @@ def find_N_binaries_for_target_snr(
                     print(f"  ⚠ Expanding population: +{N_to_add} (total {N_current})")
                 
                 config_add = {**config_template, 'N_binaries': N_to_add}
-                new_binaries = generate_population(config_add, smbhb_module)
+                new_binaries = generate_population(config_add, smbhb_module, T_obs_years=Tspan/(365.25*86400))
                 population.extend(new_binaries)
                 
                 if use_cached_injection and N_current <= cache_threshold and signal_cache is not None:

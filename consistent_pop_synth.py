@@ -157,10 +157,10 @@ def generate_snr_consistent_population(
             if verbose:
                 print(f"  Batch {batch_idx+1}/{n_batches}: generating {batch_n} binaries...")
             config_batch = {**config_template, 'N_binaries': batch_n}
-            population.extend(generate_population(config_batch, smbhb_module))
+            population.extend(generate_population(config_batch, smbhb_module, T_obs_years=Tspan/(365.25*86400)))
     else:
         config = {**config_template, 'N_binaries': N_current}
-        population = generate_population(config, smbhb_module)
+        population = generate_population(config, smbhb_module, T_obs_years=Tspan/(365.25*86400))
     
     # =====================================================================
     # Optionally pre-compute signal cache
@@ -347,7 +347,7 @@ def generate_snr_consistent_population(
                 
                 # Generate additional binaries
                 config_add = {**config_template, 'N_binaries': N_to_add}
-                new_binaries = generate_population(config_add, smbhb_module)
+                new_binaries = generate_population(config_add, smbhb_module, T_obs_years=Tspan/(365.25*86400))
                 population.extend(new_binaries)
                 
                 # If we were using cache and still below threshold, update cache

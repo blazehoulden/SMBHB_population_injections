@@ -1,788 +1,1181 @@
+"""
+Supermassive Black Hole Binary (SMBHB) Population Synthesis
+
+This module generates synthetic populations of SMBHBs for gravitational wave
+background studies. It samples binary properties (masses, frequencies, distances)
+from astrophysically-motivated distributions and computes their characteristic
+gravitational wave strain.
+
+Author: Blaze Houlden
+Date: February 2026
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import quad
 from scipy.optimize import brentq
 from scipy.interpolate import interp1d
-from scipy.special import gammaincc, gammainccinv  # gammaincc = Q(s,x)
-from matplotlib.ticker import MultipleLocator, AutoMinorLocator
-import json
 import numba as nb
-import tqdm
-import pathos
+from numba import njit, prange
 
+# ============================================================================
+# PHYSICAL CONSTANTS
+# ============================================================================
 
-# Constants
-h = 0.67
-omega_M = 0.3
-omega_L = 0.7
-H0 = 100 * h # km/s/Mpc
-c_kms = 2.9979e5      # km/s
-c_ms = c_kms * 1e3    # m/s
-G = 6.67e-11 # kg^-1 m^3 s^-2
-pc = 3.086e16 # m
-Mpc = 1e6 * pc # m
-Msun = 1.989e30 # kg
-yr = 86400 * 365.25 # s
-inv_yr = 1 / yr # s^-1
-inv_10yr = 1 / (10 *yr) # s^-1
+# Cosmology (ΛCDM)
+HUBBLE_CONSTANT_H = 0.67                   # Dimensionless Hubble parameter
+OMEGA_MATTER = 0.3                         # Matter density parameter
+OMEGA_LAMBDA = 0.7                         # Dark energy density parameter
+H0_KMS_MPC = 100 * HUBBLE_CONSTANT_H       # Hubble constant [km/s/Mpc]
 
-# Cosmological functions
-def H(z):
-    return H0 * np.sqrt(omega_M * (1 + z)**3 + omega_L) # km/s/Mpc
+# Physical constants
+SPEED_OF_LIGHT_KMS = 2.9979e5              # Speed of light [km/s]
+SPEED_OF_LIGHT_MS = SPEED_OF_LIGHT_KMS * 1e3  # Speed of light [m/s]
+GRAVITATIONAL_CONSTANT = 6.67e-11          # Newton's constant [m^3 kg^-1 s^-2]
 
-def build_comov_dist(z_max=20.0):
-    """Return interpolator for comoving distance (Mpc)."""
-    z_grid = np.linspace(0, z_max, 2000)
-    chi_grid = np.array([quad(lambda zp: c_kms/H(zp), 0, zi)[0] for zi in z_grid])
-    interp = interp1d(z_grid, chi_grid, kind="cubic", fill_value="extrapolate")
-    def comov_dist(z):
-        z = np.atleast_1d(z)
-        return interp(z)
-    return comov_dist # Mpc
+# Length scales
+PARSEC_IN_METERS = 3.086e16                # 1 parsec [m]
+MEGAPARSEC_IN_METERS = 1e6 * PARSEC_IN_METERS  # 1 Megaparsec [m]
 
-comov_dist_fn = build_comov_dist(z_max=5) # Mpc
+# Mass and time scales
+SOLAR_MASS_KG = 1.989e30                   # Solar mass [kg]
+YEAR_IN_SECONDS = 86400 * 365.25           # 1 year [s]
+FREQUENCY_PER_YEAR = 1.0 / YEAR_IN_SECONDS # 1/year [Hz]
 
+# ============================================================================
+# COSMOLOGICAL FUNCTIONS
+# ============================================================================
 
-def solve_for_z_from_comov_dist(comov_dist, z_max = 20):
-    func  = lambda z: comov_dist_fn(z) - comov_dist
-    return brentq(func, 0, z_max) # unitless
-
-
-def build_inverse_comov_to_z(comov_dist_fn, z_max=5.0, n_points=2000):
-    # Build the forward table
-    z_grid = np.linspace(0, z_max, n_points)
-    chi_grid = comov_dist_fn(z_grid)
-    
-    # Ensure monotonicity (always increasing)
-    # Then invert: chi → z
-    inv_interp = interp1d(
-        chi_grid, z_grid, kind='linear',
-        fill_value=(0, z_max), bounds_error=False
-    )
-    return inv_interp
-
-inv_comov_to_z = build_inverse_comov_to_z(comov_dist_fn, z_max=2.0)
-
-
-
-# Forward comoving distance
-z_max = 5.0
-n_points = 2000
-z_grid = np.linspace(0, z_max, n_points)
-chi_grid = comov_dist_fn(z_grid)  # Mpc
-
-# Ensure monotonicity
-assert np.all(np.diff(chi_grid) > 0)
-
-from numba import njit
-
-@njit
-def inv_comov_to_z_numba(chi):
+def hubble_parameter(redshift):
     """
-    chi must be a 1D array
-    """
-    n = len(chi)
-    z_out = np.empty(n)
-    for i in range(n):
-        x = chi[i]
-        left = 0
-        right = len(chi_grid) - 1
-        while right - left > 1:
-            mid = (left + right) // 2
-            if chi_grid[mid] <= x:
-                left = mid
-            else:
-                right = mid
-        slope = (z_grid[right] - z_grid[left]) / (chi_grid[right] - chi_grid[left])
-        z_out[i] = z_grid[left] + slope * (x - chi_grid[left])
-    return z_out
-
-
-# SAMPLING FUNCTIONS
-
-# Frequency Sampling
-@nb.njit(parallel=True, fastmath=True)
-def f_sampler(N_binaries, seeds, tmax = 30 * yr, tmin = yr / 12):
-    fmin = 1.0 / tmax
-    fmax = 1.0 / tmin
-    xmin = fmin ** (-8.0/3.0)
-    xmax = fmax ** (-8.0/3.0)
-    xdiff = xmax - xmin
-    out = np.empty(N_binaries)
-    n_threads = len(seeds)
-    chunk = N_binaries // n_threads
-
-    for t in nb.prange(n_threads):
-        np.random.seed(seeds[t])
-        start = t * chunk
-        end = N_binaries if t == n_threads - 1 else (t + 1) * chunk
-        for i in range(start, end):
-            u = np.random.rand()
-            x = xmin + xdiff * u
-            out[i] = x ** (-3.0/8.0)
-    return out
-
-# Distance Sampling
-@njit
-def dist_sampler(N_binaries,  dmax=None, dmin=1.0,inv_comov_to_z_numba=inv_comov_to_z_numba):
-    """
-    Sample comoving distances and compute redshift and luminosity distance,
-    Numba-accelerated.
+    Hubble parameter H(z) for flat ΛCDM cosmology.
     
     Parameters
     ----------
-    N_binaries : int
-        Number of binaries to sample
-    dmin : float
-        Minimum comoving distance
-    dmax : float
-        Maximum comoving distance
-    inv_comov_to_z_numba : function
-        Numba-jitted function for comoving distance → z
+    redshift : float or array
+        Cosmological redshift
+        
+    Returns
+    -------
+    H_z : float or array
+        Hubble parameter at redshift z [km/s/Mpc]
+        
+    Notes
+    -----
+    For flat ΛCDM: H(z) = H0 * sqrt(Ωm(1+z)^3 + ΩΛ)
     """
-
-    # Sample distances ∝ volume
-    vol_min = dmin ** 3
-    vol_max = dmax ** 3
-    x = np.random.rand(N_binaries)
-    x *= vol_max - vol_min
-    x += vol_min
-    dist = x ** (1/3)
-
-    # Compute redshift
-    z = inv_comov_to_z_numba(dist)
-
-    # Luminosity distance
-    lum_dist = (1.0 + z) * dist
-
-    return dist, lum_dist, z
+    return H0_KMS_MPC * np.sqrt(
+        OMEGA_MATTER * (1 + redshift)**3 + OMEGA_LAMBDA
+    )
 
 
-# Mass Sampling
+def build_comoving_distance_interpolator(z_max=20.0, n_points=2000):
+    """
+    Build interpolator for comoving distance as a function of redshift.
+    
+    Parameters
+    ----------
+    z_max : float, optional
+        Maximum redshift for interpolation grid (default: 20.0)
+    n_points : int, optional
+        Number of grid points for interpolation (default: 2000)
+        
+    Returns
+    -------
+    comoving_distance_fn : callable
+        Function that takes redshift(s) and returns comoving distance(s) [Mpc]
+        
+    Notes
+    -----
+    Comoving distance: χ(z) = c/H0 * ∫[0 to z] dz'/E(z')
+    where E(z) = H(z)/H0
+    """
+    z_grid = np.linspace(0, z_max, n_points)
+    
+    # Compute comoving distance at each redshift via integration
+    chi_grid = np.array([
+        quad(lambda zp: SPEED_OF_LIGHT_KMS / hubble_parameter(zp), 0, zi)[0] 
+        for zi in z_grid
+    ])
+    
+    # Create interpolator
+    interpolator = interp1d(
+        z_grid, chi_grid, 
+        kind="cubic", 
+        fill_value="extrapolate"
+    )
+    
+    def comoving_distance(z):
+        """Comoving distance [Mpc] as function of redshift."""
+        z = np.atleast_1d(z)
+        return interpolator(z)
+    
+    return comoving_distance
 
-# Simple power-law
-def mass_sampler(N_binaries, z, alpha_con = 1.21, alpha_z = 0.0, m_min = 1e7, m_max = 1e11): # take out redshift dependence for now
-    alpha = alpha_con + alpha_z * z
-    mass_dist_max = m_max **(( -alpha + 1))
-    mass_dist_min = m_min **(( -alpha + 1))
 
-    mass_dist_diff = mass_dist_max - mass_dist_min
+def build_inverse_comoving_to_redshift(comoving_dist_fn, z_max=5.0, n_points=2000):
+    """
+    Build interpolator for the inverse: comoving distance → redshift.
+    
+    This is used for efficient sampling of distances in the population synthesis.
+    
+    Parameters
+    ----------
+    comoving_dist_fn : callable
+        Function that computes comoving distance from redshift
+    z_max : float, optional
+        Maximum redshift (default: 5.0)
+    n_points : int, optional
+        Number of grid points (default: 2000)
+        
+    Returns
+    -------
+    inverse_interpolator : callable
+        Function: comoving distance [Mpc] → redshift
+    """
+    # Build forward lookup table
+    z_grid = np.linspace(0, z_max, n_points)
+    chi_grid = comoving_dist_fn(z_grid)
+    
+    # Ensure monotonicity (required for inversion)
+    assert np.all(np.diff(chi_grid) > 0), "Comoving distance must be monotonic"
+    
+    # Create inverse interpolator
+    inverse_interp = interp1d(
+        chi_grid, z_grid,
+        kind='linear',
+        fill_value=(0, z_max),
+        bounds_error=False
+    )
+    
+    return inverse_interp
 
-    mass_dist = mass_dist_diff * np.random.rand(N_binaries) + mass_dist_min
-    mass = mass_dist ** (1/( -alpha + 1))
-    return mass
 
-# ------------------------------
-# PDF and CDF helpers
-# ------------------------------
+# Initialize global comoving distance functions
+COMOVING_DISTANCE_FN = build_comoving_distance_interpolator(z_max=5.0)
+INVERSE_COMOVING_TO_Z = build_inverse_comoving_to_redshift(
+    COMOVING_DISTANCE_FN, 
+    z_max=2.0
+)
+
+# Build Numba-compatible lookup tables for fast inverse transform
+Z_MAX_NUMBA = 5.0
+N_POINTS_NUMBA = 2000
+Z_GRID_NUMBA = np.linspace(0, Z_MAX_NUMBA, N_POINTS_NUMBA)
+CHI_GRID_NUMBA = COMOVING_DISTANCE_FN(Z_GRID_NUMBA)
+
+
+@njit
+def inverse_comoving_to_redshift_numba(comoving_distances):
+    """
+    Numba-accelerated inverse transform: comoving distance → redshift.
+    
+    Uses binary search on precomputed lookup table for speed.
+    
+    Parameters
+    ----------
+    comoving_distances : ndarray
+        Array of comoving distances [Mpc]
+        
+    Returns
+    -------
+    redshifts : ndarray
+        Corresponding redshifts
+    """
+    n = len(comoving_distances)
+    redshifts = np.empty(n)
+    
+    for i in range(n):
+        chi = comoving_distances[i]
+        
+        # Binary search in chi_grid
+        left = 0
+        right = len(CHI_GRID_NUMBA) - 1
+        
+        while right - left > 1:
+            mid = (left + right) // 2
+            if CHI_GRID_NUMBA[mid] <= chi:
+                left = mid
+            else:
+                right = mid
+        
+        # Linear interpolation between grid points
+        slope = (Z_GRID_NUMBA[right] - Z_GRID_NUMBA[left]) / \
+                (CHI_GRID_NUMBA[right] - CHI_GRID_NUMBA[left])
+        redshifts[i] = Z_GRID_NUMBA[left] + slope * (chi - CHI_GRID_NUMBA[left])
+    
+    return redshifts
+
+
+# ============================================================================
+# POPULATION SAMPLING FUNCTIONS
+# ============================================================================
+
+@nb.njit(parallel=True, fastmath=True)
+def sample_gw_frequencies(n_binaries, random_seeds, 
+                         t_obs_max=30*YEAR_IN_SECONDS, 
+                         t_obs_min=YEAR_IN_SECONDS/12):
+    """
+    Sample gravitational wave frequencies from merger-time-weighted distribution.
+    
+    p(f) ∝ f^(-11/3), then through inverse transform sampling we get for a uniform distribution ∝ f^(-8/3).
+    
+    We sample uniformly in x = f^(-8/3) space for efficiency.
+    
+    Parameters
+    ----------
+    n_binaries : int
+        Number of binaries to sample
+    random_seeds : ndarray
+        Random seeds for parallel threads
+    t_obs_max : float, optional
+        Maximum observation time [s] (default: 30 years)
+    t_obs_min : float, optional
+        Minimum observation time [s] (default: 1 month)
+        
+    Returns
+    -------
+    frequencies : ndarray
+        GW frequencies [Hz], sampled from p(f) ∝ f^(-11/3)
+        
+    Notes
+    -----
+    - Lower frequencies are more probable (more time in band)
+    - This assumes the mission observes the full inspiral
+    - For mission duration T: f_min = 1/T, f_max = 1/t_min
+    """
+    f_min = 1.0 / t_obs_max
+    f_max = 1.0 / t_obs_min
+    
+    # Transform to uniform variable: u ~ Uniform[x_min, x_max]
+    # where x = f^(-8/3)
+    x_min = f_min**(-8.0/3.0)
+    x_max = f_max**(-8.0/3.0)
+    x_range = x_max - x_min
+    
+    frequencies = np.empty(n_binaries)
+    n_threads = len(random_seeds)
+    chunk_size = n_binaries // n_threads
+    
+    # Parallel sampling across threads
+    for thread_id in nb.prange(n_threads):
+        np.random.seed(random_seeds[thread_id])
+        
+        start_idx = thread_id * chunk_size
+        end_idx = n_binaries if thread_id == n_threads - 1 else (thread_id + 1) * chunk_size
+        
+        for i in range(start_idx, end_idx):
+            u = np.random.rand()
+            x = x_min + x_range * u
+            frequencies[i] = x**(-3.0/8.0)  # Inverse transform: f = x^(-3/8)
+    
+    return frequencies
+
+
+@njit
+def sample_comoving_distances(n_binaries, distance_max, distance_min=1.0):
+    """
+    Sample comoving distances uniformly in volume.
+    
+    Also computes redshift and luminosity distance for each binary.
+    
+    Parameters
+    ----------
+    n_binaries : int
+        Number of binaries to sample
+    distance_min : float, optional
+        Minimum comoving distance [Mpc] (default: 1.0)
+    distance_max : float
+        Maximum comoving distance [Mpc]
+        
+    Returns
+    -------
+    comoving_dist : ndarray
+        Comoving distances [Mpc]
+    luminosity_dist : ndarray
+        Luminosity distances [Mpc]
+    redshift : ndarray
+        Cosmological redshifts
+        
+    Notes
+    -----
+    Number density n(D) ∝ D² (uniform in comoving volume)
+    We sample uniformly in D³ space, then take cube root
+    
+    Luminosity distance: D_L = (1+z) * D_comoving
+    """
+    # Sample uniformly in volume: V ∝ D³
+    vol_min = distance_min**3
+    vol_max = distance_max**3
+    
+    u = np.random.rand(n_binaries)
+    volumes = vol_min + (vol_max - vol_min) * u
+    comoving_dist = volumes**(1.0/3.0)
+    
+    # Convert comoving distance to redshift via lookup table
+    redshift = inverse_comoving_to_redshift_numba(comoving_dist)
+    
+    # Luminosity distance includes redshift factor
+    luminosity_dist = (1.0 + redshift) * comoving_dist
+    
+    return comoving_dist, luminosity_dist, redshift
+
+
+# ============================================================================
+# MASS SAMPLING FUNCTIONS
+# ============================================================================
+
+def sample_masses_power_law(n_binaries, redshift_array,
+                            alpha_0=1.21, alpha_z=0.0,
+                            mass_min=1e7, mass_max=1e11):
+    """
+    Sample black hole masses from a power law distribution.
+    
+    Parameters
+    ----------
+    n_binaries : int
+        Number of masses to sample
+    redshift_array : ndarray
+        Redshift for each binary (allows redshift evolution)
+    alpha_0 : float, optional
+        Power law index at z=0 (default: 1.21)
+    alpha_z : float, optional
+        Redshift evolution of index: α(z) = α₀ + α_z * z (default: 0.0)
+    mass_min : float, optional
+        Minimum mass [M_sun] (default: 10^7)
+    mass_max : float, optional
+        Maximum mass [M_sun] (default: 10^11)
+        
+    Returns
+    -------
+    masses : ndarray
+        Black hole masses [M_sun], sampled from p(M) ∝ M^(-α)
+        
+    Notes
+    -----
+    Uses inverse transform sampling:
+    If p(M) ∝ M^(-α), then CDF ∝ M^(1-α)
+    Sample u ~ Uniform[0,1], invert CDF to get M(u)
+    """
+    # Redshift-dependent power law index
+    alpha = alpha_0 + alpha_z * redshift_array
+    
+    # CDF limits: F(M) ∝ M^(1-α)
+    cdf_max = mass_max**(1.0 - alpha)
+    cdf_min = mass_min**(1.0 - alpha)
+    cdf_range = cdf_max - cdf_min
+    
+    # Inverse transform sampling
+    u = np.random.rand(n_binaries)
+    cdf_values = cdf_min + cdf_range * u
+    masses = cdf_values**(1.0 / (1.0 - alpha))
+    
+    return masses
+
+
+# --- Helper functions for exponentially-damped mass function ---
 
 @nb.njit
-def exp_damp_pdf(m, alpha, m_c):
-    return m**(-alpha) * np.exp(-m / m_c)
+def exponentially_damped_pdf(mass, alpha, mass_cutoff):
+    """
+    Exponentially damped power law: p(M) ∝ M^(-α) * exp(-M/M_c)
+    
+    This suppresses very massive black holes.
+    """
+    return mass**(-alpha) * np.exp(-mass / mass_cutoff)
+
 
 @nb.njit
-def power_law_pdf(m, alpha):
-    return m**(-alpha)
+def power_law_pdf(mass, alpha):
+    """Simple power law: p(M) ∝ M^(-α)"""
+    return mass**(-alpha)
 
-def build_cdf_exp_damp(m_min, m_max, alpha, m_c, n_grid=20000):
-    m_grid = np.linspace(m_min, m_max, n_grid)
-    pdf_grid = exp_damp_pdf(m_grid, alpha, m_c)
+
+def build_cdf_exponential_damping(mass_min, mass_max, alpha, mass_cutoff, 
+                                  n_grid=20000):
+    """
+    Build CDF for exponentially damped mass function via numerical integration.
+    
+    Parameters
+    ----------
+    mass_min, mass_max : float
+        Mass range [M_sun]
+    alpha : float
+        Power law index
+    mass_cutoff : float
+        Exponential cutoff mass [M_sun]
+    n_grid : int, optional
+        Number of grid points for integration (default: 20000)
+        
+    Returns
+    -------
+    mass_grid : ndarray
+        Mass values
+    cdf_grid : ndarray
+        Cumulative distribution function (normalized to 1)
+    """
+    mass_grid = np.linspace(mass_min, mass_max, n_grid)
+    pdf_grid = exponentially_damped_pdf(mass_grid, alpha, mass_cutoff)
+    
+    # Trapezoidal integration
     cdf_grid = np.empty(n_grid)
     cdf_grid[0] = 0.0
+    
     for i in range(1, n_grid):
-        cdf_grid[i] = cdf_grid[i-1] + 0.5 * (pdf_grid[i] + pdf_grid[i-1]) * (m_grid[i] - m_grid[i-1])
-    cdf_grid /= cdf_grid[-1]  # normalize
-    return m_grid, cdf_grid
-
-def build_cdf_power_law(m_min, m_max, alpha, n_grid=20000):
-    m_grid = np.linspace(m_min, m_max, n_grid)
-    pdf_grid = power_law_pdf(m_grid, alpha)
-    cdf_grid = np.empty(n_grid)
-    cdf_grid[0] = 0.0
-    for i in range(1, n_grid):
-        cdf_grid[i] = cdf_grid[i-1] + 0.5 * (pdf_grid[i] + pdf_grid[i-1]) * (m_grid[i] - m_grid[i-1])
+        delta_m = mass_grid[i] - mass_grid[i-1]
+        avg_pdf = 0.5 * (pdf_grid[i] + pdf_grid[i-1])
+        cdf_grid[i] = cdf_grid[i-1] + avg_pdf * delta_m
+    
+    # Normalize
     cdf_grid /= cdf_grid[-1]
-    return m_grid, cdf_grid
+    
+    return mass_grid, cdf_grid
 
-# ------------------------------
-# Numba sampling from precomputed CDF
-# ------------------------------
+
+def build_cdf_power_law(mass_min, mass_max, alpha, n_grid=20000):
+    """Build CDF for pure power law (for comparison/testing)."""
+    mass_grid = np.linspace(mass_min, mass_max, n_grid)
+    pdf_grid = power_law_pdf(mass_grid, alpha)
+    
+    cdf_grid = np.empty(n_grid)
+    cdf_grid[0] = 0.0
+    
+    for i in range(1, n_grid):
+        delta_m = mass_grid[i] - mass_grid[i-1]
+        avg_pdf = 0.5 * (pdf_grid[i] + pdf_grid[i-1])
+        cdf_grid[i] = cdf_grid[i-1] + avg_pdf * delta_m
+    
+    cdf_grid /= cdf_grid[-1]
+    
+    return mass_grid, cdf_grid
+
+
 @nb.njit(parallel=True)
-def sample_from_precomputed_cdf(N, m_grid, cdf_grid):
-    samples = np.empty(N)
-    for i in nb.prange(N):
+def sample_from_precomputed_cdf(n_samples, mass_grid, cdf_grid):
+    """
+    Sample from arbitrary distribution using precomputed CDF.
+    
+    Uses inverse transform sampling with binary search for efficiency.
+    
+    Parameters
+    ----------
+    n_samples : int
+        Number of samples to draw
+    mass_grid : ndarray
+        Mass values corresponding to CDF
+    cdf_grid : ndarray
+        Cumulative distribution values (must be monotonic)
+        
+    Returns
+    -------
+    samples : ndarray
+        Sampled mass values
+    """
+    samples = np.empty(n_samples)
+    
+    for i in nb.prange(n_samples):
         u = np.random.random()
-        # binary search in CDF
-        low, high = 0, len(cdf_grid)-1
+        
+        # Binary search in CDF to find u
+        low = 0
+        high = len(cdf_grid) - 1
+        
         while high - low > 1:
             mid = (low + high) // 2
             if cdf_grid[mid] < u:
                 low = mid
             else:
                 high = mid
-        # linear interpolation
-        c1, c2 = cdf_grid[low], cdf_grid[high]
-        m1, m2 = m_grid[low], m_grid[high]
-        if c2 - c1 > 0:
-            samples[i] = m1 + (u - c1)/(c2 - c1) * (m2 - m1)
+        
+        # Linear interpolation between grid points
+        cdf_low, cdf_high = cdf_grid[low], cdf_grid[high]
+        mass_low, mass_high = mass_grid[low], mass_grid[high]
+        
+        if cdf_high - cdf_low > 0:
+            weight = (u - cdf_low) / (cdf_high - cdf_low)
+            samples[i] = mass_low + weight * (mass_high - mass_low)
         else:
-            samples[i] = m1
+            samples[i] = mass_low
+    
     return samples
 
-# ------------------------------
-# Main sampler
-# ------------------------------
-def mass_sampler_exp_damp(N_binaries, z_array,
-                          m_c_con=1e9, m_c_z=0, #0.11e9, # take out redshift dependence for now
-                          alpha_con=1.21, alpha_z=0.0, # 0.03, # take out redshift dependence for now
-                          m_min=1e7, m_max=1e11,
-                          power_law=False):
-    masses = np.empty(N_binaries)
-    
-    # If alpha and m_c are constant, precompute CDF once for speed
-    alpha0 = alpha_con + alpha_z * 0
-    m_c0 = m_c_con + m_c_z * 0
-    if power_law:
-        m_grid, cdf_grid = build_cdf_power_law(m_min, m_max, alpha0)
-    else:
-        m_grid, cdf_grid = build_cdf_exp_damp(m_min, m_max, alpha0, m_c0)
 
-    # Sample all binaries
-    masses = sample_from_precomputed_cdf(N_binaries, m_grid, cdf_grid)
+def sample_masses_exponential_damping(n_binaries, redshift_array,
+                                     mass_cutoff_0=1e9, mass_cutoff_z=0.0,
+                                     alpha_0=1.21, alpha_z=0.0,
+                                     mass_min=1e7, mass_max=1e11,
+                                     use_pure_power_law=False):
+    """
+    Sample masses from exponentially damped power law.
+    
+    Distribution: p(M) ∝ M^(-α) * exp(-M/M_c)
+    
+    Parameters
+    ----------
+    n_binaries : int
+        Number of masses to sample
+    redshift_array : ndarray
+        Redshift for each binary
+    mass_cutoff_0 : float, optional
+        Exponential cutoff mass at z=0 [M_sun] (default: 10^9)
+    mass_cutoff_z : float, optional
+        Redshift evolution: M_c(z) = M_c,0 + M_c,z * z (default: 0.0)
+    alpha_0 : float, optional
+        Power law index at z=0 (default: 1.21)
+    alpha_z : float, optional
+        Redshift evolution of α (default: 0.0)
+    mass_min, mass_max : float, optional
+        Mass range [M_sun]
+    use_pure_power_law : bool, optional
+        If True, ignore exponential damping (default: False)
+        
+    Returns
+    -------
+    masses : ndarray
+        Sampled black hole masses [M_sun]
+    """
+    # For simplicity, use z=0 parameters to build CDF
+    # (Could extend to redshift-dependent sampling if needed)
+    alpha = alpha_0 + alpha_z * 0
+    mass_cutoff = mass_cutoff_0 + mass_cutoff_z * 0
+    
+    if use_pure_power_law:
+        mass_grid, cdf_grid = build_cdf_power_law(mass_min, mass_max, alpha)
+    else:
+        mass_grid, cdf_grid = build_cdf_exponential_damping(
+            mass_min, mass_max, alpha, mass_cutoff
+        )
+    
+    # Sample all binaries from this CDF
+    masses = sample_from_precomputed_cdf(n_binaries, mass_grid, cdf_grid)
+    
     return masses
 
-# Mass ratio sampler
+
+# ============================================================================
+# MASS RATIO AND CHIRP MASS CALCULATION
+# ============================================================================
+
 @nb.njit(parallel=True)
-def q_sampler(N_binaries, tot_mass_array, simple=False):
-    chirp_mass = np.empty(N_binaries)
-    q_array = np.empty(N_binaries)
+def sample_mass_ratios_and_compute_chirp_mass(n_binaries, primary_masses, 
+                                              use_equal_mass=False):
+    """
+    Sample mass ratios and compute chirp masses.
+    
+    Parameters
+    ----------
+    n_binaries : int
+        Number of binaries
+    primary_masses : ndarray
+        Primary (more massive) black hole masses [M_sun]
+    use_equal_mass : bool, optional
+        If True, set q=1 for all binaries (default: False)
+        
+    Returns
+    -------
+    total_masses : ndarray
+        Total masses M = M1 + M2 [M_sun]
+    chirp_masses : ndarray
+        Chirp masses Mc = (M1*M2)^(3/5) / (M1+M2)^(1/5) [M_sun]
+        
+    Notes
+    -----
+    Mass ratio q = M2/M1 where M1 ≥ M2
+    
+    If use_equal_mass=False:
+        Sample q uniformly from [0, 1]
+        
+    Chirp mass is the combination that enters GW frequency evolution:
+        Mc = (M1 * M2)^(3/5) / (M1 + M2)^(1/5)
+    """
+    total_masses = np.empty(n_binaries)
+    chirp_masses = np.empty(n_binaries)
+    
+    for i in nb.prange(n_binaries):
+        if use_equal_mass:
+            q = 1.0
+        else:
+            q = np.random.rand()  # Uniform in [0, 1]
+        
+        M1 = primary_masses[i]
+        M2 = q * M1
+        
+        total_masses[i] = M1 + M2
+        
+        # Chirp mass: Mc = (M1*M2)^(3/5) / (M1+M2)^(1/5)
+        chirp_masses[i] = (M1 * M2)**(3.0/5.0) / (M1 + M2)**(1.0/5.0)
+    
+    return total_masses, chirp_masses
 
-    if simple:
-        for i in nb.prange(N_binaries):
-            q_array[i] = 1.0
-            chirp_mass[i] = (1 / (1 + 1)**2)**(3/5) * tot_mass_array[i] * Msun
-        return tot_mass_array, chirp_mass
 
-    # uniform mass ratio distribution
-    q_min = 0.05
-    q_max = 1.0
-    q_diff = q_max - q_min
+# ============================================================================
+# CHARACTERISTIC STRAIN CALCULATION
+# ============================================================================
 
-    for i in nb.prange(N_binaries):
-        q = q_min + q_diff * np.random.rand()
-        q_array[i] = q
-        chirp_mass[i] = (q / (1 + q)**2)**(3/5) * tot_mass_array[i] * Msun
-
-    return tot_mass_array, chirp_mass
-
-# TOTAL CHARACTERISTIC STRAIN
 @nb.njit(parallel=True)
-def compute_h_square_circ_nb(fGW, chirp_mass, dist, z):
-    # calculate the RMS strain averaged over orbital orientations
-    N = fGW.size
-    h2 = np.empty(N, dtype=np.float64)
-    const = 32.0 / (5.0 * c_ms**8)
-    for i in nb.prange(N):
-        f_rest_orb = 0.5 * (1.0 + z[i]) * fGW[i]
-        h2[i] = const * (G * chirp_mass[i])**(10/3) / (dist[i] * Mpc)**2 * (2*np.pi*f_rest_orb)**(4/3)
-    return h2
+def compute_characteristic_strain_squared_circular(
+    gw_frequencies, chirp_masses, comoving_distances, redshifts, inclination_angle=None
+):
+    """
+    Compute h² for circular binaries (RMS strain, orientation-averaged).
+    
+    For a circular binary at frequency f and chirp mass Mc:
+    
+        h² = (32/5) * (G*Mc)^(10/3) / (c^8 * D_comov²) * (2π * f_rest)^(4/3)
+    
+    where f_rest = (1+z) * f_obs / 2 is the rest-frame orbital frequency.
+    
+    Parameters
+    ----------
+    gw_frequencies : ndarray
+        Observed GW frequencies [Hz]
+    chirp_masses : ndarray
+        Chirp masses [M_sun]
+    comoving_distances : ndarray
+        Comoving distances [Mpc]
+    redshifts : ndarray
+        Cosmological redshifts
+    inclination_angle : ndarray or None, optional
+        
+    Returns
+    -------
+    h_squared : ndarray
+        Squared characteristic strain h² [dimensionless]
+        
+    Notes
+    -----
+    This is the RMS strain averaged over all orientations.
+    
+    The factor 32/5 includes this averaging and other numerical constants
+    from Peters & Mathews (1963).
+    """
+    n = gw_frequencies.size
+    h_squared = np.empty(n, dtype=np.float64)
+    
+    # Constant factor: 32/(5*c^8)
+    if inclination_angle is None:
+        const = 32.0 / (5.0 * SPEED_OF_LIGHT_MS**8)
+    else:
+        const = 2.0 * 2.0 / (SPEED_OF_LIGHT_MS**8)
+    
+    for i in nb.prange(n):
+        # Rest-frame orbital frequency: f_orb = f_GW/2 in source frame
+        f_rest_orbital = 0.5 * (1.0 + redshifts[i]) * gw_frequencies[i]
+        
+        # Convert to SI units
+        Mc_SI = chirp_masses[i] * SOLAR_MASS_KG
+        D__COMOV_SI = comoving_distances[i] * MEGAPARSEC_IN_METERS
+        
+        # h² formula for circular orbits
+        if inclination_angle is None:
+            # Orientation-averaged strain
+            h_squared[i] = const * \
+                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
+                        (2.0 * np.pi * f_rest_orbital)**(4.0/3.0)
+        else: 
+            # Polarization contribution
+            i_loc = inclination_angle[i]
+            a = 1.0 + np.cos(i_loc)**2
+            b = -2.0 * np.cos(i_loc)
+            MeanAng = np.sqrt(0.5 * (a**2 + b**2))
+            h_squared[i] = const * MeanAng**2 \
+                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
+                        (2.0 * np.pi * f_rest_orbital)**(4.0/3.0) 
+    
+    return h_squared
 
-# --- Helper: bin h^2 and compute h_c_total and per-binary contribution ---
-@nb.njit
-def bin_h_c_nb(fGW, h_square_circ, n_freq_bins):
-    # calculate the characteristic strain spectrum of population
-    f_min = np.min(fGW)
-    f_max = np.max(fGW)
-    bin_edges = np.logspace(np.log10(f_min), np.log10(f_max), n_freq_bins+1)
-    bin_centres = 0.5*(bin_edges[:-1] + bin_edges[1:])
-    delta_f_bin = bin_edges[1:] - bin_edges[:-1]
 
-    # Digitize
-    bin_idx = np.empty(fGW.size, dtype=np.int64)
-    n_bins = n_freq_bins
-    for i in range(fGW.size):
-        x = fGW[i]
-        for b in range(n_bins):
-            if bin_edges[b] <= x < bin_edges[b+1]:
-                bin_idx[i] = b
+@njit
+def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
+    """
+    Bin individual strain contributions to compute population spectrum.
+    
+    The characteristic strain spectrum is defined as:
+        h_c(f) = sqrt(h² * f / Δf)
+    
+    For a population, we sum h² values in each frequency bin, then convert.
+    
+    Parameters
+    ----------
+    gw_frequencies : ndarray
+        GW frequencies [Hz] for each binary
+    h_squared : ndarray
+        Squared strain h² for each binary
+    n_freq_bins : int
+        Number of logarithmically-spaced frequency bins
+    T_obs : float, optional
+        Observation time [years] (default: 15)
+        
+    Returns
+    -------
+    bin_centres : ndarray
+        Center frequency of each bin [Hz]
+    h_c_total : ndarray
+        Total characteristic strain in each bin
+    h_c_individual : ndarray
+        Individual contribution of each binary to h_c
+        
+    Notes
+    -----
+    We use logarithmic binning since GW frequencies span many decades.
+    
+    The total h_c in a bin is:
+        h_c,total = sqrt( Σ h² * f / Δf )
+    
+    where the sum is over all binaries in that bin.
+    """
+    f_min = np.min(gw_frequencies)
+    f_max = np.max(gw_frequencies)
+
+    f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
+    N_bin_f = int((f_max - f_min) / f_step) + 1
+    
+    bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
+    
+    # # Logarithmically spaced bin edges
+    # bin_edges = np.logspace(
+    #     np.log10(f_min), 
+    #     np.log10(f_max), 
+    #     n_freq_bins + 1
+    # )
+    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_widths = bin_edges[1:] - bin_edges[:-1]
+    
+    # Assign each binary to a bin
+    bin_indices = np.empty(gw_frequencies.size, dtype=np.int64)
+    
+    for i in range(gw_frequencies.size):
+        f = gw_frequencies[i]
+        
+        # Find which bin this frequency belongs to
+        for b in range(n_freq_bins):
+            if bin_edges[b] <= f < bin_edges[b+1]:
+                bin_indices[i] = b
                 break
         else:
-            bin_idx[i] = n_bins-1
-
-    # Compute per-bin sum
-    h_square_sum = np.zeros(n_bins, dtype=np.float64)
-    for i in range(fGW.size):
-        h_square_sum[bin_idx[i]] += h_square_circ[i]
-
-    h_c_total = np.sqrt(h_square_sum * (bin_centres / delta_f_bin))
-    h_c_contrib = np.sqrt(h_square_circ * (bin_centres[bin_idx] / delta_f_bin[bin_idx]))
-
-    return bin_centres, h_c_total, h_c_contrib
-
-def h_circ(N_binaries, diagnostics=False, n_freq_bins=50,
-           alpha_con=1.21, alpha_z=0.0,
-           m_min=1e7, m_max=1e11,
-           reduce_mass=False, divide_spec=False,
-           dmax=comov_dist_fn(z=1),
-           mass_exp_damp_flag=False, m_c_con=1e9, m_c_z=0.0, power_law=False,
-           inv_comov_to_z_numba=inv_comov_to_z_numba, rng=None):
-
-    # --- Sample binaries ---
-    if rng is None:
-        rng = np.random.default_rng()  # create if not provided
-    n_threads = nb.get_num_threads()
-    seeds = rng.integers(0, 2**32 - 1, size=n_threads)
-    fGW = f_sampler(N_binaries, seeds)
-    dist, lum_dist, z = dist_sampler(N_binaries, dmax=dmax, inv_comov_to_z_numba=inv_comov_to_z_numba)
-
-    if mass_exp_damp_flag:
-        mass = mass_sampler_exp_damp(N_binaries=N_binaries, z_array=z, alpha_con=alpha_con, alpha_z=alpha_z,
-                                     m_min=m_min, m_max=m_max,
-                                     power_law=power_law,
-                                     m_c_con=m_c_con, m_c_z=m_c_z)
-    else:
-        mass = mass_sampler(N_binaries, z, alpha_con, alpha_z, m_min, m_max)
-
-    tot_mass, chirp_mass = q_sampler(N_binaries, mass)  # your Numba function
-
-    if reduce_mass:
-        chirp_mass *= 0.1
-
-    # --- h^2 computation - RMS strain ---
-    h_square_circ = compute_h_square_circ_nb(fGW, chirp_mass, dist, z)
-
-    # --- Bin h^2 ---
-    bin_centres, h_c_total, h_c_contrib = bin_h_c_nb(fGW, h_square_circ, n_freq_bins)
-
-    # --- Reference power law ---
-    alpha = 2/3
-    h_ref = h_c_total[0]
-    h_c_powerlaw = h_ref * (bin_centres / bin_centres[0])**(-alpha)
-
-    # --- NANOGrav reference ---
-    A_NG = 2.4e-15
-    h_c_NG = A_NG * (bin_centres / inv_yr)**(-alpha)
-
-    if divide_spec:
-        h_c_total /= 100
-        h_c_contrib /= 100
-        h_c_powerlaw /= 100
-
-    if diagnostics:
-        return bin_centres, h_c_total, h_c_contrib, h_c_powerlaw, h_c_NG, fGW, dist, z, tot_mass, chirp_mass
-    else:
-        return bin_centres, h_c_total, h_c_contrib, h_c_powerlaw, h_c_NG
+            # If frequency is at upper edge, assign to last bin
+            bin_indices[i] = n_freq_bins - 1
+    
+    # Sum h² contributions in each bin
+    h_squared_sum_per_bin = np.zeros(n_freq_bins, dtype=np.float64)
+    
+    for i in range(gw_frequencies.size):
+        bin_idx = bin_indices[i]
+        h_squared_sum_per_bin[bin_idx] += h_squared[i]
+    
+    # Convert to characteristic strain: h_c = sqrt(h² * f / Δf)
+    h_c_total = np.sqrt(
+        h_squared_sum_per_bin * bin_centres / bin_widths
+    )
+    
+    # Individual contributions (for diagnostics)
+    h_c_individual = np.sqrt(
+        h_squared * bin_centres[bin_indices] / bin_widths[bin_indices]
+    )
+    
+    return bin_centres, h_c_total, h_c_individual
 
 
-# Diagnostic plotting functions
+# ============================================================================
+# MAIN POPULATION GENERATION FUNCTION
+# ============================================================================
 
-# From sampling
-def diagnostics(f, tot_mass, z, h_c_cont = None, h_c_flag = False):
-    # make diagnostic plots
-    # frequency diagnostics
-    fmaxplot = 30e-9
-    fmin = np.min(f)
-    fi = np.arange(fmin, fmaxplot, fmin)
-    mask = f < fmaxplot
-    nf, _ = np.histogram(f[mask], bins=fi)
-
-    plt.figure()
-    plt.plot(fi[:-1], np.log10(nf), 'b')
-    plt.xlabel('f (Hz)')
-    plt.xscale('log')
-    plt.ylabel('log10(N)')
-    plt.title('Frequency distribution of SMBHB population')
-    plt.tight_layout()
-    plt.savefig('freq.png', dpi=150)
-    plt.show()
-
-    # mass diagnostics
-    m_maxplot = 1e11
-    m_min = np.min(tot_mass)
-    mi = np.arange(2 * m_min, m_maxplot, 2 * m_min)
-    mask = tot_mass < m_maxplot
-    nm, _ = np.histogram(tot_mass[mask], bins=mi)
-
-    plt.figure()
-    plt.plot(mi[:-1], np.log10(nm), 'b')
-    plt.xlabel(r'Mass (M$_{\odot}$)')
-    plt.xscale('log')
-    plt.ylabel('log10(N)')
-    plt.title('Mass distribution of SMBHB population')
-    plt.tight_layout()
-    plt.savefig('mass.png', dpi=150)
-    plt.show()
-
-    dmin = 1 # Mpc
-    dmax = comov_dist_fn(z = np.max(z))
-    # comoving volume distribution
-    v_min = 4 * np.pi / 3 * dmin**3 
-    v_maxplot = 4 * np.pi / 3 * dmax[0]**3
-    vi = np.linspace((v_min), (v_maxplot), 100)
-
-    vol = 4 * np.pi / 3 * comov_dist_fn(z)**3
-    mask = vol < v_maxplot
-    nv, _ = np.histogram(vol[mask], bins=vi)
-
-    plt.figure()
-    plt.plot(vi[:-1], np.log10(nv), 'b')
-    plt.xlabel(r'Volume (cMpc$^{-3}$)')
-    plt.ylabel('log10(N)')
-    plt.title('Volume distribution of SMBHB population')
-    plt.tight_layout()
-    plt.savefig('vol.png', dpi=150)
-    plt.show()
-
-    if h_c_flag == True:
-        h_min = np.min(h_c_cont)
-        h_max = np.max(h_c_cont)
-        # hi = np.arange((h_min), (h_max), h_min)
-        # hi = np.logspace(np.log10(h_min), np.log10(h_max), 100)
-        hi = np.linspace((h_min), (h_max), 1000000)
-
-        # mask = vol < v_maxplot
-        nh, _ = np.histogram(h_c_cont, bins=hi)
-
-        plt.figure()
-        plt.plot(hi[:-1], np.log10(nh), 'b')
-        plt.xlabel(r'$h_{\mathrm{circ}}$')
-        plt.ylabel('log10(N)')
-        plt.xscale('log')
-        plt.title('Individual strain distribution of SMBHB population')
-        plt.tight_layout()
-        plt.savefig('hc_circ.png', dpi=150)
-        plt.show()
-    return
-
-# Characteristic strain plotting
-def plot_char_str(bin_centres, h_c, h_c_powerlaw, h_c_NG, f_max_residual=None, savefile=None):
+def generate_smbhb_population(
+    n_binaries,
+    z_max=2.0,
+    mass_distribution='power_law',
+    alpha_0=1.21,
+    alpha_z=0.0,
+    mass_min=1e7,
+    mass_max=1e11,
+    mass_cutoff_0=1e9,
+    mass_cutoff_z=0.0,
+    compute_strain=False,
+    n_freq_bins=50,
+    T_obs=15,
+    random_seed=None
+):
     """
-    Plot characteristic strain h_c(f) and residual relative to NANOGrav constraints.
+    Generate a synthetic population of supermassive black hole binaries.
+    
+    This function samples binary properties from astrophysically-motivated
+    distributions and optionally computes their gravitational wave strain.
     
     Parameters
     ----------
-    bin_centres : array
-        Frequencies of bins.
-    h_c : array
-        Calculated characteristic strain.
-    h_c_powerlaw : array
-        Reference power-law strain.
-    h_c_NG : array
-        NANOGrav reference strain.
-    f_max_residual : float, optional
-        Maximum frequency (Hz) to plot residuals; residuals above this are ignored.
-    savefile : str, optional
-        If provided, save figure to this PDF filename.
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    # Mask for residuals if f_max_residual is set
-    if f_max_residual is not None:
-        mask = bin_centres <= f_max_residual
-    else:
-        mask = np.ones_like(bin_centres, dtype=bool)
-    
-    fig, ax = plt.subplots(2, 1, figsize=(7, 6), sharex=True, gridspec_kw={'height_ratios':[2,1]})
-
-    # --- Top panel: characteristic strain ---
-    ax[0].loglog(bin_centres, h_c, label='$h_c(f)$', lw=2)
-    ax[0].loglog(bin_centres, h_c_powerlaw, '--', lw=1.8, label=r'$\propto f^{-2/3}$')
-    ax[0].loglog(bin_centres, h_c_NG, ':', lw=1.8, label='NG')
-    
-    # Reference lines
-    ax[0].vlines(inv_10yr, ymin=min(h_c), ymax=max(h_c), colors='red', linestyles='-.', label='1/10yr')
-    ax[0].vlines(inv_yr, ymin=min(h_c), ymax=max(h_c), colors='cyan', linestyles='-.', label='1/yr')
-    
-    ax[0].set_ylabel(r'$h_c$')
-    ax[0].legend(fontsize=9)
-    ax[0].grid(True, which='both', ls=':', lw=0.5)
-
-    # --- Bottom panel: residual ---
-    residual = (h_c - h_c_NG)/h_c_NG
-    ax[1].plot(bin_centres[mask], residual[mask], lw=1.8, color='black')
-    ax[1].axhline(0, color='gray', ls='--', lw=1)
-    ax[1].set_xlabel(r'$f$ [Hz]')
-    ax[1].set_yscale('symlog', linthresh=0.01)
-    ax[1].set_ylabel(r'Residual $(h_c - h_{\rm NG})/h_{\rm NG}$')
-    ax[1].grid(True, ls=':', lw=0.5)
-    
-    plt.tight_layout()
-    
-    if savefile is not None:
-        plt.savefig(savefile, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-        print(f"Saved figure as {savefile}")
-    else:
-        plt.show()
-    return
-
-
-# Comparison plots
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
-
-# Set style
-sns.set(style="whitegrid", context="talk")
-
-# Colors for each subset
-subset_colors = {
-    "Pessimistic": "#f72d2d",  # red
-    "Realistic": "#1f77b4",    # blue
-    "Optimistic": "#2ca02c"    # green
-}
-
-def plot_overlay(results, key_loudest, key_nearest=None, xlabel="", 
-                 logx=False, logy=False, bins=30, save_name=None, 
-                 div_Msun=False, vol_conv=False, log_bins=False, alpha=0.5):
-    plt.rcParams.update({
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 12,
-        "ytick.right": False,
-        "ytick.left": True,
-        "xtick.top": False,
-        "xtick.bottom": True,
-
-    })
-
-    width_in = 3.25
-    fig, ax = plt.subplots(figsize=(2 * width_in, width_in))
-
-    for subset in results:
-        data = np.array(results[subset][key_loudest], dtype=float)
-        if div_Msun:
-            data = data / Msun
-        if vol_conv:
-            data = 4/3 * np.pi * data**3
-
-        if log_bins:
-            data = data[data > 0]
-            bins_edges = np.logspace(np.log10(data.min()), np.log10(data.max()), bins + 1)
-        else:
-            bins_edges = bins
-
-        ax.hist(
-            data,
-            bins=bins_edges,
-            alpha=alpha,
-            label=subset,
-            color=subset_colors.get(subset, "gray"),
-            density=True
-        )
-
-        if key_nearest is not None:
-            data_near = np.array(results[subset][key_nearest], dtype=float)
-            if div_Msun:
-                data_near = data_near / Msun
-            if vol_conv:
-                data_near = 4/3 * np.pi * data_near**3
-            if log_bins:
-                data_near = data_near[data_near > 0]
-            ax.hist(
-                data_near,
-                bins=bins_edges,
-                alpha=0.3,
-                color=subset_colors.get(subset, "gray"),
-                density=False,
-                linestyle='dashed'
-            )
-
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("PDF")
-    ax.legend(fontsize=12)
-
-    if logx:
-        ax.set_xscale("log")
-    if logy:
-        ax.set_yscale("log")
-
-    # Set black outline for all four sides
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_color("black")
-        spine.set_linewidth(1.2)
-
-    # Automatic ticks
-    ax.autoscale(enable=True, axis='both', tight=True)
-    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
-
-    plt.tight_layout()
-    if save_name is not None:
-        plt.savefig(save_name, dpi=150)
-    plt.show()
-    return
-
-
-def generate_SMBHB_population(
-        N_binaries,
-        mass_exp_damp_flag=False,
-        alpha_con=1.21,
-        alpha_z=0,# 0.03, # take out redshift dependence for now
-        m_min=1e7,
-        m_max=1e11,
-        power_law=True,
-        m_c_con=1e9,
-        m_c_z=0.0, #0.11e9, # take out redshift dependence for now
-        z_max=2.0,
-        rng=None,
-        compute_strain=False,
-        n_freq_bins=50
-    ):
-    """
-    Generate a full SMBHB population using popsyn samplers and return a list
-    of dictionaries, one per binary, in the form:
-
-        {
-            'Mc':  chirp mass
-            'f':   GW frequency
-            'D_comov':   comoving distance (Mpc)
-            'ra':  right ascension (radians)
-            'dec': declination (radians)
-            'psi': polarization angle
-            'iota': inclination
-            'phi0': initial GW phase
-        }
-
-    All popsyn mass/frequency/distance sampling is included inside this wrapper.
-
-    Parameters
-    ----------
-    N_binaries : int
-        Number of SMBHBs to sample.
-    popsyn : module
-        Your population synthesis module (with f_sampler, dist_sampler, etc.).
-    nb : module
-        Your numba-threading helper for seeds.
-    mass_exp_damp_flag : bool
-        Whether to use the exponential-damped mass sampler.
-    compute_strain : bool
-        If True, also compute strain and return binned h_c values with individual contributions.
-    n_freq_bins : int
-        Number of frequency bins for strain calculation (if compute_strain=True).
-    The rest are passed to your popsyn mass samplers.
-
+    n_binaries : int
+        Number of SMBHBs to generate
+    z_max : float, optional
+        Maximum redshift for population (default: 2.0)
+    mass_distribution : str, optional
+        Mass distribution model:
+        - 'power_law': Simple power law M^(-α)
+        - 'exponential_damping': M^(-α) * exp(-M/M_c)
+        (default: 'power_law')
+    alpha_0 : float, optional
+        Power law index at z=0 (default: 1.21)
+    alpha_z : float, optional
+        Redshift evolution of power law (default: 0.0)
+    mass_min : float, optional
+        Minimum black hole mass [M_sun] (default: 10^7)
+    mass_max : float, optional
+        Maximum black hole mass [M_sun] (default: 10^11)
+    mass_cutoff_0 : float, optional
+        Exponential cutoff mass at z=0 [M_sun] (default: 10^9)
+        Only used if mass_distribution='exponential_damping'
+    mass_cutoff_z : float, optional
+        Redshift evolution of cutoff mass (default: 0.0)
+    compute_strain : bool, optional
+        If True, compute characteristic strain spectrum (default: False)
+    n_freq_bins : int, optional
+        Number of frequency bins for strain calculation (default: 50)
+    random_seed : int, optional
+        Random seed for reproducibility (default: None)
+        
     Returns
     -------
     population : list of dict
-        Each entry is an SMBHB parameter dictionary.
-    strain_data : dict (only if compute_strain=True)
-        Dictionary containing:
-            'bin_centres': frequency bin centers
-            'h_c_total': total characteristic strain per bin
-            'h_square_individual': h^2 for each binary
-            'bin_assignment': which bin each binary belongs to
-            'h_c_individual': individual h_c contribution for each binary
-    """
-
-    # RNG ------------------------------------------------------------
-    if rng is None:
-        rng = np.random.default_rng()
-
-    # comoving cutoff
-    dmax = comov_dist_fn(z=z_max)
-
-    # threads + seeds for your f_sampler
-    n_threads = nb.get_num_threads()
-    seeds = rng.integers(0, 2**32 - 1, size=n_threads)
-
-    # ------------------------------------------------------------
-    # SAMPLE POPULATION FROM POPSYN
-    # ------------------------------------------------------------
-
-    # frequencies
-    fGW = f_sampler(N_binaries=N_binaries, seeds=seeds)
-
-    # (comoving D, luminosity distance, redshift)
-    dist, lum_dist, z = dist_sampler(N_binaries, dmax=dmax)
-
-    # masses
-    if mass_exp_damp_flag:
-        mass = mass_sampler_exp_damp(
-            N_binaries=N_binaries, z_array=z,
-            alpha_con=alpha_con, alpha_z=alpha_z,
-            m_min=m_min, m_max=m_max,
-            power_law=power_law,
-            m_c_con=m_c_con, m_c_z=m_c_z
-        )
-    else:
-        mass = mass_sampler(
-            N_binaries, z,
-            alpha_con, alpha_z,
-            m_min, m_max
-        )
-
-    # convert mass → (total mass, chirp mass)
-    tot_mass, chirp_mass = q_sampler(N_binaries, mass)
-
-    # ------------------------------------------------------------
-    # RANDOM ORIENTATION / ANGLES (vectorized)
-    # ------------------------------------------------------------
-
-    gw_ra  = rng.uniform(0, 2*np.pi, size=N_binaries)
-    gw_dec = np.arcsin(rng.uniform(-1, 1, size=N_binaries))
-    psi    = rng.uniform(0, np.pi, size=N_binaries)
-    iota   = rng.uniform(0, np.pi, size=N_binaries)
-    phi0   = rng.uniform(0, 2*np.pi, size=N_binaries)
-
-    # ------------------------------------------------------------
-    # STRAIN CALCULATION (optional)
-    # ------------------------------------------------------------
-    strain_data = None
-    if compute_strain:
-        # Compute h^2 for each binary
-        h_square_circ = compute_h_square_circ_nb(fGW, chirp_mass, dist, z)
+        List of binary parameter dictionaries, each containing:
+        - 'Mc': chirp mass [M_sun]
+        - 'Mtot': total mass [M_sun]
+        - 'f': GW frequency [Hz]
+        - 'D_comov': comoving distance [Mpc]
+        - 'z': redshift
+        - 'ra': right ascension [radians]
+        - 'dec': declination [radians]
+        - 'psi': polarization angle [radians]
+        - 'iota': inclination angle [radians]
+        - 'phi0': initial GW phase [radians]
         
-        # Bin the strain contributions
-        bin_centres, h_c_total, h_c_contrib = bin_h_c_nb(fGW, h_square_circ, n_freq_bins)
+        If compute_strain=True, also includes:
+        - 'h_square': squared strain h²
+        - 'h_c_contrib': individual contribution to h_c
+        - 'freq_bin': frequency bin assignment
+        
+    strain_data : dict (only if compute_strain=True)
+        Contains:
+        - 'bin_centres': frequency bin centers [Hz]
+        - 'h_c_total': total characteristic strain per bin
+        - 'h_square_individual': h² for each binary
+        - 'bin_assignment': frequency bin for each binary
+        - 'h_c_individual': h_c contribution for each binary
+        - 'bin_edges': frequency bin edges [Hz]
+        
+    Examples
+    --------
+    Generate a simple population:
+    
+    >>> pop = generate_smbhb_population(
+    ...     n_binaries=10000,
+    ...     z_max=1.0,
+    ...     mass_distribution='power_law'
+    ... )
+    
+    Generate population with strain calculation:
+    
+    >>> pop, strain = generate_smbhb_population(
+    ...     n_binaries=10000,
+    ...     compute_strain=True,
+    ...     n_freq_bins=100
+    ... )
+    >>> print(f"Peak h_c: {strain['h_c_total'].max():.2e}")
+    
+    Notes
+    -----
+    The population synthesis includes:
+    1. Frequency sampling weighted by time-in-band (f^(-11/3))
+    2. Distance sampling uniform in comoving volume
+    3. Mass sampling from specified distribution
+    4. Random sky positions and orientations
+    5. Optional strain calculation for circular orbits
+    
+    For references on the astrophysical models, see:
+    - Sesana et al. (2008) for mass functions
+    - Ravi et al. (2014) for GW background modeling
+    """
+    
+    # Initialize random number generator
+    if random_seed is not None:
+        np.random.seed(random_seed)
+    rng = np.random.default_rng(random_seed)
+    
+    # ========================================================================
+    # STEP 1: Sample frequencies
+    # ========================================================================
+    
+    # Generate random seeds for parallel frequency sampling
+    n_threads = nb.get_num_threads()
+    thread_seeds = rng.integers(0, 2**32 - 1, size=n_threads)
+    
+    gw_frequencies = sample_gw_frequencies(n_binaries, thread_seeds)
+    
+    # ========================================================================
+    # STEP 2: Sample distances and redshifts
+    # ========================================================================
+    
+    distance_max = COMOVING_DISTANCE_FN(z_max)
+    
+    comoving_dist, luminosity_dist, redshift = sample_comoving_distances(
+        n_binaries, 
+        distance_max
+    )
+    
+    # ========================================================================
+    # STEP 3: Sample masses
+    # ========================================================================
+    
+    if mass_distribution == 'exponential_damping':
+        primary_masses = sample_masses_exponential_damping(
+            n_binaries, redshift,
+            mass_cutoff_0=mass_cutoff_0,
+            mass_cutoff_z=mass_cutoff_z,
+            alpha_0=alpha_0,
+            alpha_z=alpha_z,
+            mass_min=mass_min,
+            mass_max=mass_max,
+            use_pure_power_law=False
+        )
+    else:  # 'power_law'
+        primary_masses = sample_masses_power_law(
+            n_binaries, redshift,
+            alpha_0=alpha_0,
+            alpha_z=alpha_z,
+            mass_min=mass_min,
+            mass_max=mass_max
+        )
+    
+    # ========================================================================
+    # STEP 4: Sample mass ratios and compute chirp masses
+    # ========================================================================
+    
+    total_masses, chirp_masses = sample_mass_ratios_and_compute_chirp_mass(
+        n_binaries, 
+        primary_masses
+    )
+    
+    # ========================================================================
+    # STEP 5: Sample sky positions and orientations
+    # ========================================================================
+    
+    # Right ascension: uniform on [0, 2π]
+    right_ascension = rng.uniform(0, 2*np.pi, size=n_binaries)
+    
+    # Declination: uniform on sphere → sample sin(dec) uniformly
+    declination = np.arcsin(rng.uniform(-1, 1, size=n_binaries))
+    
+    # Polarization angle: uniform on [0, π]
+    polarization = rng.uniform(0, np.pi, size=n_binaries)
+    
+    # Inclination angle: uniform on [0, π]
+    inclination = rng.uniform(0, np.pi, size=n_binaries)
+    
+    # Initial GW phase: uniform on [0, 2π]
+    initial_phase = rng.uniform(0, 2*np.pi, size=n_binaries)
+    
+    # ========================================================================
+    # STEP 6: Compute strain (optional)
+    # ========================================================================
+    
+    strain_data = None
+    
+    if compute_strain:
+        # Compute h² for each binary (circular orbits)
+        h_squared = compute_characteristic_strain_squared_circular(
+            gw_frequencies, 
+            chirp_masses, 
+            comoving_dist, 
+            redshift
+        )
+        
+        # Bin into frequency bins and compute h_c
+        bin_centres, h_c_total, h_c_individual = bin_characteristic_strain(
+            gw_frequencies, 
+            h_squared, 
+            n_freq_bins,
+            T_obs=T_obs
+        )
         
         # Find which bin each binary belongs to
-        f_min = np.min(fGW)
-        f_max = np.max(fGW)
+        f_min = np.min(gw_frequencies)
+        f_max = np.max(gw_frequencies)
         bin_edges = np.logspace(np.log10(f_min), np.log10(f_max), n_freq_bins+1)
-        bin_assignment = np.digitize(fGW, bin_edges) - 1
+        bin_assignment = np.digitize(gw_frequencies, bin_edges) - 1
         bin_assignment = np.clip(bin_assignment, 0, n_freq_bins-1)
         
         strain_data = {
             'bin_centres': bin_centres,
             'h_c_total': h_c_total,
-            'h_square_individual': h_square_circ,
+            'h_square_individual': h_squared,
             'bin_assignment': bin_assignment,
-            'h_c_individual': h_c_contrib,
+            'h_c_individual': h_c_individual,
             'bin_edges': bin_edges
         }
-
-    # ------------------------------------------------------------
-    # ASSEMBLE LIST OF DICTIONARIES
-    # ------------------------------------------------------------
+    
+    # ========================================================================
+    # STEP 7: Assemble population catalog
+    # ========================================================================
+    
     population = []
-
-    for i in range(N_binaries):
-        pop_dict = {
-            'Mc':   chirp_mass[i],
-            'f':    fGW[i],
-            'D_comov':    dist[i],   # comoving distance
-            'z':    z[i],
-            'ra':   gw_ra[i],
-            'dec':  gw_dec[i],
-            'psi':  psi[i],
-            'iota': iota[i],
-            'phi0': phi0[i],
-            'Mtot': tot_mass[i]
+    
+    for i in range(n_binaries):
+        binary_params = {
+            'Mc': chirp_masses[i],
+            'Mtot': total_masses[i],
+            'f': gw_frequencies[i],
+            'D_comov': comoving_dist[i],
+            'z': redshift[i],
+            'ra': right_ascension[i],
+            'dec': declination[i],
+            'psi': polarization[i],
+            'iota': inclination[i],
+            'phi0': initial_phase[i]
         }
         
-        # Add strain info if computed
+        # Add strain information if computed
         if compute_strain:
-            pop_dict['h_square'] = h_square_circ[i]
-            pop_dict['h_c_contrib'] = h_c_contrib[i]
-            pop_dict['freq_bin'] = bin_assignment[i]
+            binary_params['h_square'] = h_squared[i]
+            binary_params['h_c_contrib'] = h_c_individual[i]
+            binary_params['freq_bin'] = bin_assignment[i]
         
-        population.append(pop_dict)
-
+        population.append(binary_params)
+    
+    # ========================================================================
+    # Return results
+    # ========================================================================
+    
     if compute_strain:
         return population, strain_data
     else:
         return population
+
+
+# ============================================================================
+# UTILITY FUNCTIONS (Plotting, etc.)
+# ============================================================================
+
+def plot_population_histogram(
+    populations_dict,
+    parameter_key,
+    xlabel="",
+    logx=False,
+    logy=False,
+    n_bins=30,
+    normalize=True,
+    figsize=(6.5, 3.25),
+    save_path=None
+):
+    """
+    Plot histogram comparing multiple populations.
+    
+    Parameters
+    ----------
+    populations_dict : dict
+        Dictionary of {label: population_list} where each population_list
+        is the output from generate_smbhb_population()
+    parameter_key : str
+        Which parameter to plot (e.g., 'Mc', 'f', 'z', 'D_comov')
+    xlabel : str, optional
+        X-axis label
+    logx, logy : bool, optional
+        Use log scale for x/y axis (default: False)
+    n_bins : int, optional
+        Number of histogram bins (default: 30)
+    normalize : bool, optional
+        Normalize histogram to PDF (default: True)
+    figsize : tuple, optional
+        Figure size (default: (6.5, 3.25))
+    save_path : str, optional
+        Path to save figure (default: None, don't save)
+        
+    Examples
+    --------
+    >>> pop1 = generate_smbhb_population(10000, mass_distribution='power_law')
+    >>> pop2 = generate_smbhb_population(10000, mass_distribution='exponential_damping')
+    >>> 
+    >>> plot_population_histogram(
+    ...     {'Power Law': pop1, 'Exp. Damping': pop2},
+    ...     parameter_key='Mc',
+    ...     xlabel='Chirp Mass [M$_\\odot$]',
+    ...     logx=True
+    ... )
+    """
+    import matplotlib.pyplot as plt
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Color scheme
+    colors = {'Power Law': '#1f77b4', 'Exponential Damping': '#2ca02c'}
+    
+    for label, population in populations_dict.items():
+        # Extract parameter values
+        values = np.array([binary[parameter_key] for binary in population])
+        
+        # Plot histogram
+        ax.hist(
+            values,
+            bins=n_bins if not logx else np.logspace(np.log10(values.min()), 
+                                                     np.log10(values.max()), 
+                                                     n_bins),
+            alpha=0.6,
+            label=label,
+            color=colors.get(label, None),
+            density=normalize,
+            histtype='stepfilled'
+        )
+    
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Probability Density" if normalize else "Count")
+    ax.legend()
+    
+    if logx:
+        ax.set_xscale('log')
+    if logy:
+        ax.set_yscale('log')
+    
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    
+    plt.show()
+
+
+if __name__ == "__main__":
+    """
+    Example usage and basic tests.
+    """
+    print("=" * 70)
+    print("SMBHB Population Synthesis - Example")
+    print("=" * 70)
+    
+    # Generate a small test population
+    print("\nGenerating population of 1000 SMBHBs...")
+    
+    population, strain_data = generate_smbhb_population(
+        n_binaries=1000,
+        z_max=2.0,
+        mass_distribution='power_law',
+        compute_strain=True,
+        n_freq_bins=50,
+        random_seed=42
+    )
+    
+    print(f"✓ Generated {len(population)} binaries")
+    
+    # Print summary statistics
+    chirp_masses = np.array([b['Mc'] for b in population])
+    frequencies = np.array([b['f'] for b in population])
+    redshifts = np.array([b['z'] for b in population])
+    
+    print("\nPopulation Statistics:")
+    print(f"  Chirp mass: {chirp_masses.min()/1e9:.2f} - {chirp_masses.max()/1e9:.2f} × 10⁹ M☉")
+    print(f"  Frequency:  {frequencies.min()*1e9:.2f} - {frequencies.max()*1e9:.2f} nHz")
+    print(f"  Redshift:   {redshifts.min():.3f} - {redshifts.max():.3f}")
+    
+    print("\nStrain Spectrum:")
+    peak_idx = np.argmax(strain_data['h_c_total'])
+    print(f"  Peak h_c:    {strain_data['h_c_total'][peak_idx]:.2e}")
+    print(f"  Peak freq:   {strain_data['bin_centres'][peak_idx]*1e9:.2f} nHz")
+    
+    print("\n" + "=" * 70)

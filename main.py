@@ -115,27 +115,6 @@ def main():
     if toggle_memory_profiling:
         log_memory("Start")
     
-    # ========== SETUP ==========
-    print("\n" + "="*70)
-    print("SMBHB POPULATION ANALYSIS")
-    print("="*70)
-    
-    # Load SMBHB module
-    smbhb_module = config.load_smbhb_module()
-    
-    # Select configuration
-    CONFIG_NAME = args.config
-    selected_config = config.POPULATION_CONFIGS[CONFIG_NAME]
-    
-    print(f"\nConfiguration: {CONFIG_NAME}")
-    print(f"  {selected_config['description']}")
-    print(f"  N_binaries: {selected_config['N_binaries']}")
-    
-    # Generate population
-    print("\n📊 Generating sample SMBHB population...")
-    population = config.generate_population(selected_config, smbhb_module)
-    print_population_diagnostics(population)
-    
     # ========== LOAD PULSARS ==========
     print("\n📡 Loading pulsars...")
     psrs = load_pulsars(verbose=True)
@@ -158,6 +137,27 @@ def main():
     gc.collect()
     if toggle_memory_profiling:
         log_memory("After garbage collection")
+
+    # ========== SETUP ==========
+    print("\n" + "="*70)
+    print("SMBHB POPULATION ANALYSIS")
+    print("="*70)
+    
+    # Load SMBHB module
+    smbhb_module = config.load_smbhb_module()
+    
+    # Select configuration
+    CONFIG_NAME = args.config
+    selected_config = config.POPULATION_CONFIGS[CONFIG_NAME]
+    
+    print(f"\nConfiguration: {CONFIG_NAME}")
+    print(f"  {selected_config['description']}")
+    print(f"  N_binaries: {selected_config['N_binaries']}")
+    
+    # Generate population
+    print("\n📊 Generating sample SMBHB population...")
+    population = config.generate_population(selected_config, smbhb_module, T_obs_years=Tspan/(365.25*86400))
+    print_population_diagnostics(population)
     
     # ========== INITIAL INJECTION (OPTIONAL) ==========
     if config.RUN_INITIAL_INJECTION_ANALYSIS:
@@ -324,7 +324,7 @@ def main():
     print("="*70)
 
     if config.OPTIMAL_SNR_POPULATION:
-        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True)
+        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_years=Tspan/(365.25*86400))
         
         selected_population, N_needed, final_SNR = find_N_needed_for_target_SNR_optimized(
             population, strain_data, psrs_clean, pulsar_noise_params,

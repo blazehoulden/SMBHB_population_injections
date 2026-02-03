@@ -12,7 +12,7 @@ import pathos
 
 
 # Constants
-h = 0.7
+h = 0.67
 omega_M = 0.3
 omega_L = 0.7
 H0 = 100 * h # km/s/Mpc
@@ -278,6 +278,7 @@ def q_sampler(N_binaries, tot_mass_array, simple=False):
 # TOTAL CHARACTERISTIC STRAIN
 @nb.njit(parallel=True)
 def compute_h_square_circ_nb(fGW, chirp_mass, dist, z):
+    # calculate the RMS strain averaged over orbital orientations
     N = fGW.size
     h2 = np.empty(N, dtype=np.float64)
     const = 32.0 / (5.0 * c_ms**8)
@@ -289,6 +290,7 @@ def compute_h_square_circ_nb(fGW, chirp_mass, dist, z):
 # --- Helper: bin h^2 and compute h_c_total and per-binary contribution ---
 @nb.njit
 def bin_h_c_nb(fGW, h_square_circ, n_freq_bins):
+    # calculate the characteristic strain spectrum of population
     f_min = np.min(fGW)
     f_max = np.max(fGW)
     bin_edges = np.logspace(np.log10(f_min), np.log10(f_max), n_freq_bins+1)
@@ -346,7 +348,7 @@ def h_circ(N_binaries, diagnostics=False, n_freq_bins=50,
     if reduce_mass:
         chirp_mass *= 0.1
 
-    # --- h^2 computation ---
+    # --- h^2 computation - RMS strain ---
     h_square_circ = compute_h_square_circ_nb(fGW, chirp_mass, dist, z)
 
     # --- Bin h^2 ---
@@ -626,7 +628,9 @@ def generate_SMBHB_population(
         m_c_con=1e9,
         m_c_z=0.0, #0.11e9, # take out redshift dependence for now
         z_max=2.0,
-        rng=None
+        rng=None,
+        compute_strain=False,
+        n_freq_bins=50
     ):
     """
     Generate a full SMBHB population using popsyn samplers and return a list
@@ -636,7 +640,6 @@ def generate_SMBHB_population(
             'Mc':  chirp mass
             'f':   GW frequency
             'D_comov':   comoving distance (Mpc)
-            'z':   redshift
             'ra':  right ascension (radians)
             'dec': declination (radians)
             'psi': polarization angle
@@ -656,12 +659,23 @@ def generate_SMBHB_population(
         Your numba-threading helper for seeds.
     mass_exp_damp_flag : bool
         Whether to use the exponential-damped mass sampler.
+    compute_strain : bool
+        If True, also compute strain and return binned h_c values with individual contributions.
+    n_freq_bins : int
+        Number of frequency bins for strain calculation (if compute_strain=True).
     The rest are passed to your popsyn mass samplers.
 
     Returns
     -------
     population : list of dict
         Each entry is an SMBHB parameter dictionary.
+    strain_data : dict (only if compute_strain=True)
+        Dictionary containing:
+            'bin_centres': frequency bin centers
+            'h_c_total': total characteristic strain per bin
+            'h_square_individual': h^2 for each binary
+            'bin_assignment': which bin each binary belongs to
+            'h_c_individual': individual h_c contribution for each binary
     """
 
     # RNG ------------------------------------------------------------
@@ -715,15 +729,42 @@ def generate_SMBHB_population(
     phi0   = rng.uniform(0, 2*np.pi, size=N_binaries)
 
     # ------------------------------------------------------------
+    # STRAIN CALCULATION (optional)
+    # ------------------------------------------------------------
+    strain_data = None
+    if compute_strain:
+        # Compute h^2 for each binary
+        h_square_circ = compute_h_square_circ_nb(fGW, chirp_mass, dist, z)
+        
+        # Bin the strain contributions
+        bin_centres, h_c_total, h_c_contrib = bin_h_c_nb(fGW, h_square_circ, n_freq_bins)
+        
+        # Find which bin each binary belongs to
+        f_min = np.min(fGW)
+        f_max = np.max(fGW)
+        bin_edges = np.logspace(np.log10(f_min), np.log10(f_max), n_freq_bins+1)
+        bin_assignment = np.digitize(fGW, bin_edges) - 1
+        bin_assignment = np.clip(bin_assignment, 0, n_freq_bins-1)
+        
+        strain_data = {
+            'bin_centres': bin_centres,
+            'h_c_total': h_c_total,
+            'h_square_individual': h_square_circ,
+            'bin_assignment': bin_assignment,
+            'h_c_individual': h_c_contrib,
+            'bin_edges': bin_edges
+        }
+
+    # ------------------------------------------------------------
     # ASSEMBLE LIST OF DICTIONARIES
     # ------------------------------------------------------------
     population = []
 
     for i in range(N_binaries):
-        population.append({
+        pop_dict = {
             'Mc':   chirp_mass[i],
             'f':    fGW[i],
-            'D_comov': dist[i],   # comoving distance
+            'D_comov':    dist[i],   # comoving distance
             'z':    z[i],
             'ra':   gw_ra[i],
             'dec':  gw_dec[i],
@@ -731,6 +772,17 @@ def generate_SMBHB_population(
             'iota': iota[i],
             'phi0': phi0[i],
             'Mtot': tot_mass[i]
-        })
+        }
+        
+        # Add strain info if computed
+        if compute_strain:
+            pop_dict['h_square'] = h_square_circ[i]
+            pop_dict['h_c_contrib'] = h_c_contrib[i]
+            pop_dict['freq_bin'] = bin_assignment[i]
+        
+        population.append(pop_dict)
 
-    return population
+    if compute_strain:
+        return population, strain_data
+    else:
+        return population
