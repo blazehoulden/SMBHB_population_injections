@@ -621,7 +621,7 @@ def compute_characteristic_strain_squared_circular(
     
     For a circular binary at frequency f and chirp mass Mc:
     
-        h² = (32/5) * (G*Mc)^(10/3) / (c^8 * D²) * (2π * f_rest)^(4/3)
+        h² = (32/5) * (G*Mc)^(10/3) / (c^8 * D_comov²) * (2π * f_rest)^(4/3)
     
     where f_rest = (1+z) * f_obs / 2 is the rest-frame orbital frequency.
     
@@ -644,8 +644,7 @@ def compute_characteristic_strain_squared_circular(
         
     Notes
     -----
-    This is the RMS strain averaged over all orientations:
-        <F²> = 4/5  (orientation average)
+    This is the RMS strain averaged over all orientations.
     
     The factor 32/5 includes this averaging and other numerical constants
     from Peters & Mathews (1963).
@@ -665,13 +664,13 @@ def compute_characteristic_strain_squared_circular(
         
         # Convert to SI units
         Mc_SI = chirp_masses[i] * SOLAR_MASS_KG
-        D_SI = comoving_distances[i] * MEGAPARSEC_IN_METERS
+        D__COMOV_SI = comoving_distances[i] * MEGAPARSEC_IN_METERS
         
         # h² formula for circular orbits
         if inclination_angle is None:
             # Orientation-averaged strain
             h_squared[i] = const * \
-                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D_SI**2 * \
+                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
                         (2.0 * np.pi * f_rest_orbital)**(4.0/3.0)
         else: 
             # Polarization contribution
@@ -680,7 +679,7 @@ def compute_characteristic_strain_squared_circular(
             b = -2.0 * np.cos(i_loc)
             MeanAng = np.sqrt(0.5 * (a**2 + b**2))
             h_squared[i] = const * MeanAng**2 \
-                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D_SI**2 * \
+                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
                         (2.0 * np.pi * f_rest_orbital)**(4.0/3.0) 
     
     return h_squared

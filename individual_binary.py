@@ -46,7 +46,7 @@ def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
             'residual_amplitude_us': r_amp * 1e6,
             'frequency_nHz': binary['f'] * 1e9,
             'chirp_mass_Msun': binary['Mc'] / Msun,
-            'distance_Mpc': binary['D'],
+            'comoving_distance_Mpc': binary['D_comov'],
             'ra_deg': np.degrees(binary['ra']),
             'dec_deg': np.degrees(binary['dec']),
             'mean_rho': np.mean(rho),
@@ -69,7 +69,11 @@ def analyze_individual_binaries(population, psrs_clean, noise_params_15yr, Tspan
     print(f"Analyzing top {N_analyze} binaries by strain amplitude...")
     
     # Pre-screen by strain
-    h0_values = [strain_amplitude(b['Mc'], b['f'], b['D']) for b in population]
+    lum_dist = np.array([b['D_comov'] for b in population])
+    lum_dist *= (1 + np.array([b['z'] for b in population]))
+    h0_values = []
+    for b, d_L in zip(population, lum_dist):
+        h0_values.append(strain_amplitude(b['Mc'], b['f'], d_L))
     top_indices = np.argsort(h0_values)[::-1][:N_analyze]
     
     results = []

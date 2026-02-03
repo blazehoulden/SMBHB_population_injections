@@ -635,7 +635,8 @@ def generate_SMBHB_population(
         {
             'Mc':  chirp mass
             'f':   GW frequency
-            'D':   luminosity distance (Mpc)
+            'D_comov':   comoving distance (Mpc)
+            'z':   redshift
             'ra':  right ascension (radians)
             'dec': declination (radians)
             'psi': polarization angle
@@ -722,7 +723,8 @@ def generate_SMBHB_population(
         population.append({
             'Mc':   chirp_mass[i],
             'f':    fGW[i],
-            'D':    lum_dist[i],   # luminosity distance
+            'D_comov': dist[i],   # comoving distance
+            'z':    z[i],
             'ra':   gw_ra[i],
             'dec':  gw_dec[i],
             'psi':  psi[i],

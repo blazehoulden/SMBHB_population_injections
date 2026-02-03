@@ -183,7 +183,7 @@ def print_binary_statistics(df, top_n=10):
         print(f"  Strain: h₀ = {row['h_0']:.2e}")
         print(f"  Residual: {row['residual_amplitude_us']:.2f} μs")
         print(f"  Chirp mass: {row['chirp_mass_Msun']:.2e} M☉")
-        print(f"  Distance: {row['distance_Mpc']:.1f} Mpc")
+        print(f"  Comoving distance: {row['comoving_distance_Mpc']:.1f} Mpc")
         print(f"  Frequency: {row['frequency_nHz']:.3f} nHz")
         print(f"  Sky: RA={row['ra_deg']:.1f}°, Dec={row['dec_deg']:.1f}°")
         print(f"  Nearest pulsar: {row['min_psr_separation_deg']:.1f}° away")
@@ -210,7 +210,7 @@ def print_binary_statistics(df, top_n=10):
     
     print(f"\nCorrelations with |SNR|:")
     print(f"  vs h₀: {df['abs_SNR'].corr(df['h_0']):.3f}")
-    print(f"  vs Distance: {df['abs_SNR'].corr(df['distance_Mpc']):.3f}")
+    print(f"  vs Comoving Distance: {df['abs_SNR'].corr(df['comoving_distance_Mpc']):.3f}")
     print(f"  vs Chirp Mass: {df['abs_SNR'].corr(df['chirp_mass_Msun']):.3f}")
     print(f"  vs Nearest Pulsar Sep: {df['abs_SNR'].corr(df['min_psr_separation_deg']):.3f}")
     print(f"{'='*80}\n")
@@ -339,7 +339,7 @@ def plot_individual_binaries(df, psrs_injected, top_N=50):
     ax4 = fig.add_subplot(gs[1, 1])
     scatter4 = ax4.scatter(
         df['chirp_mass_Msun'],
-        df['distance_Mpc'],
+        df['comoving_distance_Mpc'],
         c=df['SNR'],
         s=100,
         alpha=0.6,
@@ -347,7 +347,7 @@ def plot_individual_binaries(df, psrs_injected, top_N=50):
         edgecolors='none'
     )
     ax4.set_xlabel('Chirp Mass (M☉)', fontsize=11, fontweight='bold')
-    ax4.set_ylabel('Distance (Mpc)', fontsize=11, fontweight='bold')
+    ax4.set_ylabel('Comoving Distance (Mpc)', fontsize=11, fontweight='bold')
     ax4.set_title('Mass-Distance Distribution', fontsize=12, fontweight='bold')
     ax4.set_xscale('log')
     ax4.set_yscale('log')
@@ -404,7 +404,7 @@ def plot_individual_binaries(df, psrs_injected, top_N=50):
     # ==========================================================================
     ax7 = fig.add_subplot(gs[2, 1])
     scatter7 = ax7.scatter(
-        df['distance_Mpc'],
+        df['comoving_distance_Mpc'],
         df['h_0'],
         c=df['min_psr_separation_deg'],
         s=60,
@@ -412,7 +412,7 @@ def plot_individual_binaries(df, psrs_injected, top_N=50):
         cmap='coolwarm',
         edgecolors='none'
     )
-    ax7.set_xlabel('Distance (Mpc)', fontsize=11, fontweight='bold')
+    ax7.set_xlabel('Comoving Distance (Mpc)', fontsize=11, fontweight='bold')
     ax7.set_ylabel('Strain h₀', fontsize=11, fontweight='bold')
     ax7.set_title('Distance vs Strain (color = pulsar sep)', fontsize=12, fontweight='bold')
     ax7.set_xscale('log')
@@ -420,10 +420,10 @@ def plot_individual_binaries(df, psrs_injected, top_N=50):
     setup_ticks(ax7, logx=True, logy=True)
     
     # Add 1/D reference
-    D_range = np.logspace(np.log10(df['distance_Mpc'].min()), 
-                          np.log10(df['distance_Mpc'].max()), 100)
-    h0_ref = df['h_0'].median() * df['distance_Mpc'].median() / D_range
-    ax7.plot(D_range, h0_ref, 'k--', linewidth=1.5, alpha=0.6, label=r'$\propto 1/D$')
+    D_range = np.logspace(np.log10(df['comoving_distance_Mpc'].min()), 
+                          np.log10(df['comoving_distance_Mpc'].max()), 100)
+    h0_ref = df['h_0'].median() * df['comoving_distance_Mpc'].median() / D_range
+    ax7.plot(D_range, h0_ref, 'k--', linewidth=1.5, alpha=0.6, label=r'$\propto 1/D_{\rm{comov}}$')
     ax7.legend(fontsize=9)
     cbar7 = plt.colorbar(scatter7, ax=ax7, label='Nearest Psr (deg)')
     
