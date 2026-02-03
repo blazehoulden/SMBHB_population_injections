@@ -3,10 +3,10 @@ from copy import deepcopy
 from config import c, G, Msun, pc
 
 
-def strain_amplitude(Mc, f, D):
+def strain_amplitude(Mc, f, D_luminosity):
     """Calculate characteristic strain amplitude for circular binary."""
-    D_si = D * 1e6 * pc
-    return (2 * (G * Mc)**(5/3) * (np.pi * f)**(2/3)) / (c**4 * D_si)
+    D_lum_si = D_luminosity * 1e6 * pc
+    return (2 * (G * Mc)**(5/3) * (np.pi * f)**(2/3)) / (c**4 * D_lum_si)
 
 
 def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi):
@@ -41,13 +41,15 @@ def r_k(t, psr, binary):
     """Calculate timing residual from single circular SMBHB (Earth term only)."""
     f = binary['f']
     Mc = binary['Mc']
-    D = binary['D']
+    D_comov = binary['D_comov']
+    z = binary['z']
+    D_lum = D_comov * (1 + z) # in Mpc
     ra = binary['ra']
     dec = binary['dec']
     psi = binary.get('psi', 0.0)
     phi0 = binary.get('phi0', 0.0)
 
-    h0 = strain_amplitude(Mc, f, D)
+    h0 = strain_amplitude(Mc, f, D_lum)
     ra_psr = psr._raj
     dec_psr = psr._decj
     Fp, Fx = antenna_response(ra_psr, dec_psr, ra, dec, psi)
@@ -214,15 +216,17 @@ def _vectorised_chunk(t, psr, population):
     # Extract all parameters into arrays (vectorised)
     f_arr = np.array([b['f'] for b in population])
     Mc_arr = np.array([b['Mc'] for b in population])
-    D_arr = np.array([b['D'] for b in population])
+    D_comov_arr = np.array([b['D_comov'] for b in population])
+    z_arr = np.array([b['z'] for b in population])
+    D_lum_arr = D_comov_arr * (1 + z_arr)  # in Mpc
     ra_arr = np.array([b['ra'] for b in population])
     dec_arr = np.array([b['dec'] for b in population])
     psi_arr = np.array([b.get('psi', 0.0) for b in population])
     phi0_arr = np.array([b.get('phi0', 0.0) for b in population])
     
     # Compute strain amplitudes (vectorised)
-    D_si = D_arr * 1e6 * pc
-    h0_arr = (2 * (G * Mc_arr)**(5/3) * (np.pi * f_arr)**(2/3)) / (c**4 * D_si)
+    D_lum_si = D_lum_arr * 1e6 * pc
+    h0_arr = (2 * (G * Mc_arr)**(5/3) * (np.pi * f_arr)**(2/3)) / (c**4 * D_lum_si)
     
     # Compute antenna responses (vectorised)
     ra_psr = psr._raj

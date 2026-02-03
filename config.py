@@ -12,7 +12,7 @@ pc = 3.085677581e16   # Parsec [m]
 # Population configuration presets
 POPULATION_CONFIGS = {
     'optimistic': {
-        'N_binaries': 2_000,
+        'N_binaries': 10_000,
         'mass_exp_damp_flag': False,
         'power_law': True,
         'm_c_con': 1e9,
@@ -61,7 +61,8 @@ RUN_SCALING_ANALYSIS = False
 RUN_INDIVIDUAL_BINARY_ANALYSIS = False
 RUN_ENSEMBLE_ANALYSIS = False
 RUN_NG_RG_COMPARISON = False
-RUN_CONSISTENT_POP_SYNTH = True
+RUN_CONSISTENT_POP_SYNTH = False
+OPTIMAL_SNR_POPULATION = True
 
 # Memory profiling
 MEMORY_PROFILE_ENABLED = True
@@ -79,25 +80,49 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module):
+def generate_population(config, smbhb_module, compute_strain=False):
     """Generate SMBHB population with given configuration."""
-    population = smbhb_module.generate_SMBHB_population(
-        N_binaries=config['N_binaries'],
-        mass_exp_damp_flag=config['mass_exp_damp_flag'],
-        alpha_con=1.21,
-        alpha_z=0.03,
-        m_min=1e7,
-        m_max=1e11,
-        power_law=config['power_law'],
-        m_c_con=config['m_c_con'],
-        m_c_z=0.11e9,
-        z_max=config['z_max'],
-        rng=None
-    )
+    if compute_strain:
+
+        population, strain_data = smbhb_module.generate_SMBHB_population(
+            N_binaries=config['N_binaries'],
+            mass_exp_damp_flag=config['mass_exp_damp_flag'],
+            alpha_con=1.21,
+            alpha_z=0.03,
+            m_min=1e7,
+            m_max=1e11,
+            power_law=config['power_law'],
+            m_c_con=config['m_c_con'],
+            m_c_z=0.11e9,
+            z_max=config['z_max'],
+            compute_strain=compute_strain,
+            rng=None
+        )
+        # Convert masses if needed
+        if max([b['Mc'] for b in population]) < 1e20:
+            for binary in population:
+                binary['Mc'] = binary['Mc'] * Msun
+        return population, strain_data
+    elif not compute_strain:
+        population = smbhb_module.generate_SMBHB_population(
+            N_binaries=config['N_binaries'],
+            mass_exp_damp_flag=config['mass_exp_damp_flag'],
+            alpha_con=1.21,
+            alpha_z=0.03,
+            m_min=1e7,
+            m_max=1e11,
+            power_law=config['power_law'],
+            m_c_con=config['m_c_con'],
+            m_c_z=0.11e9,
+            z_max=config['z_max'],
+            compute_strain=compute_strain,
+            rng=None
+        )
+        strain_data = None
     
-    # Convert masses if needed
-    if max([b['Mc'] for b in population]) < 1e20:
-        for binary in population:
-            binary['Mc'] = binary['Mc'] * Msun
-    
-    return population
+        # Convert masses if needed
+        if max([b['Mc'] for b in population]) < 1e20:
+            for binary in population:
+                binary['Mc'] = binary['Mc'] * Msun
+        
+        return population

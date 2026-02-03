@@ -8,13 +8,14 @@ import os
 from datetime import datetime
 import config
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
-from data_loader import load_pulsars, filter_pulsars_15yr, get_clean_pulsars_and_tspan
+from data_loader import load_pulsars, filter_pulsars_15yr, get_clean_pulsars_and_tspan, parse_pulsar_parameters
 from signal_injection import inject_population_into_psrs
 from pta_builder import build_pta_and_params
 from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
 from memory_profile import log_memory
 from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
+from optimal_SNR_calc import find_N_needed_for_target_SNR_optimized
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, print_population_diagnostics, print_scaling_summary
 import gc
@@ -32,7 +33,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--target-snr", type=float, default=3.75,
+        "--target-snr", type=float, default=4.0,
         help="Target SNR for ensemble/scaling analyses"
     )
 
@@ -150,6 +151,8 @@ def main():
     print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan/(365.25*86400):.1f} years")
     if toggle_memory_profiling:
         log_memory("After getting clean pulsars and Tspan")
+
+    pulsar_noise_params = parse_pulsar_parameters(config.NOISEFILE)
 
     # Force garbage collection
     gc.collect()
@@ -298,6 +301,8 @@ def main():
         # Save results
         save_path = os.path.join(save_dir, 'consistent_pop_synth.json')
         save_results(consistent_results, save_path)
+        
+
 
     # ========== NG R&G COMPARISON ==========
     if config.RUN_NG_RG_COMPARISON:
@@ -317,6 +322,32 @@ def main():
     print("ANALYSIS COMPLETE")
     print(f"Results saved to: {save_dir}")
     print("="*70)
+
+    if config.OPTIMAL_SNR_POPULATION:
+        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True)
+        
+        selected_population, N_needed, final_SNR = find_N_needed_for_target_SNR_optimized(
+            population, strain_data, psrs_clean, pulsar_noise_params,
+            target_SNR=args.target_snr, T_obs=Tspan )
+        save_results({
+            'N_needed': N_needed,
+            'final_SNR': final_SNR,
+            'selected_population': selected_population
+        }, os.path.join(save_dir, 'optimal_snr_population.json'))
+
+        from debug_snr import analyze_snr_calculation_complete, diagnose_high_snr
+        results = analyze_snr_calculation_complete(
+            population, 
+            strain_data, 
+            psrs_clean, 
+            pulsar_noise_params, 
+            Tspan,
+            output_file='complete_breakdown.json'
+        )
+        
+        # Then diagnose:
+        diagnose_high_snr('complete_breakdown.json')
+        
 
 
 if __name__ == "__main__":

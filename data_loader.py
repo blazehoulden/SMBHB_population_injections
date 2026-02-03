@@ -2,8 +2,11 @@ import os
 import pickle
 import json
 import numpy as np
+import gc
 from copy import deepcopy
 from enterprise.pulsar import Pulsar
+import sys
+from collections import defaultdict
 from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
 
 
@@ -157,6 +160,7 @@ def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
     return psrs_filtered, params
 
 
+
 def get_clean_pulsars_and_tspan(psrs_filtered):
     """
     Get pulsars and calculate Tspan.
@@ -176,8 +180,121 @@ def get_clean_pulsars_and_tspan(psrs_filtered):
     
     return psrs_filtered, Tspan
 
+
 def restore_original_residuals(psrs):
     """Restore pulsars to original state before next injection."""
     for psr in psrs:
         if hasattr(psr, '_original_residuals'):
             psr._residuals = np.copy(psr._original_residuals)
+    gc.collect()
+
+
+def parse_pulsar_parameters(json_file_path):
+    """
+    Parse pulsar parameters from JSON file.
+    
+    Parameters
+    ----------
+    json_file_path : str
+        Path to the JSON file containing pulsar parameters
+        
+    Returns
+    -------
+    dict
+        Organized pulsar parameters with structure:
+        {
+            'pulsar_name': {
+                'red_noise': {'gamma': float, 'log10_A': float},
+                'white_noise': {
+                    'backend_name': {
+                        'efac': float, 
+                        'log10_ecorr': float, 
+                        'log10_t2equad': float
+                    }
+                }
+            }
+        }
+    
+    Examples
+    --------
+    >>> noise_params = parse_pulsar_parameters('noise_params.json')
+    >>> # Access red noise for a specific pulsar
+    >>> log10_A = noise_params['B1855+09']['red_noise']['log10_A']
+    >>> gamma = noise_params['B1855+09']['red_noise']['gamma']
+    >>> # Access white noise for a specific backend
+    >>> efac = noise_params['B1855+09']['white_noise']['430_ASP']['efac']
+    """
+    # Load the JSON file
+    with open(json_file_path, 'r') as f:
+        data = json.load(f)
+    
+    # Dictionary to store organized parameters
+    pulsar_params = defaultdict(lambda: {'red_noise': {}, 'white_noise': {}})
+    
+    # Process each parameter
+    for key, value in data.items():
+        # Check if this is a red noise parameter
+        if 'red_noise' in key:
+            # Extract pulsar name (everything before '_red_noise')
+            pulsar_name = key.split('_red_noise')[0]
+            
+            # Extract parameter type (gamma or log10_A)
+            if 'gamma' in key:
+                pulsar_params[pulsar_name]['red_noise']['gamma'] = value
+            elif 'log10_A' in key:
+                pulsar_params[pulsar_name]['red_noise']['log10_A'] = value
+        
+        # Otherwise, it's a white noise parameter
+        elif 'efac' in key or 'ecorr' in key or 't2equad' in key:
+            # Identify the parameter type and split point
+            if '_efac' in key:
+                split_idx = key.rfind('_efac')
+                param_type = 'efac'
+            elif '_log10_ecorr' in key:
+                split_idx = key.rfind('_log10_ecorr')
+                param_type = 'log10_ecorr'
+            elif '_log10_t2equad' in key:
+                split_idx = key.rfind('_log10_t2equad')
+                param_type = 'log10_t2equad'
+            else:
+                continue
+            
+            # Everything before the parameter type is pulsar_backend
+            base_key = key[:split_idx]
+            
+            # Now find where pulsar name ends
+            # Pulsar names contain + or - (but not L-wide)
+            parts = base_key.split('_')
+            
+            pulsar_name = None
+            for i, part in enumerate(parts):
+                if '+' in part:
+                    # Found pulsar name ending with +
+                    pulsar_name = '_'.join(parts[:i+1])
+                    backend_name = '_'.join(parts[i+1:])
+                    break
+                elif '-' in part:
+                    # Check if this is L-wide or part of pulsar name
+                    if i > 0 and parts[i-1] == 'L' and part == 'wide':
+                        # This is L-wide, not pulsar name
+                        continue
+                    else:
+                        # This is part of pulsar name (e.g., J0437-4715)
+                        pulsar_name = '_'.join(parts[:i+1])
+                        backend_name = '_'.join(parts[i+1:])
+                        break
+            
+            if pulsar_name is None:
+                # Fallback: first part is pulsar name
+                pulsar_name = parts[0]
+                backend_name = '_'.join(parts[1:])
+            
+            # Initialize backend entry if it doesn't exist
+            if backend_name not in pulsar_params[pulsar_name]['white_noise']:
+                pulsar_params[pulsar_name]['white_noise'][backend_name] = {}
+            
+            # Store the parameter value
+            pulsar_params[pulsar_name]['white_noise'][backend_name][param_type] = value
+    
+    # Convert defaultdict to regular dict for cleaner output
+    return {k: dict(v) for k, v in pulsar_params.items()}

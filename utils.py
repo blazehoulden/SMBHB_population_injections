@@ -20,12 +20,12 @@ def print_population_diagnostics(population):
     
     freqs_Hz = [b['f'] for b in population]
     masses = [b['Mc'] for b in population]
-    distances = [b['D'] for b in population]
+    distances = [b['D_comov'] for b in population]
     
     print(f"\nSize: {len(population)} binaries")
     print(f"Frequency range: {min(freqs_Hz)*1e9:.2f} - {max(freqs_Hz)*1e9:.2f} nHz")
     print(f"Mass range: {min(masses)/Msun:.2e} - {max(masses)/Msun:.2e} M☉")
-    print(f"Distance range: {min(distances):.1f} - {max(distances):.1f} Mpc")
+    print(f"Comoving distance range: {min(distances):.1f} - {max(distances):.1f} Mpc")
     
     # Check detectability
     detectable = sum(1 for b in population if 1e-9 < b['f'] < 1e-7)
