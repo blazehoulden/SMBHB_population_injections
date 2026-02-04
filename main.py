@@ -152,7 +152,7 @@ def main():
     
     print(f"\nConfiguration: {CONFIG_NAME}")
     print(f"  {selected_config['description']}")
-    print(f"  N_binaries: {selected_config['N_binaries']}")
+    print(f"  N_binaries: {selected_config['n_binaries']}")
     
     # Generate population
     print("\n📊 Generating sample SMBHB population...")
@@ -242,9 +242,9 @@ def main():
         print("ENSEMBLE ANALYSIS")
         print("="*70)
         
-        # auto guess: default = 0.5 * N_binaries
+        # auto guess: default = 0.5 * n_binaries
         if args.initial_guess == "auto":
-            N_initial_guess = int(0.5 * selected_config['N_binaries'])
+            N_initial_guess = int(0.5 * selected_config['n_binaries'])
         else:
             N_initial_guess = int(args.initial_guess)
 
@@ -256,12 +256,12 @@ def main():
             SNR_range=(SNR_low, SNR_high),
             n_realisations=args.realisations,
             N_initial_guess=N_initial_guess,
-            N_max_initial=selected_config['N_binaries'] * 3
+            N_max_initial=selected_config['n_binaries'] * 3
         )
         
         if 'statistics' in ensemble_results:
             stats = ensemble_results['statistics']
-            print(f"\nN_binaries statistics:")
+            print(f"\nn_binaries statistics:")
             print(f"  Mean: {stats['mean']:.0f}")
             print(f"  Median: {stats['median']:.0f}")
             print(f"  Std: {stats['std']:.0f}")
@@ -278,9 +278,9 @@ def main():
         
         from consistent_pop_synth import generate_snr_consistent_populations
         
-        # auto guess: default = full N_binaries for consistent pop
+        # auto guess: default = full n_binaries for consistent pop
         if args.initial_guess == "auto":
-            N_initial_guess = int(selected_config['N_binaries'])
+            N_initial_guess = int(selected_config['n_binaries'])
         else:
             N_initial_guess = int(args.initial_guess)
         
@@ -291,7 +291,7 @@ def main():
             SNR_range=(SNR_low, SNR_high),
             N_sims=args.simulations,
             N_initial_guess=N_initial_guess,
-            N_max_initial=selected_config['N_binaries'] * 3,
+            N_max_initial=selected_config['n_binaries'] * 3,
             verbose=True,
             profile=False,
             use_cache=False,
@@ -309,7 +309,7 @@ def main():
         print("\n" + "="*70)
         print("NANOGrav Rohan & Gondor COMPARISON")
         print("="*70)
-        
+        population = consistent_results["populations"]["population"]
         plot_binaries_vs_frequency(
             population, subset_name=run_name,
             candidate_frequencies=[14e-9, 21e-9],
@@ -335,18 +335,18 @@ def main():
             'selected_population': selected_population
         }, os.path.join(save_dir, 'optimal_snr_population.json'))
 
-        from debug_snr import analyze_snr_calculation_complete, diagnose_high_snr
-        results = analyze_snr_calculation_complete(
-            population, 
-            strain_data, 
-            psrs_clean, 
-            pulsar_noise_params, 
-            Tspan,
-            output_file='complete_breakdown.json'
-        )
+        # from debug_snr import analyze_snr_calculation_complete, diagnose_high_snr
+        # results = analyze_snr_calculation_complete(
+        #     population, 
+        #     strain_data, 
+        #     psrs_clean, 
+        #     pulsar_noise_params, 
+        #     Tspan,
+        #     output_file='complete_breakdown.json'
+        # )
         
         # Then diagnose:
-        diagnose_high_snr('complete_breakdown.json')
+        # diagnose_high_snr('complete_breakdown.json')
         
 
 

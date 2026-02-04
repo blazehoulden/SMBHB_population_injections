@@ -12,26 +12,23 @@ pc = 3.085677581e16   # Parsec [m]
 # Population configuration presets
 POPULATION_CONFIGS = {
     'optimistic': {
-        'N_binaries': 10_000,
-        'mass_exp_damp_flag': False,
-        'power_law': True,
-        'm_c_con': 1e9,
+        'n_binaries': 100,
+        'mass_distribution': 'power_law',
+        'mass_cutoff_0': 1e9,
         'z_max': 2.0,
         'description': 'Larger mass, higher spread in distance, small population'
     },
     'realistic': {
-        'N_binaries': 120_000,
-        'mass_exp_damp_flag': True,
-        'power_law': False,
-        'm_c_con': 1e10,
+        'n_binaries': 60_000,
+        'mass_distribution': 'exponential_damping',
+        'mass_cutoff_0': 1e10,
         'z_max': 1.2,
         'description': 'Medium mass, medium spread in distance, medium population'
     },
     'pessimistic': {
-        'N_binaries': 2_000_000,
-        'mass_exp_damp_flag': True,
-        'power_law': False,
-        'm_c_con': 1e9,
+        'n_binaries': 2_000_000,
+        'mass_distribution': 'exponential_damping',
+        'mass_cutoff_0': 1e9,
         'z_max': 1.0,
         'description': 'Lower mass, lower spread in distance, large population'
     }
@@ -60,9 +57,9 @@ RUN_INITIAL_INJECTION_ANALYSIS = False
 RUN_SCALING_ANALYSIS = False
 RUN_INDIVIDUAL_BINARY_ANALYSIS = False
 RUN_ENSEMBLE_ANALYSIS = False
-RUN_NG_RG_COMPARISON = False
-RUN_CONSISTENT_POP_SYNTH = False
-OPTIMAL_SNR_POPULATION = True
+RUN_NG_RG_COMPARISON = True
+RUN_CONSISTENT_POP_SYNTH = True
+OPTIMAL_SNR_POPULATION = False
 
 # Memory profiling
 MEMORY_PROFILE_ENABLED = True
@@ -85,18 +82,18 @@ def generate_population(config, smbhb_module, compute_strain=False, T_obs_years=
     if compute_strain:
 
         population, strain_data = smbhb_module.generate_smbhb_population(
-            N_binaries=config['N_binaries'],
-            mass_exp_damp_flag=config['mass_exp_damp_flag'],
-            alpha_con=1.21,
-            alpha_z=0.03,
-            m_min=1e7,
-            m_max=1e11,
-            power_law=config['power_law'],
-            m_c_con=config['m_c_con'],
-            m_c_z=0.11e9,
+            n_binaries=config['n_binaries'],
             z_max=config['z_max'],
+            mass_distribution=config['mass_distribution'],
+            alpha_0=1.21,
+            alpha_z=0.0,
+            mass_min=1e7,
+            mass_max=1e11,
+            mass_cutoff_0=config['mass_cutoff_0'],
+            mass_cutoff_z=0.0,
             compute_strain=compute_strain,
-            rng=None, 
+            n_freq_bins=50,
+            random_seed=None,
             T_obs=T_obs_years
         )
         # Convert masses if needed
@@ -105,19 +102,19 @@ def generate_population(config, smbhb_module, compute_strain=False, T_obs_years=
                 binary['Mc'] = binary['Mc'] * Msun
         return population, strain_data
     elif not compute_strain:
-        population = smbhb_module.generate_SMBHB_population(
-            N_binaries=config['N_binaries'],
-            mass_exp_damp_flag=config['mass_exp_damp_flag'],
-            alpha_con=1.21,
-            alpha_z=0.03,
-            m_min=1e7,
-            m_max=1e11,
-            power_law=config['power_law'],
-            m_c_con=config['m_c_con'],
-            m_c_z=0.11e9,
-            z_max=config['z_max'],
+        population = smbhb_module.generate_smbhb_population(
+            n_binaries=config['n_binaries'],
+            mass_distribution=config['mass_distribution'],
+            alpha_0=1.21,
+            alpha_z=0.0,
+            mass_min=1e7,
+            mass_max=1e11,
+            mass_cutoff_0=config['mass_cutoff_0'],
+            mass_cutoff_z=0.0,
             compute_strain=compute_strain,
-            rng=None
+            n_freq_bins=50,
+            random_seed=None,
+            T_obs=T_obs_years
         )
         strain_data = None
     

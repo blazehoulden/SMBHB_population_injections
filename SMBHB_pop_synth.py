@@ -619,7 +619,7 @@ def compute_characteristic_strain_squared_circular(
     """
     Compute h² for circular binaries (RMS strain, orientation-averaged).
     
-    For a circular binary at frequency f and chirp mass Mc:
+    For a circular binary at frequency f and chirp mass Mc (Kelley: Pulsar Timing Arrays, Eq. 33):
     
         h² = (32/5) * (G*Mc)^(10/3) / (c^8 * D_comov²) * (2π * f_rest)^(4/3)
     
@@ -690,8 +690,8 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
     """
     Bin individual strain contributions to compute population spectrum.
     
-    The characteristic strain spectrum is defined as:
-        h_c(f) = sqrt(h² * f / Δf)
+    The characteristic strain spectrum is defined as (Kelley: Pulsar Timing Arrays, Eq. 35):
+        h_c^2(f) = h² * f / Δf = h² * f * T_obs (for uniform binning in frequency)
     
     For a population, we sum h² values in each frequency bin, then convert.
     
@@ -732,12 +732,6 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
     
     bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
     
-    # # Logarithmically spaced bin edges
-    # bin_edges = np.logspace(
-    #     np.log10(f_min), 
-    #     np.log10(f_max), 
-    #     n_freq_bins + 1
-    # )
     bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_widths = bin_edges[1:] - bin_edges[:-1]
     
@@ -748,21 +742,19 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
         f = gw_frequencies[i]
         
         # Find which bin this frequency belongs to
-        for b in range(n_freq_bins):
+        for b in range(N_bin_f):
             if bin_edges[b] <= f < bin_edges[b+1]:
                 bin_indices[i] = b
                 break
         else:
             # If frequency is at upper edge, assign to last bin
-            bin_indices[i] = n_freq_bins - 1
-    
+            bin_indices[i] = N_bin_f - 1
     # Sum h² contributions in each bin
-    h_squared_sum_per_bin = np.zeros(n_freq_bins, dtype=np.float64)
+    h_squared_sum_per_bin = np.zeros(N_bin_f, dtype=np.float64)
     
     for i in range(gw_frequencies.size):
         bin_idx = bin_indices[i]
         h_squared_sum_per_bin[bin_idx] += h_squared[i]
-    
     # Convert to characteristic strain: h_c = sqrt(h² * f / Δf)
     h_c_total = np.sqrt(
         h_squared_sum_per_bin * bin_centres / bin_widths
@@ -772,7 +764,6 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
     h_c_individual = np.sqrt(
         h_squared * bin_centres[bin_indices] / bin_widths[bin_indices]
     )
-    
     return bin_centres, h_c_total, h_c_individual
 
 
@@ -986,7 +977,6 @@ def generate_smbhb_population(
             comoving_dist, 
             redshift
         )
-        
         # Bin into frequency bins and compute h_c
         bin_centres, h_c_total, h_c_individual = bin_characteristic_strain(
             gw_frequencies, 
@@ -998,7 +988,9 @@ def generate_smbhb_population(
         # Find which bin each binary belongs to
         f_min = np.min(gw_frequencies)
         f_max = np.max(gw_frequencies)
-        bin_edges = np.logspace(np.log10(f_min), np.log10(f_max), n_freq_bins+1)
+        f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
+        N_bin_f = int((f_max - f_min) / f_step) + 1
+        bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
         bin_assignment = np.digitize(gw_frequencies, bin_edges) - 1
         bin_assignment = np.clip(bin_assignment, 0, n_freq_bins-1)
         

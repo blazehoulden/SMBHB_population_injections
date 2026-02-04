@@ -4,8 +4,9 @@ Shows complete breakdown of every calculation for every binary
 """
 
 import numpy as np
-from SMBHB_pop_synth import H0, h_circ
 import json
+
+from optimal_SNR_calc import H0_S
 
 
 def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_noise_params, 
@@ -71,13 +72,13 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
     print(f"  Gamma mean: {np.mean(gamma_vals):.4f}")
     
     print(f"\nConstants:")
-    print(f"  H0 = {H0:.6e}")
+    print(f"  H0_S = {H0_S:.6e}")
     print(f"  fyr = {fyr:.6e} Hz")
     print(f"  T_obs = {T_obs:.6e} s ({T_obs/(365.25*86400):.4f} yr)")
     
     # Prefactor for SNR
-    prefactor = (H0**2 / (4 * np.pi**2))**2 * T_obs
-    print(f"  Prefactor = (H0^2/(4π^2))^2 * T_obs = {prefactor:.6e}")
+    prefactor = (H0_S**2 / (4 * np.pi**2))**2 * T_obs
+    print(f"  Prefactor = (H0_S^2/(4π^2))^2 * T_obs = {prefactor:.6e}")
     
     # Get bin edges if available
     bin_edges = strain_data.get('bin_edges', None)
@@ -90,7 +91,7 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
             'N_binaries': len(population),
             'T_obs_seconds': T_obs,
             'T_obs_years': T_obs/(365.25*86400),
-            'H0': H0,
+            'H0_S': H0_S,
             'prefactor': prefactor
         },
         'pulsar_info': [],
@@ -133,7 +134,7 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
         print(f"\nBinary Parameters:")
         print(f"  Index: {bin_idx}")
         print(f"  Chirp Mass (Mc): {Mc:.6e} solar masses")
-        print(f"  Comoving Distance (D): {D:.6e} Mpc")
+        print(f"  Comoving Distance (D): {D_comov:.6e} Mpc")
         print(f"  Frequency (f): {freq:.6e} Hz = {freq*1e9:.6f} nHz")
         print(f"  Frequency bin: {freq_bin_str}")
         
@@ -142,12 +143,12 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
         print(f"  h_c_contrib: {h_c_contrib:.6e}")
         
         # Calculate omega_GW
-        omega_GW = 2 * np.pi**2 / (3 * H0**2) * freq**3 * h_c_contrib**2
+        omega_GW = 2 * np.pi**2 / (3 * H0_S**2) * freq**2 * h_c_contrib**2
         
         print(f"\nOmega_GW Calculation:")
-        print(f"  Formula: Ω_GW = (2π²)/(3H₀²) * f³ * h_c²")
-        print(f"  2π²/(3H₀²) = {2 * np.pi**2 / (3 * H0**2):.6e}")
-        print(f"  f³ = {freq**3:.6e}")
+        print(f"  Formula: Ω_GW = (2π²)/(3H₀²) * f² * h_c²")
+        print(f"  2π²/(3H₀²) = {2 * np.pi**2 / (3 * H0_S**2):.6e}")
+        print(f"  f2 = {freq**2:.6e}")
         print(f"  h_c² = {h_c_contrib**2:.6e}")
         print(f"  Ω_GW = {omega_GW:.6e}")
         
@@ -166,22 +167,22 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
         print(f"\nPulsar PSDs at f={freq:.6e} Hz:")
         psd_values = np.zeros(N_pulsars)
         
-        # for i, pulsar in enumerate(pulsars):
-        #     if pulsar.name in pulsar_noise_params and pulsar_noise_params[pulsar.name]['red_noise']:
-        #         params = pulsar_noise_params[pulsar.name]['red_noise']
-        #         log10_A = params['log10_A']
-        #         gamma = params['gamma']
+        for i, pulsar in enumerate(pulsars):
+            if pulsar.name in pulsar_noise_params and pulsar_noise_params[pulsar.name]['red_noise']:
+                params = pulsar_noise_params[pulsar.name]['red_noise']
+                log10_A = params['log10_A']
+                gamma = params['gamma']
                 
-        #         psd = 10**(2 * log10_A) * (freq / fyr)**(-gamma)
-        #         psd_values[i] = psd
+                psd = 10**(2 * log10_A) * (freq / fyr)**(-gamma)
+                psd_values[i] = psd
                 
-        #         print(f"  Pulsar {i} ({pulsar.name}):")
-        #         print(f"    log10_A = {log10_A:.4f}, gamma = {gamma:.4f}")
-        #         print(f"    10^(2*log10_A) = {10**(2*log10_A):.6e}")
-        #         print(f"    (f/fyr)^(-gamma) = {(freq/fyr)**(-gamma):.6e}")
-        #         print(f"    PSD = {psd:.6e}")
-        #     else:
-        #         print(f"  Pulsar {i} ({pulsar.name}): NO RED NOISE")
+                print(f"  Pulsar {i} ({pulsar.name}):")
+                print(f"    log10_A = {log10_A:.4f}, gamma = {gamma:.4f}")
+                print(f"    10^(2*log10_A) = {10**(2*log10_A):.6e}")
+                print(f"    (f/fyr)^(-gamma) = {(freq/fyr)**(-gamma):.6e}")
+                print(f"    PSD = {psd:.6e}")
+            else:
+                print(f"  Pulsar {i} ({pulsar.name}): NO RED NOISE")
         
         # Calculate contribution from each pulsar pair
         print(f"\nPulsar Pair Contributions (showing all {N_pairs} pairs):")
@@ -206,7 +207,7 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
             
             pair_integrands.append(integrand)
             
-            # # Print detailed info
+            # Print detailed info
             # print(f"\n  Pair {pair_idx}: Pulsars ({i},{j}) - {pulsars[i].name} & {pulsars[j].name}")
             # print(f"    Gamma (HD coeff): {gamma:.6f}")
             # print(f"    PSD_i: {psd_i:.6e}")
@@ -362,8 +363,8 @@ def diagnose_high_snr(results_file='complete_snr_breakdown.json'):
     print(f"   Δf range: [{np.min(delta_f_values):.3e}, {np.max(delta_f_values):.3e}] Hz")
     print(f"   Δf/f range: [{np.min(delta_f_frac):.3f}, {np.max(delta_f_frac):.3f}]")
     print(f"   Mean Δf/f: {np.mean(delta_f_frac):.3f}")
-    print(f"   Expected Δf/f: ~0.01 to 0.2")
-    if np.mean(delta_f_frac) > 0.5:
+    print(f"   Expected Δf/f: ~1-2")
+    if np.mean(delta_f_frac) > 2.0:
         print(f"   ❌ TOO LARGE - bins are too wide!")
     
     # Check integrands
@@ -386,7 +387,7 @@ def diagnose_high_snr(results_file='complete_snr_breakdown.json'):
         problems.append("omega_GW is TOO HIGH (likely due to high h_c)")
     if np.mean(all_psds) < 1e-27:
         problems.append("PSD values are TOO LOW")
-    if np.mean(delta_f_frac) > 0.5:
+    if np.mean(delta_f_frac) > 2.0:
         problems.append("Frequency bins are TOO WIDE")
     
     if problems:

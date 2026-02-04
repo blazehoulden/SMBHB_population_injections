@@ -118,7 +118,7 @@ def generate_snr_consistent_population(
     Returns:
         dict containing:
             'population': list of binary objects (with all properties)
-            'N_binaries': number of binaries in consistent population
+            'n_bininaries': number of binaries in consistent population
             'SNR_achieved': actual SNR value achieved
             'SNR_target': target SNR range
             'search_metadata': dict with search history
@@ -156,10 +156,10 @@ def generate_snr_consistent_population(
             batch_n = min(batch_size, N_current - len(population))
             if verbose:
                 print(f"  Batch {batch_idx+1}/{n_batches}: generating {batch_n} binaries...")
-            config_batch = {**config_template, 'N_binaries': batch_n}
+            config_batch = {**config_template, 'n_binaries': batch_n}
             population.extend(generate_population(config_batch, smbhb_module, T_obs_years=Tspan/(365.25*86400)))
     else:
-        config = {**config_template, 'N_binaries': N_current}
+        config = {**config_template, 'n_binaries': N_current}
         population = generate_population(config, smbhb_module, T_obs_years=Tspan/(365.25*86400))
     
     # =====================================================================
@@ -346,7 +346,7 @@ def generate_snr_consistent_population(
                     print(f"  ⚠ Expanding population: +{N_to_add} (total {N_current})")
                 
                 # Generate additional binaries
-                config_add = {**config_template, 'N_binaries': N_to_add}
+                config_add = {**config_template, 'n_bininaries': N_to_add}
                 new_binaries = generate_population(config_add, smbhb_module, T_obs_years=Tspan/(365.25*86400))
                 population.extend(new_binaries)
                 
@@ -499,7 +499,7 @@ def generate_snr_consistent_population(
     
     return {
         'population': final_population,
-        'N_binaries': N_final,
+        'n_bininaries': N_final,
         'SNR_achieved': float(SNR_final),
         'SNR_target': SNR_range,
         'search_metadata': {
@@ -568,7 +568,7 @@ def generate_snr_consistent_populations(
         print(f"{'='*70}\n")
     
     populations = []
-    N_binaries_list = []
+    n_bininaries_list = []
     SNR_achieved_list = []
     success_count = 0
     
@@ -597,7 +597,7 @@ def generate_snr_consistent_populations(
         
         if result is not None:
             success_count += 1
-            N_binaries_list.append(result['N_binaries'])
+            n_bininaries_list.append(result['n_bininaries'])
             SNR_achieved_list.append(result['SNR_achieved'])
             
             # Add simulation index to result
@@ -609,7 +609,7 @@ def generate_snr_consistent_populations(
                 # Store only summary to save memory
                 summary = {
                     'sim_index': sim_idx,
-                    'N_binaries': result['N_binaries'],
+                    'n_bininaries': result['n_bininaries'],
                     'SNR_achieved': result['SNR_achieved'],
                     'SNR_target': result['SNR_target']
                 }
@@ -624,7 +624,7 @@ def generate_snr_consistent_populations(
     # =====================================================================
     # Compile summary statistics
     # =====================================================================
-    N_array = np.array(N_binaries_list) if N_binaries_list else np.array([])
+    N_array = np.array(n_bininaries_list) if n_bininaries_list else np.array([])
     SNR_array = np.array(SNR_achieved_list) if SNR_achieved_list else np.array([])
     
     total_time = time.time() - start_time
@@ -632,13 +632,13 @@ def generate_snr_consistent_populations(
     results = {
         'populations': populations,
         'summary_statistics': {
-            'N_binaries': {
+            'n_bininaries': {
                 'mean': float(np.mean(N_array)) if len(N_array) > 0 else None,
                 'median': float(np.median(N_array)) if len(N_array) > 0 else None,
                 'std': float(np.std(N_array)) if len(N_array) > 0 else None,
                 'min': int(np.min(N_array)) if len(N_array) > 0 else None,
                 'max': int(np.max(N_array)) if len(N_array) > 0 else None,
-                'all_values': N_binaries_list
+                'all_values': n_bininaries_list
             },
             'SNR_achieved': {
                 'mean': float(np.mean(SNR_array)) if len(SNR_array) > 0 else None,
@@ -675,11 +675,11 @@ def generate_snr_consistent_populations(
         
         if success_count > 0:
             print(f"\nNumber of binaries per population:")
-            print(f"  Mean:   {results['summary_statistics']['N_binaries']['mean']:.0f}")
-            print(f"  Median: {results['summary_statistics']['N_binaries']['median']:.0f}")
-            print(f"  Std:    {results['summary_statistics']['N_binaries']['std']:.0f}")
-            print(f"  Range:  [{results['summary_statistics']['N_binaries']['min']}, "
-                  f"{results['summary_statistics']['N_binaries']['max']}]")
+            print(f"  Mean:   {results['summary_statistics']['n_bininaries']['mean']:.0f}")
+            print(f"  Median: {results['summary_statistics']['n_bininaries']['median']:.0f}")
+            print(f"  Std:    {results['summary_statistics']['n_bininaries']['std']:.0f}")
+            print(f"  Range:  [{results['summary_statistics']['n_bininaries']['min']}, "
+                  f"{results['summary_statistics']['n_bininaries']['max']}]")
             
             print(f"\nSNR achieved:")
             print(f"  Mean:   {results['summary_statistics']['SNR_achieved']['mean']:.3f}")
