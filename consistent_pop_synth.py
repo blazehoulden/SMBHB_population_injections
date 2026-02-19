@@ -309,15 +309,52 @@ def generate_snr_consistent_population(
     # Phase 2: Find bracketing points
     # =====================================================================
     expansion_count = 0
-    max_expansions = 6
+    max_expansions = 6  # You can change this parameter
+
     while expansion_count < max_expansions:
         if search_direction == "upward":
+            # Calculate what N_high should be
             if N_high is None:
-                N_high = min(N_current, int(N_low * 1.5))
+                N_high_target = int(N_low * 1.5)
             else:
-                N_high = min(N_current, int(N_high * 1.5))
+                N_high_target = int(N_high * 1.5)
             
+            # FIX: Expand population BEFORE trying to use N_high_target
+            while N_high_target > len(population):
+                if expansion_count >= max_expansions:
+                    if verbose:
+                        print(f"  ⚠ Max expansions ({max_expansions}) reached")
+                        print(f"  Using population size: {len(population)}")
+                    N_high_target = len(population)
+                    break
+                
+                expansion_count += 1
+                N_to_add = int(len(population) * 0.5)
+                N_current = len(population) + N_to_add
+                
+                if verbose:
+                    print(f"  ⚠ Expanding population: +{N_to_add} (total {N_current})")
+                
+                # Generate additional binaries
+                config_add = {**config_template, 'n_bininaries': N_to_add}
+                new_binaries = generate_population(config_add, smbhb_module, T_obs_years=Tspan/(365.25*86400))
+                population.extend(new_binaries)
+                
+                # Update cache if needed
+                if use_cached_injection and N_current <= cache_threshold and signal_cache is not None:
+                    if verbose:
+                        print(f"  Updating signal cache...")
+                    signal_cache = precompute_binary_signals(psrs_clean, population)
+                elif use_cached_injection and N_current > cache_threshold:
+                    if verbose:
+                        print(f"  Population exceeded cache threshold, disabling cache")
+                    signal_cache = None
+                    use_cached_injection = False
+            
+            # NOW safe to set N_high and compute SNR
+            N_high = N_high_target
             snr_high = compute_and_cache(N_high)
+            
             if verbose:
                 print(f"  N = {N_high}: SNR = {snr_high:.3f}")
             
@@ -336,32 +373,6 @@ def generate_snr_consistent_population(
                 # snr_high < SNR_min - still below target, update lower bound
                 N_low = N_high
                 SNR_low = snr_high
-            
-            # Expand if needed
-            if N_high >= N_current:
-                expansion_count += 1
-                N_to_add = int(N_current * 0.5)
-                N_current += N_to_add
-                if verbose:
-                    print(f"  ⚠ Expanding population: +{N_to_add} (total {N_current})")
-                
-                # Generate additional binaries
-                config_add = {**config_template, 'n_bininaries': N_to_add}
-                new_binaries = generate_population(config_add, smbhb_module, T_obs_years=Tspan/(365.25*86400))
-                population.extend(new_binaries)
-                
-                # If we were using cache and still below threshold, update cache
-                if use_cached_injection and N_current <= cache_threshold and signal_cache is not None:
-                    if verbose:
-                        print(f"  Updating signal cache...")
-                    # Need to recompute cache for new total population
-                    signal_cache = precompute_binary_signals(psrs_clean, population)
-                elif use_cached_injection and N_current > cache_threshold:
-                    # Population grew beyond cache threshold, disable caching
-                    if verbose:
-                        print(f"  Population exceeded cache threshold, disabling cache")
-                    signal_cache = None
-                    use_cached_injection = False
             
         elif search_direction == "downward":
             if N_low == 1 and SNR_low is None:
@@ -389,22 +400,21 @@ def generate_snr_consistent_population(
                 N_high = N_new
                 SNR_high = snr_new
         
+        else:  # search_direction == "verify"
+            break
+
     # =====================================================================
     # Phase 3: Verify bracket
     # =====================================================================
     if SNR_low is None or SNR_high is None:
         if verbose:
-            print(f"✗ Could not bracket target range")
-        return None
-    
-    # Updated validation: Accept bracket if upper bound is in range OR above range
-    if not (SNR_low < SNR_min and SNR_high >= SNR_min):
-        if verbose:
-            print(f"✗ Invalid bracket for range [{SNR_min}, {SNR_max}]")
-        return None
-    
-    if verbose:
-        print(f"✓ Bracket found: N=[{N_low}, {N_high}], SNR=[{SNR_low:.3f}, {SNR_high:.3f}]\n")
+            print(f"\n  ⚠ WARNING: Could not bracket target SNR after {expansion_count} expansions")
+            print(f"  Population size: {len(population)}")
+            print(f"  This likely indicates bugs in SNR calculation")
+        # Return what we have
+        pass
+    elif verbose:
+        print(f"\n  ✓ Bracketed: N ∈ [{N_low}, {N_high}], SNR ∈ [{SNR_low:.3f}, {SNR_high:.3f}]")
     
     # =====================================================================
     # Phase 4: Bisection to find minimum N in range

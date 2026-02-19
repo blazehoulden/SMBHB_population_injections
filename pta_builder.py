@@ -11,7 +11,7 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, use_efac_only=True, crn
 
     # White noise
     if use_efac_only:
-        efac = parameter.Constant()
+        efac = parameter.Constant(val=0)
         selection = Selection(selections.by_backend)
         wn = white_signals.MeasurementNoise(efac=efac, selection=selection, name=None)
     else:
@@ -38,6 +38,7 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, use_efac_only=True, crn
     )
 
     model = tm + wn + rn + crn
+    # model = tm + rn + crn
     pta = signal_base.PTA([model(psr) for psr in psrs])
     pta.set_default_params(noise_params_15yr) # check if this is necessary - saw it https://colab.research.google.com/drive/1VNLbutN7cKJM2jl6LId0IgkGJDszDloC#scrollTo=XlmoCSjvQhnI
 

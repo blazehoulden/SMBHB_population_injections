@@ -1000,3 +1000,404 @@ def plot_binaries_vs_frequency_mc(
     plt.savefig('figures/nanograv_comparison_plot_mc.png', dpi=300)
     print("✓ Saved: figures/nanograv_comparison_plot_mc.png")
     plt.show()
+
+    # code for showing SNR calc off that was doen using optimal SNR not enterprise
+def build_snr_df(binaries, SNR_sq_binaries):
+    """
+    Build a DataFrame of per-binary SNR quantities from the output of
+    N_needed_for_population, analogous to the df produced by
+    analyze_individual_binaries but using the correct vectorised SNR.
+
+    Parameters
+    ----------
+    binaries : list[dict]
+        Full binary population list (as passed to N_needed_for_population).
+        Each dict must contain at least:
+            'f'        : GW frequency [Hz]
+            'Mc'       : chirp mass [kg]
+            'D_comov'  : comoving distance [Mpc]
+            'ra'       : right ascension [rad]
+            'dec'      : declination [rad]
+            'h_c_contrib' : characteristic strain contribution
+    SNR_sq_binaries : np.ndarray, shape (B,)
+        Per-binary SNR² values from N_needed_for_population.
+        Signed SNR is recovered as sign(SNR²) = +1 always here since SNR²
+        is a sum of squared terms — we store √(SNR²) as the magnitude.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per binary, sorted by descending |SNR|, with columns:
+            frequency_nHz, chirp_mass_Msun, comoving_distance_Mpc,
+            ra_deg, dec_deg, h_c_contrib, SNR, abs_SNR, SNR_sq, final_rank
+    """
+    records = []
+    for binary, snr_sq in zip(binaries, SNR_sq_binaries):
+        records.append({
+            'frequency_nHz':          binary['f'] * 1e9,
+            'chirp_mass_Msun':        binary['Mc'] / (1.989e30),
+            'comoving_distance_Mpc':  binary['D_comov'],
+            'ra_deg':                 np.degrees(binary['ra']),
+            'dec_deg':                np.degrees(binary['dec']),
+            'h_c_contrib':            binary['h_c_contrib'],
+            'SNR_sq':                 snr_sq,
+            'SNR':                    np.sqrt(np.maximum(snr_sq, 0)),   # magnitude only
+            'abs_SNR':                np.sqrt(np.maximum(snr_sq, 0)),
+        })
+
+    df = pd.DataFrame(records)
+    df = df.sort_values('abs_SNR', ascending=False).reset_index(drop=True)
+    df['final_rank'] = df.index + 1
+    return df
+
+
+def plot_snr_population(binaries, SNR_sq_binaries, psrs, top_N=50,
+                        selected_binaries=None, savepath='figures/snr_population_analysis.png'):
+    """
+    Visualise per-binary SNR contributions computed from the vectorised
+    optimal SNR formula (N_needed_for_population / SNR_sq_all_binaries),
+    as a drop-in companion to plot_individual_binaries in this file.
+
+    The SNR used here is √(SNR²) from the PTA cross-correlation formula
+    (Eqn. 16, https://iopscience.iop.org/article/10.1088/0264-9381/30/22/224015),
+    not the OS-based SNR used in plot_individual_binaries.
+
+    Parameters
+    ----------
+    binaries : list[dict]
+        Full binary population (output of generate_population or similar).
+    SNR_sq_binaries : np.ndarray, shape (B,)
+        Per-binary SNR² from N_needed_for_population.
+    psrs : list[Pulsar]
+        Pulsar objects with ._raj and ._decj attributes, used for sky plots.
+    top_N : int
+        Number of top binaries to show in ranked panels. Default 50.
+    selected_binaries : list[dict] or None
+        If provided (the selected_binaries return value of N_needed_for_population),
+        the subset that reaches the target SNR is highlighted on cumulative plots.
+    savepath : str
+        Output path for the saved figure.
+    """
+    df = build_snr_df(binaries, SNR_sq_binaries)
+    df_top = df.head(top_N)
+
+    fig = plt.figure(figsize=(30, 24))
+    gs = GridSpec(5, 3, figure=fig, hspace=0.35, wspace=0.35)
+
+    # =========================================================================
+    # 1. SNR ranking bar chart (top N, coloured by chirp mass)
+    # =========================================================================
+    ax1 = fig.add_subplot(gs[0, 0])
+    norm1   = plt.cm.colors.LogNorm(vmin=df_top['chirp_mass_Msun'].min(),
+                                     vmax=df_top['chirp_mass_Msun'].max())
+    cmap1   = plt.cm.viridis
+    colors1 = [cmap1(norm1(m)) for m in df_top['chirp_mass_Msun']]
+
+    ax1.barh(range(len(df_top)), df_top['SNR'],
+             color=colors1, alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax1.set_yticks(range(len(df_top)))
+    ax1.set_yticklabels([f"#{r}" for r in df_top['final_rank']], fontsize=9)
+    ax1.set_xlabel('√SNR²  (vectorised optimal SNR)', fontsize=11, fontweight='bold')
+    ax1.set_title(f'Top {top_N} Binaries by Optimal SNR', fontsize=12, fontweight='bold')
+    ax1.invert_yaxis()
+    ax1.grid(True, alpha=0.3, axis='x')
+    sm1 = plt.cm.ScalarMappable(cmap=cmap1, norm=norm1)
+    plt.colorbar(sm1, ax=ax1, label='Chirp Mass (M☉)')
+    setup_ticks(ax1)
+
+    # =========================================================================
+    # 2. Sky map coloured by SNR magnitude, pulsars overlaid
+    # =========================================================================
+    ax2 = fig.add_subplot(gs[0, 1:], projection='mollweide')
+
+    snr_max = df['abs_SNR'].quantile(0.95)
+    scatter2 = ax2.scatter(
+        np.radians(df['ra_deg']) - np.pi,   # Mollweide convention
+        np.radians(df['dec_deg']),
+        c=df['abs_SNR'],
+        s=100 * df['abs_SNR'] / df['abs_SNR'].max(),
+        cmap='plasma',
+        alpha=0.7,
+        edgecolors='black',
+        linewidth=0.5,
+        vmin=0,
+        vmax=snr_max
+    )
+
+    if psrs is not None and len(psrs) > 0:
+        pulsar_ra  = np.array([psr._raj  for psr in psrs]) - np.pi
+        pulsar_dec = np.array([psr._decj for psr in psrs])
+        ax2.scatter(pulsar_ra, pulsar_dec,
+                    marker='*', s=90, color='white', edgecolor='black',
+                    linewidth=0.4, alpha=1.0, label='Pulsars', zorder=10)
+
+    ax2.legend(loc='lower left', fontsize=10)
+    ax2.set_xlabel('Right Ascension', fontsize=11)
+    ax2.set_ylabel('Declination', fontsize=11)
+    ax2.set_title('Sky Distribution (size & colour ∝ optimal SNR)', fontsize=12, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    plt.colorbar(scatter2, ax=ax2, label='Optimal SNR', pad=0.1)
+
+    # =========================================================================
+    # 3. Frequency vs SNR (coloured by chirp mass)
+    # =========================================================================
+    ax3 = fig.add_subplot(gs[1, 0])
+    scatter3 = ax3.scatter(
+        df['frequency_nHz'], df['abs_SNR'],
+        c=df['chirp_mass_Msun'],
+        s=50, alpha=0.6, cmap='viridis', edgecolors='none',
+        norm=plt.cm.colors.LogNorm()
+    )
+    ax3.set_xlabel('GW Frequency (nHz)', fontsize=11, fontweight='bold')
+    ax3.set_ylabel('Optimal SNR', fontsize=11, fontweight='bold')
+    ax3.set_title('SNR vs Frequency', fontsize=12, fontweight='bold')
+    ax3.set_xscale('log')
+    ax3.set_yscale('log')
+    setup_ticks(ax3, logx=True, logy=True)
+    plt.colorbar(scatter3, ax=ax3, label='Chirp Mass (M☉)')
+
+    # =========================================================================
+    # 4. Chirp mass vs comoving distance, coloured by SNR
+    # =========================================================================
+    ax4 = fig.add_subplot(gs[1, 1])
+    scatter4 = ax4.scatter(
+        df['chirp_mass_Msun'], df['comoving_distance_Mpc'],
+        c=df['abs_SNR'],
+        s=60, alpha=0.6, cmap='plasma', edgecolors='none',
+        norm=plt.cm.colors.LogNorm()
+    )
+    ax4.set_xlabel('Chirp Mass (M☉)', fontsize=11, fontweight='bold')
+    ax4.set_ylabel('Comoving Distance (Mpc)', fontsize=11, fontweight='bold')
+    ax4.set_title('Mass–Distance Distribution', fontsize=12, fontweight='bold')
+    ax4.set_xscale('log')
+    ax4.set_yscale('log')
+
+    # Reference 1/D line anchored to the median binary
+    D_range = np.logspace(np.log10(df['comoving_distance_Mpc'].min()),
+                          np.log10(df['comoving_distance_Mpc'].max()), 100)
+    snr_ref = df['abs_SNR'].median() * df['comoving_distance_Mpc'].median() / D_range
+    ax4.plot(D_range, snr_ref, 'k--', linewidth=1.5, alpha=0.5, label=r'$\propto 1/D_{\rm comov}$')
+    ax4.legend(fontsize=9)
+    setup_ticks(ax4, logx=True, logy=True)
+    plt.colorbar(scatter4, ax=ax4, label='Optimal SNR')
+
+    # =========================================================================
+    # 5. Characteristic strain vs SNR with power-law fit
+    # =========================================================================
+    ax5 = fig.add_subplot(gs[1, 2])
+    ax5.scatter(df['h_c_contrib'], df['abs_SNR'],
+                alpha=0.6, s=50, edgecolors='none', color='steelblue')
+    ax5.set_xlabel('Characteristic Strain h_c', fontsize=11, fontweight='bold')
+    ax5.set_ylabel('Optimal SNR', fontsize=11, fontweight='bold')
+    ax5.set_title('Strain vs Optimal SNR', fontsize=12, fontweight='bold')
+    ax5.set_xscale('log')
+    ax5.set_yscale('log')
+
+    log_hc  = np.log10(df['h_c_contrib'])
+    log_snr = np.log10(df['abs_SNR'])
+    valid   = np.isfinite(log_hc) & np.isfinite(log_snr)
+    if np.sum(valid) > 2:
+        coeffs  = np.polyfit(log_hc[valid], log_snr[valid], 1)
+        hc_fit  = np.logspace(log_hc[valid].min(), log_hc[valid].max(), 100)
+        snr_fit = 10**(coeffs[0] * np.log10(hc_fit) + coeffs[1])
+        ax5.plot(hc_fit, snr_fit, 'r--', linewidth=2, alpha=0.7,
+                 label=f'SNR ∝ h_c$^{{{coeffs[0]:.2f}}}$')
+        # Expect slope ≈ 2 since SNR² ∝ S_h² ∝ h_c⁴ → SNR ∝ h_c²
+        ax5.legend(fontsize=9)
+    setup_ticks(ax5, logx=True, logy=True)
+
+    # =========================================================================
+    # 6. SNR² contribution per frequency bin (shows where sensitivity lives)
+    # =========================================================================
+    ax6 = fig.add_subplot(gs[2, 0])
+    ax6.scatter(df['frequency_nHz'], df['SNR_sq'],
+                alpha=0.6, s=50, c=df['chirp_mass_Msun'],
+                cmap='viridis', edgecolors='none',
+                norm=plt.cm.colors.LogNorm())
+    ax6.set_xlabel('GW Frequency (nHz)', fontsize=11, fontweight='bold')
+    ax6.set_ylabel('SNR²  per binary', fontsize=11, fontweight='bold')
+    ax6.set_title('SNR² vs Frequency\n(directly from PTA cross-correlation formula)',
+                  fontsize=12, fontweight='bold')
+    ax6.set_xscale('log')
+    ax6.set_yscale('log')
+    setup_ticks(ax6, logx=True, logy=True)
+
+    # =========================================================================
+    # 7. SNR² histogram by frequency decade
+    # =========================================================================
+    ax7 = fig.add_subplot(gs[2, 1])
+    freq_hz    = df['frequency_nHz'] / 1e9   # back to Hz for decade binning
+    log_freq   = np.log10(freq_hz)
+    decade_bins = np.arange(np.floor(log_freq.min()), np.ceil(log_freq.max()) + 1)
+    snr_sq_per_decade = []
+    decade_labels     = []
+    for lo, hi in zip(decade_bins[:-1], decade_bins[1:]):
+        mask = (log_freq >= lo) & (log_freq < hi)
+        snr_sq_per_decade.append(df.loc[mask, 'SNR_sq'].sum())
+        decade_labels.append(f'10$^{{{lo:.0f}}}$')
+
+    ax7.bar(range(len(snr_sq_per_decade)), snr_sq_per_decade,
+            color='steelblue', alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax7.set_xticks(range(len(decade_labels)))
+    ax7.set_xticklabels(decade_labels, fontsize=10)
+    ax7.set_xlabel('Frequency Decade [Hz]', fontsize=11, fontweight='bold')
+    ax7.set_ylabel('Σ SNR²  in decade', fontsize=11, fontweight='bold')
+    ax7.set_title('Total SNR² Budget by Frequency Decade', fontsize=12, fontweight='bold')
+    ax7.set_yscale('log')
+    setup_ticks(ax7, logy=True)
+
+    # =========================================================================
+    # 8. Cumulative SNR (sorted by descending SNR²)
+    #    Optionally marks N_needed threshold from N_needed_for_population
+    # =========================================================================
+    ax8 = fig.add_subplot(gs[2, 2])
+
+    # Sort by descending SNR² for the cumulative curve
+    snr_sq_sorted   = df.sort_values('SNR_sq', ascending=False)['SNR_sq'].values
+    cumulative_snr  = np.sqrt(np.cumsum(snr_sq_sorted))
+    fractional_snr  = cumulative_snr / cumulative_snr[-1]
+    ranks           = np.arange(1, len(cumulative_snr) + 1)
+    frac_ind_up_to_99 = np.searchsorted(fractional_snr, 0.99) + 1
+    frac_up_to_99 = fractional_snr[frac_ind_up_to_99 - 1]
+    ranks_up_to_99 = ranks[frac_ind_up_to_99 - 1]
+
+    line_frac, = ax8.plot(ranks_up_to_99, frac_up_to_99,
+                          linewidth=2, marker='o', markersize=2, label='Fractional')
+    ax8.set_xlabel('Number of loudest binaries', fontsize=11, fontweight='bold')
+    ax8.set_ylabel('Fractional cumulative SNR', fontsize=11, fontweight='bold')
+    ax8.set_ylim(0, 1.05)
+
+    for threshold, ls in [(0.5, '--'), (0.9, ':')]:
+        idx_t = np.argmax(fractional_snr >= threshold) + 1
+        ax8.axvline(idx_t, linestyle=ls, alpha=0.5, color='gray')
+        ax8.axhline(threshold, linestyle=ls, alpha=0.4, color='gray')
+        ax8.text(idx_t * 1.05, threshold + 0.02, f'{int(threshold*100)}% @ {idx_t}', fontsize=9)
+
+    # Mark the N_needed threshold if selected_binaries was returned
+    if selected_binaries is not None:
+        N_needed = len(selected_binaries)
+        ax8.axvline(N_needed, color='red', linewidth=1.5, linestyle='-',
+                    label=f'N needed = {N_needed}')
+
+    ax8b = ax8.twinx()
+    line_abs, = ax8b.plot(ranks, cumulative_snr,
+                          linewidth=2, alpha=0.7, color='orange', label='Absolute SNR')
+    ax8b.set_ylabel('Cumulative optimal SNR', fontsize=11, fontweight='bold')
+
+    lines  = [line_frac, line_abs]
+    labels = [l.get_label() for l in lines]
+    if selected_binaries is not None:
+        lines.append(plt.Line2D([0], [0], color='red', linewidth=1.5))
+        labels.append(f'N needed = {N_needed}')
+    ax8.legend(lines, labels, fontsize=9, loc='lower right')
+    ax8.set_title('Cumulative SNR Contribution\n(sorted by descending SNR²)',
+                  fontsize=12, fontweight='bold')
+    setup_ticks(ax8)
+
+    # =========================================================================
+    # 9. Correlation bar chart — top N binaries
+    #    (same layout as plot_individual_binaries panel 9, but SNR from formula)
+    # =========================================================================
+    ax9 = fig.add_subplot(gs[3, 0])
+    x9    = np.arange(len(df_top))
+    width = 0.6
+    ax9.bar(x9, df_top['SNR_sq'], width,
+            color='steelblue', alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax9.set_xlabel('Binary rank', fontsize=11, fontweight='bold')
+    ax9.set_ylabel('SNR²', fontsize=11, fontweight='bold')
+    ax9.set_title(f'Individual SNR² — Top {top_N} Binaries', fontsize=12, fontweight='bold')
+    ax9.set_xticks(x9[::5])
+    ax9.set_xticklabels([f"#{r}" for r in df_top['final_rank'].iloc[::5]], rotation=45, fontsize=8)
+    ax9.set_yscale('log')
+    ax9.grid(True, alpha=0.3, axis='y')
+    setup_ticks(ax9, logy=True)
+
+    # =========================================================================
+    # 10. Chirp mass distribution weighted by SNR²
+    # =========================================================================
+    ax10 = fig.add_subplot(gs[3, 1])
+    mc_bins = np.logspace(np.log10(df['chirp_mass_Msun'].min()),
+                          np.log10(df['chirp_mass_Msun'].max()), 30)
+    ax10.hist(df['chirp_mass_Msun'], bins=mc_bins, alpha=0.5,
+              edgecolor='none', color='gray', label='All binaries')
+    ax10.hist(df['chirp_mass_Msun'], bins=mc_bins, weights=df['SNR_sq'],
+              alpha=0.7, edgecolor='none', color='steelblue', label='Weighted by SNR²')
+    ax10.set_xlabel('Chirp Mass (M☉)', fontsize=11, fontweight='bold')
+    ax10.set_ylabel('Count  /  Σ SNR²', fontsize=11, fontweight='bold')
+    ax10.set_title('Chirp Mass Distribution\n(SNR²-weighted vs unweighted)',
+                   fontsize=12, fontweight='bold')
+    ax10.set_xscale('log')
+    ax10.set_yscale('log')
+    ax10.legend(fontsize=9)
+    setup_ticks(ax10, logx=True, logy=True)
+
+    # =========================================================================
+    # 11. Distance distribution weighted by SNR²
+    # =========================================================================
+    ax11 = fig.add_subplot(gs[3, 2])
+    d_bins = np.logspace(np.log10(df['comoving_distance_Mpc'].min()),
+                         np.log10(df['comoving_distance_Mpc'].max()), 30)
+    ax11.hist(df['comoving_distance_Mpc'], bins=d_bins, alpha=0.5,
+              edgecolor='none', color='gray', label='All binaries')
+    ax11.hist(df['comoving_distance_Mpc'], bins=d_bins, weights=df['SNR_sq'],
+              alpha=0.7, edgecolor='none', color='orange', label='Weighted by SNR²')
+    ax11.set_xlabel('Comoving Distance (Mpc)', fontsize=11, fontweight='bold')
+    ax11.set_ylabel('Count  /  Σ SNR²', fontsize=11, fontweight='bold')
+    ax11.set_title('Distance Distribution\n(SNR²-weighted vs unweighted)',
+                   fontsize=12, fontweight='bold')
+    ax11.set_xscale('log')
+    ax11.set_yscale('log')
+    ax11.legend(fontsize=9)
+    setup_ticks(ax11, logx=True, logy=True)
+
+    # =========================================================================
+    # 12. Sky heatmap — total SNR² per (RA, Dec) bin
+    # =========================================================================
+    ax12 = fig.add_subplot(gs[4, :])
+
+    ra_bins  = np.linspace(0, 360, 37)    # 10° bins
+    dec_bins = np.linspace(-90, 90, 19)   # 10° bins
+
+    H_snrsq, xedges, yedges = np.histogram2d(
+        df['ra_deg'], df['dec_deg'],
+        bins=[ra_bins, dec_bins],
+        weights=df['SNR_sq']
+    )
+    counts, _, _ = np.histogram2d(df['ra_deg'], df['dec_deg'],
+                                   bins=[ra_bins, dec_bins])
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        H_avg = H_snrsq / np.where(counts > 0, counts, np.nan)
+
+    vmax12 = np.nanmax(np.abs(H_avg))
+    im12 = ax12.imshow(
+        H_avg.T, origin='lower', aspect='auto',
+        cmap='plasma', extent=[0, 360, -90, 90],
+        interpolation='nearest', vmin=0, vmax=vmax12
+    )
+
+    if psrs is not None:
+        pulsar_ra_deg  = np.degrees(np.array([psr._raj  for psr in psrs]))
+        pulsar_dec_deg = np.degrees(np.array([psr._decj for psr in psrs]))
+        ax12.scatter(pulsar_ra_deg, pulsar_dec_deg,
+                     marker='*', s=200, color='white', edgecolor='black',
+                     linewidth=1.5, alpha=0.9, label='Pulsars', zorder=10)
+
+    ax12.set_xlabel('Right Ascension (deg)', fontsize=11, fontweight='bold')
+    ax12.set_ylabel('Declination (deg)', fontsize=11, fontweight='bold')
+    ax12.set_title('Sky Heatmap: Mean SNR² per 10° × 10° Region',
+                   fontsize=12, fontweight='bold')
+    ax12.legend(fontsize=10, loc='upper right')
+    ax12.grid(True, alpha=0.3, color='white', linewidth=0.5)
+    plt.colorbar(im12, ax=ax12, label='Mean SNR² per bin', pad=0.01)
+    setup_ticks(ax12)
+
+    plt.suptitle(
+        f'Optimal SNR Population Analysis  |  {len(df)} binaries  '
+        f'|  Total SNR = {cumulative_snr[-1]:.2f}',
+        fontsize=16, fontweight='bold'
+    )
+
+    plt.savefig(savepath, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: {savepath}")
+    plt.close()

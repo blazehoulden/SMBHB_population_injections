@@ -724,46 +724,50 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
     
     where the sum is over all binaries in that bin.
     """
-    f_min = np.min(gw_frequencies)
-    f_max = np.max(gw_frequencies)
-
+    n_binaries = len(gw_frequencies)
+    f_min = 1.0 / (T_obs * YEAR_IN_SECONDS)
+    f_max = 3e-7
     f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
     N_bin_f = int((f_max - f_min) / f_step) + 1
-    
+
     bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
-    
     bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_widths = bin_edges[1:] - bin_edges[:-1]
-    
+
     # Assign each binary to a bin
-    bin_indices = np.empty(gw_frequencies.size, dtype=np.int64)
-    
-    for i in range(gw_frequencies.size):
+    bin_indices = -np.ones(n_binaries, dtype=np.int64)  # Initialize to -1
+
+    for i in range(n_binaries):
         f = gw_frequencies[i]
         
-        # Find which bin this frequency belongs to
+        # Skip if outside frequency range
+        if f < bin_edges[0] or f >= bin_edges[-1]:
+            continue
+        
+        # Find which bin
         for b in range(N_bin_f):
             if bin_edges[b] <= f < bin_edges[b+1]:
                 bin_indices[i] = b
                 break
-        else:
-            # If frequency is at upper edge, assign to last bin
-            bin_indices[i] = N_bin_f - 1
+
     # Sum h² contributions in each bin
-    h_squared_sum_per_bin = np.zeros(N_bin_f, dtype=np.float64)
-    
-    for i in range(gw_frequencies.size):
+    h_squared_sum_per_bin = np.zeros(N_bin_f)
+
+    for i in range(n_binaries):
         bin_idx = bin_indices[i]
-        h_squared_sum_per_bin[bin_idx] += h_squared[i]
+        if bin_idx >= 0:  # Only sum valid bins
+            h_squared_sum_per_bin[bin_idx] += h_squared[i]
+
     # Convert to characteristic strain: h_c = sqrt(h² * f / Δf)
-    h_c_total = np.sqrt(
-        h_squared_sum_per_bin * bin_centres / bin_widths
-    )
-    
-    # Individual contributions (for diagnostics)
-    h_c_individual = np.sqrt(
-        h_squared * bin_centres[bin_indices] / bin_widths[bin_indices]
-    )
+    h_c_total = np.sqrt(h_squared_sum_per_bin * bin_centres / bin_widths)
+
+    # Individual contributions (only for valid bins)
+    h_c_individual = np.zeros(n_binaries)
+    for i in range(n_binaries):
+        if bin_indices[i] >= 0:
+            bin_idx = bin_indices[i]
+            h_c_individual[i] = np.sqrt(h_squared[i] * bin_centres[bin_idx] / bin_widths[bin_idx])
+
     return bin_centres, h_c_total, h_c_individual
 
 
@@ -898,7 +902,7 @@ def generate_smbhb_population(
     n_threads = nb.get_num_threads()
     thread_seeds = rng.integers(0, 2**32 - 1, size=n_threads)
     
-    gw_frequencies = sample_gw_frequencies(n_binaries, thread_seeds)
+    gw_frequencies = sample_gw_frequencies(n_binaries, thread_seeds, t_obs_max=T_obs*YEAR_IN_SECONDS)
     
     # ========================================================================
     # STEP 2: Sample distances and redshifts

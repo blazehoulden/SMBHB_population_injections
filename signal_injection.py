@@ -4,13 +4,13 @@ from config import c, G, Msun, pc
 
 
 def strain_amplitude(Mc, f, D_luminosity):
-    """Calculate characteristic strain amplitude for circular binary."""
+    """Calculate strain amplitude for circular binary. See Eqn. 26 in https://arxiv.org/pdf/1003.0677"""
     D_lum_si = D_luminosity * 1e6 * pc
     return (2 * (G * Mc)**(5/3) * (np.pi * f)**(2/3)) / (c**4 * D_lum_si)
 
 
 def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi):
-    """Compute antenna pattern functions F+ and Fx."""
+    """Compute antenna pattern functions F+ and Fx. See Eqns. 10-11, convention is different in PTAs (* to double check, believe it becomes theta_dec - pi/2, this gets it to match defn) in https://arxiv.org/pdf/1003.0677."""
     k_hat = np.array([
         np.cos(src_dec) * np.cos(src_ra),
         np.cos(src_dec) * np.sin(src_ra),
@@ -38,7 +38,7 @@ def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi):
 
 
 def r_k(t, psr, binary):
-    """Calculate timing residual from single circular SMBHB (Earth term only)."""
+    """Calculate timing residual from single circular SMBHB (Earth term only) This assumption holds for most cases (see Appendix in https://arxiv.org/pdf/1003.0677)."""
     f = binary['f']
     Mc = binary['Mc']
     D_comov = binary['D_comov']
@@ -48,6 +48,7 @@ def r_k(t, psr, binary):
     dec = binary['dec']
     psi = binary.get('psi', 0.0)
     phi0 = binary.get('phi0', 0.0)
+    iota = binary.get('iota', 0.0)
 
     h0 = strain_amplitude(Mc, f, D_lum)
     ra_psr = psr._raj

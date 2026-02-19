@@ -24,12 +24,12 @@ def omega_GW(f, h_cont):
     Returns
     -------
     array_like
-        Omega_GW at given frequencies
+        Omega_GW at given frequencies [dimensionless]
     """
-    omega = 2 * np.pi**2 / (3 * H0_S**2) * f**2 * h_cont**2
-    return omega
+    omega = 2 * np.pi**2 / (3 * H0_S**2) * f**2 * h_cont**2 # Thrane and Romano (2013) 
+    return omega # [dimensionless]
 
-def signal_psd(f, h_cont):
+def timing_residual_psd(f, h_cont):
     """
     Power spectral density of the GW signal from a binary.
     
@@ -45,13 +45,31 @@ def signal_psd(f, h_cont):
     array_like
         Signal PSD at given frequencies [seconds^3]
     """
-    psd = h_cont**2 / (12 * np.pi**2 * f**3)
-    # psd = h_cont**2 / (f) # Alternative definition from Thrane and Romano (2013)
-    print("BH psd:", psd, " for h_cont:", h_cont, " at f:", f)
+    psd = h_cont**2 / (12 * np.pi**2 * f**3) # Eq. 1.54 Di Marco thesis
+    print("Residual psd:", psd, " for h_cont:", h_cont, " at f:", f)
     return psd # [s^3]
 
+def strain_PSD(f, h_cont):
+    """
+    Power spectral density of the GW signal in terms of strain.
+    
+    Parameters
+    ----------
+    f : array_like
+        Frequency [Hz]
+    h_cont : array_like
+        Characteristic strain contribution
+        
+    Returns
+    -------
+    array_like
+        Signal PSD in terms of strain at given frequencies [strain^2 Hz^-1]
+    """
+    psd_strain = h_cont**2 * f**(-1) # Eq. 1.54 Di Marco thesis
+    return psd_strain # [strain^2 Hz^-1] 
 
-def pulsar_psd(pulsar_noise_params, f, sigma_ns = 100.0, delta_t_yr = 1.0/20.0):
+
+def pulsar_psd(pulsar_noise_params, f, pulsar = None, sigma_ns = 100.0, delta_t_yr = 1.0/20.0):
     """
     Power spectral density for a single pulsar's noise.
     
@@ -74,22 +92,89 @@ def pulsar_psd(pulsar_noise_params, f, sigma_ns = 100.0, delta_t_yr = 1.0/20.0):
     Returns
     -------
     array_like
-        PSD at given frequencies
+        PSD at given frequencies [seconds^3]
     """
+    fyr = 1.0 / (365.25 * 24 * 3600)  # 1/year in Hz
+    pulsar_log10A = pulsar_noise_params['red_noise']['log10_A']
+    pulsar_A = 10**pulsar_log10A
+    pulsar_gamma = pulsar_noise_params['red_noise']['gamma']
+    
+    psd_red_noise = pulsar_A**2 / (12 * np.pi**2) * (f / fyr)**(-pulsar_gamma) * (fyr)**-3 # s^3
+    if pulsar is not None:
+        sigma_s = np.median(pulsar.toaerrs)
+    else:
+        sigma_s = sigma_ns * 1e-9  # Convert ns to seconds
+    delta_t_s = delta_t_yr * 365.25 * 24 * 3600  # Convert years to seconds
+    psd_white_noise = 2 * sigma_s**2 * delta_t_s # Footnote 2 https://journals.aps.org/prd/abstract/10.1103/PhysRevD.100.104028#fn2
+    psd = psd_red_noise + psd_white_noise
+    # print("Pulsar psd:", psd, " red:", psd_red_noise, " white:", psd_white_noise)
+    # auto_psd = psd * 12 * np.pi**2 * f**2
+    return psd # [s^3]
+
+def plot_pulsar_psd(pulsar_noise_params, frequencies, sigma_ns = 100.0, delta_t_yr = 1.0/20.0):
+    """
+    Plot the PSD for a single pulsar's noise across frequencies.
+    
+    Parameters
+    ----------
+    pulsar_noise_params : dict
+        Dictionary of noise parameters for a single pulsar
+    frequencies : array_like
+        Array of frequencies [Hz]
+    """
+    import matplotlib.pyplot as plt
+    
+    psd_values = pulsar_psd(pulsar_noise_params, frequencies)
+    
+    plt.figure(figsize=(8, 5))
+    plt.loglog(frequencies, psd_values, label='Total Noise PSD')
+    
+    # Also plot red and white noise separately
     fyr = 1.0 / (365.25 * 24 * 3600)  # 1/year in Hz
     pulsar_A = pulsar_noise_params['red_noise']['log10_A']
     pulsar_gamma = pulsar_noise_params['red_noise']['gamma']
     
-    psd_red_noise = 10**(2 * pulsar_A) / (12 * np.pi**2) * (f / fyr)**(-pulsar_gamma) # yr^3
-    psd_red_noise = psd_red_noise * (365.25 * 24 * 3600)**3  # Convert to seconds^3
-
+    psd_red_noise = 10**(2 * pulsar_A) / (12 * np.pi**2) * (frequencies / fyr)**(-pulsar_gamma) * (365.25 * 24 * 3600)**3
     sigma_s = sigma_ns * 1e-9  # Convert ns to seconds
     delta_t_s = delta_t_yr * 365.25 * 24 * 3600  # Convert years to seconds
-    psd_white_noise = 2 * sigma_s**2 * delta_t_s # Footnote 2 https://journals.aps.org/prd/abstract/10.1103/PhysRevD.100.104028#fn2
-    psd = psd_red_noise + psd_white_noise
-    print("Pulsar psd:", psd, " red:", psd_red_noise, " white:", psd_white_noise)
-    return psd # [s^3]
+    psd_white_noise = 2 * sigma_s**2 * delta_t_s # Footnote 2 https://journals.aps.org/prd/abstract/10.1103/PhysRevD.100.104028#fn
+    
+    plt.loglog(frequencies, psd_red_noise, label='Red Noise PSD', linestyle='--')
+    plt.axhline(psd_white_noise, color='r', label='White Noise PSD', linestyle='--')
+    
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('PSD [s^3]')
+    plt.title('Pulsar Noise PSD')
+    plt.legend()
+    plt.grid(True, which='both', ls='--')
+    plt.show()
 
+def plot_psd_comparison(frequencies, signal_psd, pulsar_red_psd, pulsar_white_psd):
+    """
+    Plot the signal PSD and pulsar noise PSD for comparison.
+    
+    Parameters
+    ----------
+    frequencies : array_like
+        Array of frequencies [Hz]
+    signal_psd : array_like
+        PSD of the GW signal [s^3]
+    pulsar_psd : array_like
+        PSD of the pulsar noise [s^3]
+    """
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(8, 5))
+    plt.loglog(frequencies, signal_psd, label='GW Signal PSD', color='g')
+    plt.loglog(frequencies, pulsar_red_psd, label='Pulsar Red Noise PSD', color='b')
+    plt.loglog(frequencies, pulsar_white_psd, label='Pulsar White Noise PSD', color='r')
+    
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('PSD [s^3]')
+    plt.title('Signal vs Pulsar Noise PSD')
+    plt.legend()
+    plt.grid(True, which='both', ls='--')
+    plt.show()
 
 def gamma_naught(pulsar1, pulsar2):
     """
@@ -107,8 +192,9 @@ def gamma_naught(pulsar1, pulsar2):
     """
     cos_xi = np.dot(pulsar1.pos, pulsar2.pos)
     # Hellings-Downs function
-    gamma = 3 * (1.0/3.0 + (1.0 - cos_xi) / 2.0 * (np.log((1.0 - cos_xi) / 2.0) - 1.0/6.0))
-    return gamma
+    x = (1 - cos_xi) / 2.0
+    gamma_naught = 3.0/2.0 * (1.0/3.0 + x * (np.log(x) - 1.0/6.0))
+    return gamma_naught
 
 
 def precompute_pulsar_pairs(pulsars):
@@ -125,24 +211,24 @@ def precompute_pulsar_pairs(pulsars):
     dict
         Contains:
         - 'pairs': array of shape (N_pairs, 2) with pulsar indices
-        - 'gamma': array of shape (N_pairs,) with correlation coefficients
+        - 'gamma_naught': array of shape (N_pairs,) with correlation coefficients
         - 'N_pairs': number of unique pairs
     """
     N = len(pulsars)
     N_pairs = N * (N - 1) // 2
     
     pairs = np.zeros((N_pairs, 2), dtype=int)
-    gamma = np.zeros(N_pairs)
+    gamma_naught_vals = np.zeros(N_pairs)
     
     idx = 0
-    for i in range(N):
+    for i in range(N):            
         for j in range(i + 1, N):
             pairs[idx] = [i, j]
-            gamma[idx] = gamma_naught(pulsars[i], pulsars[j])
+            gamma_naught_vals[idx] = gamma_naught(pulsars[i], pulsars[j])
             idx += 1
     return {
         'pairs': pairs,
-        'gamma': gamma,
+        'gamma_naught': gamma_naught_vals,
         'N_pairs': N_pairs
     }
 
@@ -176,8 +262,7 @@ def compute_psd_matrix(pulsars, pulsar_noise_params, frequencies):
         # Check if this pulsar has red noise parameters
         if pulsar.name in pulsar_noise_params:
             if pulsar_noise_params[pulsar.name]['red_noise']:
-                psd_matrix[i, :] = pulsar_psd(pulsar_noise_params[pulsar.name], frequencies)
-                
+                psd_matrix[i, :] = pulsar_psd(pulsar_noise_params[pulsar.name], frequencies, pulsar)                
             else:
                 no_red_noise.append(pulsar.name)
         else:
@@ -222,21 +307,40 @@ def optimal_SNR_sq_single_BH_vectorized(binary, strain_data, pulsar_pair_data,
     
     # Get pulsar pairs
     pairs = pulsar_pair_data['pairs']
-    gamma_vals = pulsar_pair_data['gamma']
+    gamma_naught_vals = pulsar_pair_data['gamma_naught']
     N_pairs = len(pairs)
     
     # Get PSDs for each pulsar at this frequency
     psd_i = psd_matrix[pairs[:, 0]]  # PSD for first pulsar in each pair
     psd_j = psd_matrix[pairs[:, 1]]  # PSD for second pulsar in each pair
-    
     # # Vectorized calculation across all pairs
-    # numerator = omega**2 * gamma_vals**2
+    # numerator = omega**2 * gamma_naught_vals**2
     # denominator = freq**6 * psd_i * psd_j
 
     # using my PSD
-    signal_psd_val = signal_psd(freq, h_circ_contrib)
-    numerator = signal_psd_val**2 * gamma_vals**2
-    denominator = (signal_psd_val + psd_i) * (signal_psd_val + psd_j)
+    signal_psd_val = strain_PSD(freq, h_circ_contrib)
+    signal_psd_val = timing_residual_psd(freq, h_circ_contrib)
+    numerator = signal_psd_val**2 * gamma_naught_vals**2
+
+    # Sh PSD calc
+    # Sh_PSD = 3 * H0_S**2 / (2 * np.pi**2) * omega * freq**(-3)
+    # numerator = Sh_PSD**2 * gamma_naught_vals**2
+
+
+    # summing the psds with the strain noise as well
+    psd_i += signal_psd_val
+    psd_j += signal_psd_val
+    denominator = psd_i * psd_j
+
+    print("denominator", np.sum(denominator))
+    print("numerator", np.sum(numerator))
+    print("gamma_naught_vals", gamma_naught_vals)
+    print("signal_psd_val", signal_psd_val)
+    print("omega", omega)
+    print("Sh_PSD", 3 * H0_S**2 / (2 * np.pi**2) * omega * freq**(-3))
+    print("sqrt(Sh_PSD)", np.sqrt(3 * H0_S**2 / (2 * np.pi**2) * omega * freq**(-3)))
+    print("h_contrib", h_circ_contrib)
+    # print(f"Binary at f={freq:.3e} Hz contributes SNR^2={integrand:.3e} with signal PSD={signal_psd_val:.3e}, h_contribution={h_circ_contrib:.3e}, pulsar psd range=({min(psd_i):.3e}, {max(psd_i):.3e}), and chi coeff range=({np.min(gamma_naught_vals):.3e}, {np.max(gamma_naught_vals):.3e})")
 
 
 
@@ -251,14 +355,13 @@ def optimal_SNR_sq_single_BH_vectorized(binary, strain_data, pulsar_pair_data,
     # Calculate integrand
     integrand = numerator / denominator * delta_f
     # Prefactor
-    # prefactor = (H0_S**2 / (4 * np.pi**2))**2 * T_obs
+    # prefactor = (H0_S**2 / (4 * np.pi**2))**2 * (T_obs)
     prefactor = 2 * T_obs  # From PTA SNR formula
 
     # Sum over all pairs
     SNR_squared_total = np.sum(integrand) * prefactor
 
     return SNR_squared_total
-
 
 def find_N_needed_for_target_SNR_optimized(population, strain_data, pulsars, pulsar_noise_params,
                                           target_SNR, T_obs):
@@ -291,7 +394,7 @@ def find_N_needed_for_target_SNR_optimized(population, strain_data, pulsars, pul
         SNR_squared_cumulative += SNR_sq
         SNR_current = np.sqrt(SNR_squared_cumulative)
 
-        print(f"  Added binary {i+1}/{len(population)}: Cumulative SNR = {SNR_current:.3e}", "Binary contrib:", np.sqrt(SNR_sq))
+        # print(f"  Added binary {i+1}/{len(population)}: Cumulative SNR = {SNR_current:.3e}", "Binary contrib:", np.sqrt(SNR_sq))
 
         # Check if we've reached target
         if SNR_current >= target_SNR:
