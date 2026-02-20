@@ -10,27 +10,41 @@ def strain_amplitude(Mc, f, D_luminosity):
 
 
 def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi):
-    """Compute antenna pattern functions F+ and Fx. See Eqns. 10-11, convention is different in PTAs (* to double check, believe it becomes theta_dec - pi/2, this gets it to match defn) in https://arxiv.org/pdf/1003.0677."""
-    k_hat = np.array([
-        np.cos(src_dec) * np.cos(src_ra),
-        np.cos(src_dec) * np.sin(src_ra),
-        np.sin(src_dec),
-    ])
-    
-    p_hat = np.array([
-        np.cos(psr_dec) * np.cos(psr_ra),
-        np.cos(psr_dec) * np.sin(psr_ra),
-        np.sin(psr_dec),
+    """Compute antenna pattern functions F+ and Fx. See Eqns. 10-11, in https://arxiv.org/pdf/1003.0677 & Anholm et a.l 2009."""
+
+    psr_polar_angle = np.pi / 2 - psr_dec 
+    psr_azimuthal_angle = psr_ra
+    src_polar_angle = np.pi / 2 - src_dec
+    src_azimuthal_angle = src_ra
+
+    omega_hat = np.array([
+        -np.sin(src_polar_angle) * np.cos(src_azimuthal_angle),
+        -np.sin(src_polar_angle) * np.sin(src_azimuthal_angle),
+        -np.cos(src_polar_angle),
     ])
 
-    m_hat = np.array([np.sin(src_ra), -np.cos(src_ra), 0.0])
-    n_hat = np.cross(k_hat, m_hat)
+    p_hat = np.array([
+        np.sin(psr_polar_angle) * np.cos(psr_azimuthal_angle),
+        np.sin(psr_polar_angle) * np.sin(psr_azimuthal_angle),
+        np.cos(psr_polar_angle),
+    ])
+
+    m_hat = np.array(
+        [np.sin(src_azimuthal_angle), 
+         -np.cos(src_azimuthal_angle), 
+         0.0])
+    
+    n_hat = np.array([
+        -np.cos(src_polar_angle) * np.cos(src_azimuthal_angle),
+        -np.cos(src_polar_angle) * np.sin(src_azimuthal_angle),
+        np.sin(src_polar_angle)
+    ])
 
     m_rot = np.cos(psi) * m_hat + np.sin(psi) * n_hat
     n_rot = -np.sin(psi) * m_hat + np.cos(psi) * n_hat
     m_hat, n_hat = m_rot, n_rot
 
-    denom = 1 + np.dot(k_hat, p_hat)
+    denom = 1 + np.dot(omega_hat, p_hat)
     Fp = 0.5 * ((np.dot(p_hat, m_hat)**2 - np.dot(p_hat, n_hat)**2) / denom)
     Fx = (np.dot(p_hat, m_hat) * np.dot(p_hat, n_hat)) / denom
     
@@ -91,29 +105,59 @@ def antenna_response_vectorised(psr_ra, psr_dec, src_ra_arr, src_dec_arr, psi_ar
     """
     N = len(src_ra_arr)
     
-    # Pulsar direction (same for all sources)
-    p_hat = np.array([
-        np.cos(psr_dec) * np.cos(psr_ra),
-        np.cos(psr_dec) * np.sin(psr_ra),
-        np.sin(psr_dec),
+    # # Pulsar direction (same for all sources)
+    # p_hat = np.array([
+    #     np.cos(psr_dec) * np.cos(psr_ra),
+    #     np.cos(psr_dec) * np.sin(psr_ra),
+    #     np.sin(psr_dec),
+    # ])
+    
+    # # Source directions (vectorised)
+    # k_hat = np.array([
+    #     np.cos(src_dec_arr) * np.cos(src_ra_arr),
+    #     np.cos(src_dec_arr) * np.sin(src_ra_arr),
+    #     np.sin(src_dec_arr),
+    # ])  # Shape: (3, N_binaries)
+    
+    # # Base vectors (vectorised)
+    # m_hat = np.array([
+    #     np.sin(src_ra_arr),
+    #     -np.cos(src_ra_arr),
+    #     np.zeros(N)
+    # ])  # Shape: (3, N_binaries)
+    
+    # # Cross product k × m (vectorised)
+    # n_hat = np.cross(k_hat.T, m_hat.T).T  # Shape: (3, N_binaries)
+
+    psr_polar_angle = np.pi / 2 - psr_dec
+    psr_azimuthal_angle = psr_ra
+    src_polar_angle_arr = np.pi / 2 - src_dec_arr
+    src_azimuthal_angle_arr = src_ra_arr
+
+    # unit vector along direction of gravitational wave propagation
+    omega_hat = np.array([
+        -np.sin(src_polar_angle_arr) * np.cos(src_azimuthal_angle_arr),
+        -np.sin(src_polar_angle_arr) * np.sin(src_azimuthal_angle_arr),
+        -np.cos(src_polar_angle_arr),
     ])
+
+    # unit vector towards
+    p_hat = np.array([
+        np.sin(psr_polar_angle) * np.cos(psr_azimuthal_angle),
+        np.sin(psr_polar_angle) * np.sin(psr_azimuthal_angle),
+        np.cos(psr_polar_angle),
+    ])
+
+    m_hat = np.array(
+        [np.sin(src_azimuthal_angle_arr), 
+         -np.cos(src_azimuthal_angle_arr), 
+         np.zeros(N)])
     
-    # Source directions (vectorised)
-    k_hat = np.array([
-        np.cos(src_dec_arr) * np.cos(src_ra_arr),
-        np.cos(src_dec_arr) * np.sin(src_ra_arr),
-        np.sin(src_dec_arr),
-    ])  # Shape: (3, N_binaries)
-    
-    # Base vectors (vectorised)
-    m_hat = np.array([
-        np.sin(src_ra_arr),
-        -np.cos(src_ra_arr),
-        np.zeros(N)
-    ])  # Shape: (3, N_binaries)
-    
-    # Cross product k × m (vectorised)
-    n_hat = np.cross(k_hat.T, m_hat.T).T  # Shape: (3, N_binaries)
+    n_hat = np.array([
+        -np.cos(src_polar_angle_arr) * np.cos(src_azimuthal_angle_arr),
+        -np.cos(src_polar_angle_arr) * np.sin(src_azimuthal_angle_arr),
+        np.sin(src_polar_angle_arr)
+    ])
     
     # Rotate by polarization angle psi (vectorised)
     cos_psi = np.cos(psi_arr)
@@ -123,7 +167,7 @@ def antenna_response_vectorised(psr_ra, psr_dec, src_ra_arr, src_dec_arr, psi_ar
     n_rot = -sin_psi[np.newaxis, :] * m_hat + cos_psi[np.newaxis, :] * n_hat
     
     # Denominator (vectorised dot product)
-    denom = 1 + np.einsum('i,ij->j', p_hat, k_hat)  # Shape: (N_binaries,)
+    denom = 1 + np.einsum('i,ij->j', p_hat, omega_hat)  # Shape: (N_binaries,)
     
     # Antenna patterns (vectorised)
     p_dot_m = np.einsum('i,ij->j', p_hat, m_rot)  # Shape: (N_binaries,)

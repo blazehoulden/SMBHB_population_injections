@@ -254,7 +254,7 @@ def generate_snr_consistent_population(
                 'pta': t_pta,
                 'ostat_init': t_ostat_init,
                 'compute_os': t_compute_os,
-                'total': t_inject + t_pta + t_ostat_init + t_compute_os
+                'total': t_inject + t_pta + t_ostat_init + t_compute_os,
             }
             timing_list.append({'N': N, 'timing': timing})
 

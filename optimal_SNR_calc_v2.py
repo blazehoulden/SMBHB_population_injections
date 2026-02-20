@@ -219,6 +219,13 @@ def compute_orf_sq_chunk(binaries_chunk, pulsars, i_idx, j_idx):
     B = len(binaries_chunk)
     P = len(i_idx)
     orf_sq = np.empty((B, P))
+    orf_vals = np.empty((B, P))  # for diagnostics
+    
+    pos = np.array([p.pos for p in pulsars])  # (N, 3)
+    xi_arr = np.arccos(np.clip(
+        np.einsum('ij,ij->i', pos[i_idx], pos[j_idx]),
+        -1.0, 1.0
+    ))  # shape (P,) — same for all binaries
 
     for b, binary in enumerate(binaries_chunk):
         # Pre-compute antenna responses for every pulsar for this binary
@@ -238,10 +245,11 @@ def compute_orf_sq_chunk(binaries_chunk, pulsars, i_idx, j_idx):
         Fx = ant[:, 1]  # (N,)
 
         # ORF for every unique pair using index arrays — no inner Python loop
-        orf_vals = beta * (Fp[i_idx] * Fp[j_idx] + Fx[i_idx] * Fx[j_idx])  # (P,)
-        orf_sq[b] = orf_vals ** 2
+        orf_vals[b] = beta * (Fp[i_idx] * Fp[j_idx] + Fx[i_idx] * Fx[j_idx])  # (P,)
+        orf_sq[b] = orf_vals[b] ** 2
 
-    return orf_sq  # (B, P)
+
+    return orf_sq, xi_arr, orf_vals  # (B, P), (P,), (B, P) 
 # END NEW -------------------------------------------------------------------
 
 
@@ -429,7 +437,7 @@ def SNR_sq_chunk(freqs, h_contribs, delta_fs, pulsar_cache, T_obs,
         if binaries_chunk is None:
             raise ValueError("binaries_chunk must be supplied when use_orf=True")
         pulsars = pulsar_cache['pulsars']
-        corr_sq_pairs = compute_orf_sq_chunk(
+        corr_sq_pairs, xi_arr, _ = compute_orf_sq_chunk(
             binaries_chunk, pulsars, i_idx, j_idx
         )  # (B, P)
     else:
@@ -749,4 +757,46 @@ def convergence_test(binaries, pulsars, pulsar_noise_params, strain_data, T_obs,
         )
 
     return results
+
+def plot_overlap_reduction_function(pulsars, binaries, pulsar_noise_params):
+    """
+    Plot the ORF values for a few binaries to visualize how they vary with sky position.
+
+    Parameters
+    ----------
+    pulsars : list[Pulsar]
+        List of pulsar objects.
+    binaries : list[dict]
+        List of binary dicts with 'ra', 'dec', and 'psi' keys.
+    pulsar_cache : dict
+        Output of `build_pulsar_cache` containing the pulsar list and indices.
+    """
+    import matplotlib.pyplot as plt
+    pulsar_cache = build_pulsar_cache(pulsars, pulsar_noise_params)  # build cache to get i_idx, j_idx, and pulsars
+    i_idx = pulsar_cache['i_idx']
+    j_idx = pulsar_cache['j_idx']
+    pulsars = pulsar_cache['pulsars']
+
+    plt.figure(figsize=(10, 6))
+    for b in binaries[:1000]:  # plot for the first 50 binaries
+        orf_sq, xi_arr, orf_vals = compute_orf_sq_chunk([b], pulsars, i_idx, j_idx)  # (P,)
+        plt.scatter(xi_arr * 180.0/np.pi, orf_vals, alpha=1/255)
+    
+    xi_list = np.linspace(0, np.pi, 1000)
+    HD = 3.0 / 2.0 * (1.0 / 3.0 + 0.5 * (1 - np.cos(xi_list)) * (np.log(0.5 * (1 - np.cos(xi_list))) - 1.0 / 6.0))
+    
+    xi_sorted = sorted(xi_arr)
+    for i in range(len(xi_sorted)):
+        xi_sorted[i] *= 180.0 / np.pi
+    with np.printoptions(threshold=np.inf):
+        print(xi_sorted)
+    # HD = (1.0/3.0 - 1.0/6.0 * (0.5 * (1 - np.cos(xi_list))) + (0.5 * (1 - np.cos(xi_list))) * np.log(0.5 * (1 - np.cos(xi_list)))) * 3/2
+    plt.plot(xi_list * 180.0/np.pi, HD, color="black", linestyle="--", label="Hellings-Downs")
+    plt.xlabel("Pulsar Pair Angular Separation (degrees)")
+    plt.ylabel("ORF")
+    plt.title("Overlap Reduction Function for Binaries")
+    plt.legend()
+    plt.grid()
+    plt.savefig("figures/orf_plot.png")
+    plt.show()
 # END NEW -------------------------------------------------------------------
