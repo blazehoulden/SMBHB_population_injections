@@ -19,7 +19,7 @@ POPULATION_CONFIGS = {
         'description': 'Larger mass, higher spread in distance, small population'
     },
     'realistic': {
-        'n_binaries': 400,
+        'n_binaries': 4_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 1e10,
         'z_max': 1.2,
@@ -58,8 +58,8 @@ RUN_SCALING_ANALYSIS = False
 RUN_INDIVIDUAL_BINARY_ANALYSIS = False
 RUN_ENSEMBLE_ANALYSIS = False
 RUN_NG_RG_COMPARISON = False
-RUN_CONSISTENT_POP_SYNTH = True
-OPTIMAL_SNR_POPULATION = False
+RUN_CONSISTENT_POP_SYNTH = False
+OPTIMAL_SNR_POPULATION = True
 
 # Memory profiling
 MEMORY_PROFILE_ENABLED = True

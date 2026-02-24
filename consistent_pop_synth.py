@@ -37,7 +37,7 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
             t0 = time.time()
         pta, _, params_out = build_pta_and_params(
             psrs=psrs_injected, noise_params_15yr=params, 
-            Tspan=Tspan, use_efac_only=True
+            Tspan=Tspan
         )
         if profile:
             t_pta = time.time() - t0
@@ -90,7 +90,7 @@ def generate_snr_consistent_population(
     SNR_range, N_initial_guess=2000, N_max_initial=10000,
     max_iterations=10, tolerance=0.05, verbose=True, profile=False,
     use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=False,
-    convergence_threshold=0.05
+    convergence_threshold=0.05, detailed_output_SNR = False
 ):
     """
     Generate a single SMBHB population consistent with target SNR range.
@@ -180,6 +180,7 @@ def generate_snr_consistent_population(
     
     # SNR cache: N -> SNR
     snr_cache = {}
+    os_details_cache = {}
     N_tested_list = []
     SNR_tested_list = []
     timing_list = []
@@ -226,7 +227,7 @@ def generate_snr_consistent_population(
         # Build PTA and compute OS
         pta, _, params_out = build_pta_and_params(
             psrs=psrs_injected, noise_params_15yr=params, 
-            Tspan=Tspan, use_efac_only=True
+            Tspan=Tspan
         )
         
         if profile:
@@ -245,6 +246,15 @@ def generate_snr_consistent_population(
             t_compute_os = time.time() - t0
         
         snr = OS / OS_sig
+        if detailed_output_SNR:
+            os_details_cache[N] = {
+                'xi':     xi.tolist(),
+                'rho':    rho.tolist(),
+                'sig':    sig.tolist(),
+                'OS':     float(OS),
+                'OS_sig': float(OS_sig),
+            }
+
         if toggle_memory_profiling:
             log_memory(f"  After compute_os N={N}")
         
@@ -503,11 +513,10 @@ def generate_snr_consistent_population(
         print(f"  (Target range: [{SNR_min}, {SNR_max}])\n")
 
     
-    
     # Return the first N_final binaries from the population
     final_population = population[:N_final]
-    
-    return {
+    # Return the first N_final binaries from the population
+    result = {
         'population': final_population,
         'n_bininaries': N_final,
         'SNR_achieved': float(SNR_final),
@@ -521,12 +530,21 @@ def generate_snr_consistent_population(
         }
     }
 
+    if detailed_output_SNR:
+        # os_details_cache is keyed by N; attach the entry for the chosen N_final,
+        # plus the full history so the caller can inspect every tested N if desired.
+        result['os_details'] = os_details_cache.get(N_final)
+        result['os_details_history'] = os_details_cache   # all N -> detail mappings
+
+    return result
+
 
 def generate_snr_consistent_populations(
     config_template, smbhb_module, psrs_clean, params, Tspan,
     SNR_range, N_sims=20, N_initial_guess=2000, N_max_initial=10000,
     verbose=True, save_populations=True, profile=False,
-    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=config.MEMORY_PROFILE_ENABLED
+    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=config.MEMORY_PROFILE_ENABLED,
+    detailed_output_SNR = False
 ):
     """
     Generate multiple SMBHB populations, each consistent with target SNR range.
@@ -602,7 +620,8 @@ def generate_snr_consistent_populations(
             use_cache=use_cache,
             cache_threshold=cache_threshold,
             batch_size=batch_size,
-            toggle_memory_profiling=toggle_memory_profiling
+            toggle_memory_profiling=toggle_memory_profiling,
+            detailed_output_SNR = detailed_output_SNR
         )
         
         if result is not None:
