@@ -73,8 +73,8 @@ def r_k(t, psr, binary):
     t_rel = t - t_ref
     phase = 2 * np.pi * f * t_rel + phi0
     
-    h_plus = h0 * np.sin(phase)
-    h_cross = h0 * np.cos(phase)
+    h_plus = h0 * (1 + np.cos(iota)**2) * np.sin(phase) # Eq. 40 http://arxiv.org/abs/2512.18822
+    h_cross = h0 * (- 2 * np.cos(iota)) * np.cos(phase) # ""
 
     r = (Fp * h_plus + Fx * h_cross) / (2 * np.pi * f)
     return r
@@ -454,3 +454,8 @@ def precompute_binary_signals(psrs, population, cache=None, verbose=False):
         print(f"Cache complete: {len(cache)} pulsars, {len(population)} binaries each")
     
     return cache
+
+# def pulsar_red_noise():
+
+
+# def 

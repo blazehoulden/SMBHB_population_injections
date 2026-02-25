@@ -101,7 +101,7 @@ def pulsar_red_noise_psd(freq, log10A_red, gamma_red, fyr=1.0/(365.25*86400)):
         Red noise PSD [s^3]. Shape (B, N) if freq is (B,) and params are (N,).
     """
     A_red = 10**log10A_red
-    return A_red**2 / (12.0 * np.pi**2) * (freq / fyr)**(-gamma_red) * fyr**(-3.0)
+    return A_red**2 / (12.0 * np.pi**2) * (freq / fyr)**(-gamma_red) * fyr**(-3.0) # [s^3]
 
 def plot_pulsar_psd(pulsar_noise_params, frequencies, sigma_ns = 100.0, delta_t_yr = 1.0/20.0):
     """
@@ -288,6 +288,7 @@ def compute_orf_sq_chunk(binaries_chunk, pulsars, i_idx, j_idx):
     orf_vals = np.empty((B, P))  # for diagnostics
     
     pos = np.array([p.pos for p in pulsars])  # (N, 3)
+    print("dir:", dir(pulsars[0]))
     xi_arr = np.arccos(np.clip(
         np.einsum('ij,ij->i', pos[i_idx], pos[j_idx]),
         -1.0, 1.0

@@ -335,10 +335,10 @@ def main():
     print("="*70)
 
     if config.OPTIMAL_SNR_POPULATION:
-        # population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_years=Tspan/(365.25*86400))
-        # selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
-        #         population, psrs_clean, pulsar_noise_params, strain_data,
-        #         target_SNR=args.target_snr, T_obs=Tspan )
+        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_years=Tspan/(365.25*86400))
+        selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
+                population, psrs_clean, pulsar_noise_params, strain_data,
+                target_SNR=args.target_snr, T_obs=Tspan )
         
         # plot_snr_population(
         #     binaries=population,
@@ -358,7 +358,7 @@ def main():
         pta, model, params_complete = build_pta_and_params(
             psrs=psrs_clean, noise_params_15yr=noise_params, Tspan=Tspan
         )
-        get_noise_matrix(psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan)
+        # get_noise_matrix(psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan)
         # save_results({
         #     'N_needed': N_needed,
         #     'final_SNR': final_SNR,

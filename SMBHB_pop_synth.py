@@ -656,7 +656,7 @@ def compute_characteristic_strain_squared_circular(
     if inclination_angle is None:
         const = 32.0 / (5.0 * SPEED_OF_LIGHT_MS**8)
     else:
-        const = 2.0 * 2.0 / (SPEED_OF_LIGHT_MS**8)
+        const = 1 / (SPEED_OF_LIGHT_MS**8)
     
     for i in nb.prange(n):
         # Rest-frame orbital frequency: f_orb = f_GW/2 in source frame
@@ -677,7 +677,7 @@ def compute_characteristic_strain_squared_circular(
             i_loc = inclination_angle[i]
             a = 1.0 + np.cos(i_loc)**2
             b = -2.0 * np.cos(i_loc)
-            MeanAng = np.sqrt(0.5 * (a**2 + b**2))
+            MeanAng = np.sqrt(2 * (a**2 + b**2))
             h_squared[i] = const * MeanAng**2 \
                         (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
                         (2.0 * np.pi * f_rest_orbital)**(4.0/3.0) 
