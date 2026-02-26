@@ -3,10 +3,11 @@ from copy import deepcopy
 from config import c, G, Msun, pc
 
 
-def strain_amplitude(Mc, f, D_luminosity):
+def strain_amplitude(Mc, fGW, d_comov, z):
     """Calculate strain amplitude for circular binary. See Eqn. 26 in https://arxiv.org/pdf/1003.0677"""
-    D_lum_si = D_luminosity * 1e6 * pc
-    return (2 * (G * Mc)**(5/3) * (np.pi * f)**(2/3)) / (c**4 * D_lum_si)
+    f_rest = 0.5 * fGW * (1 + z)
+    d_comov_si = d_comov * 1e6 * pc
+    return (2 * (G * Mc)**(5/3) * (2 * np.pi * f_rest)**(2/3)) / (c**4 * d_comov_si)
 
 
 def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi):
@@ -64,7 +65,7 @@ def r_k(t, psr, binary):
     phi0 = binary.get('phi0', 0.0)
     iota = binary.get('iota', 0.0)
 
-    h0 = strain_amplitude(Mc, f, D_lum)
+    h0 = strain_amplitude(Mc, f, D_comov, z)
     ra_psr = psr._raj
     dec_psr = psr._decj
     Fp, Fx = antenna_response(ra_psr, dec_psr, ra, dec, psi)
@@ -76,7 +77,7 @@ def r_k(t, psr, binary):
     h_plus = h0 * (1 + np.cos(iota)**2) * np.sin(phase) # Eq. 40 http://arxiv.org/abs/2512.18822
     h_cross = h0 * (- 2 * np.cos(iota)) * np.cos(phase) # ""
 
-    r = (Fp * h_plus + Fx * h_cross) / (2 * np.pi * f)
+    r = (Fp * h_plus + Fx * h_cross) / (2 * np.pi * f) # Eq. 4.21-23 nHz GW Astronomer
     return r
 
 
@@ -263,15 +264,17 @@ def _vectorised_chunk(t, psr, population):
     Mc_arr = np.array([b['Mc'] for b in population])
     D_comov_arr = np.array([b['D_comov'] for b in population])
     z_arr = np.array([b['z'] for b in population])
-    D_lum_arr = D_comov_arr * (1 + z_arr)  # in Mpc
+    # D_lum_arr = D_comov_arr * (1 + z_arr)  # in Mpc
     ra_arr = np.array([b['ra'] for b in population])
     dec_arr = np.array([b['dec'] for b in population])
     psi_arr = np.array([b.get('psi', 0.0) for b in population])
     phi0_arr = np.array([b.get('phi0', 0.0) for b in population])
+    iota_arr = np.array([b.get('iota', 0.0) for b in population])
     
     # Compute strain amplitudes (vectorised)
-    D_lum_si = D_lum_arr * 1e6 * pc
-    h0_arr = (2 * (G * Mc_arr)**(5/3) * (np.pi * f_arr)**(2/3)) / (c**4 * D_lum_si)
+    D_comov_si = D_comov_arr * 1e6 * pc
+    f_rest = 0.5 * (1 + z_arr) * f_arr
+    h0_arr = (2 * (G * Mc_arr)**(5/3) * (2 * np.pi * f_rest)**(2/3)) / (c**4 * D_comov_si)
     
     # Compute antenna responses (vectorised)
     ra_psr = psr._raj
@@ -289,8 +292,8 @@ def _vectorised_chunk(t, psr, population):
     
     # MEMORY OPTIMIZATION: Compute result directly without storing h_plus/h_cross separately
     # This saves 2 × (N_toas, N_binaries) arrays in memory
-    numerator = (Fp_arr[np.newaxis, :] * h0_arr[np.newaxis, :] * np.sin(phase) + 
-                 Fx_arr[np.newaxis, :] * h0_arr[np.newaxis, :] * np.cos(phase))
+    numerator = (Fp_arr[np.newaxis, :] * h0_arr[np.newaxis, :] * (1 + np.cos(iota_arr)**2) * np.sin(phase) + 
+                 Fx_arr[np.newaxis, :] * h0_arr[np.newaxis, :] * (-2 * np.cos(iota_arr)) * np.cos(phase))
     
     r_matrix = numerator / (2 * np.pi * f_arr[np.newaxis, :])
     # Shape: (N_toas, N_binaries)
@@ -454,8 +457,3 @@ def precompute_binary_signals(psrs, population, cache=None, verbose=False):
         print(f"Cache complete: {len(cache)} pulsars, {len(population)} binaries each")
     
     return cache
-
-# def pulsar_red_noise():
-
-
-# def 

@@ -1,6 +1,7 @@
 import numpy as np
 from SMBHB_pop_synth import H0_KMS_MPC, MEGAPARSEC_IN_METERS
 from config import generate_population
+from signal_injection import strain_amplitude
 
 def GWB_PSD(freq, h_contrib):
     """
@@ -233,6 +234,80 @@ def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi):
     denom = 1 + np.dot(omega_hat, p_hat)
     Fp = 0.5 * ((np.dot(p_hat, m_hat)**2 - np.dot(p_hat, n_hat)**2) / denom)
     Fx = (np.dot(p_hat, m_hat) * np.dot(p_hat, n_hat)) / denom
+
+    return Fp, Fx
+
+def antenna_response_vectorised(
+    raj_arr:  np.ndarray,   # (N,) pulsar RA  [rad]
+    decj_arr: np.ndarray,   # (N,) pulsar Dec [rad]
+    src_ra:   np.ndarray,   # (B,) source RA  [rad]
+    src_dec:  np.ndarray,   # (B,) source Dec [rad]
+    psi:      np.ndarray,   # (B,) polarisation angle [rad]
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Vectorised version of antenna_response() for B sources × N pulsars.
+    Matches exactly the scalar convention in antenna_response():
+        - omega_hat has leading minus signs
+        - m_hat = [sin(az), -cos(az), 0]
+        - n_hat uses polar/azimuthal form
+        - denominator = 1 + omega_hat · p_hat  (pulsar term)
+        - Fp = 0.5 * (pm² - pn²) / denom
+        - Fx = (pm * pn) / denom
+
+    Returns
+    -------
+    Fp, Fx : ndarray, shape (B, N)
+    """
+    # ------------------------------------------------------------------ pulsar vectors (N, 3)
+    psr_polar = np.pi / 2.0 - decj_arr          # (N,)
+    p_hat = np.stack([
+        np.sin(psr_polar) * np.cos(raj_arr),
+        np.sin(psr_polar) * np.sin(raj_arr),
+        np.cos(psr_polar),
+    ], axis=1)  # (N, 3)
+
+    # ------------------------------------------------------------------ source vectors (B, 3)
+    src_polar = np.pi / 2.0 - src_dec           # (B,)
+    src_az    = src_ra                           # (B,)
+
+    # Propagation direction — note the leading minus signs matching your convention
+    omega_hat = np.stack([
+        -np.sin(src_polar) * np.cos(src_az),
+        -np.sin(src_polar) * np.sin(src_az),
+        -np.cos(src_polar),
+    ], axis=1)  # (B, 3)
+
+    # Polarisation basis — matching your m_hat and n_hat exactly
+    m_hat = np.stack([
+         np.sin(src_az),
+        -np.cos(src_az),
+        np.zeros_like(src_az),
+    ], axis=1)  # (B, 3)
+
+    n_hat = np.stack([
+        -np.cos(src_polar) * np.cos(src_az),
+        -np.cos(src_polar) * np.sin(src_az),
+         np.sin(src_polar),
+    ], axis=1)  # (B, 3)
+
+    # Rotate by polarisation angle — matching your m_rot, n_rot
+    cos_psi = np.cos(psi)[:, None]   # (B, 1)
+    sin_psi = np.sin(psi)[:, None]   # (B, 1)
+
+    m_rot = cos_psi * m_hat + sin_psi * n_hat    # (B, 3)
+    n_rot = -sin_psi * m_hat + cos_psi * n_hat   # (B, 3)
+
+    # ------------------------------------------------------------------ projections
+    # p_hat · m_rot for all (B, N) pairs: einsum 'ni,bi->bn'
+    pm = np.einsum('ni,bi->bn', p_hat, m_rot)    # (B, N)
+    pn = np.einsum('ni,bi->bn', p_hat, n_rot)    # (B, N)
+
+    # Denominator: 1 + omega_hat · p_hat — shape (B, N)
+    denom = 1.0 + np.einsum('ni,bi->bn', p_hat, omega_hat)   # (B, N)
+
+    # Antenna patterns — matching your scalar formula exactly
+    Fp = 0.5 * (pm**2 - pn**2) / denom   # (B, N)
+    Fx = (pm * pn) / denom               # (B, N)
 
     return Fp, Fx
 
@@ -922,3 +997,328 @@ def plot_overlap_reduction_function(pulsars, binaries, pulsar_noise_params):
 
 # # Build covariance
 # lnL = pta.get_lnlikelihood(params)
+def measured_strain_all_binaries_all_pulsars(
+    bin_arrays:  dict,          # pre-extracted binary arrays, each shape (B,)
+    pulsar_cache: dict,         # output of build_pulsar_cache_time_domain
+    time_arr:    np.ndarray,    # (T,) common time grid [s]
+) -> np.ndarray:
+    """
+    Compute GW strain time series for every binary × every pulsar simultaneously.
+
+    Follows Eq. 40 of arXiv:2512.18822:
+        h(t) = F+ * h+(t) + Fx * hx(t)
+        h+(t) = h0 * (1 + cos²ι) * sin(2π f t + φ₀)
+        hx(t) = h0 * (−2 cosι)   * cos(2π f t + φ₀)
+
+    Parameters
+    ----------
+    bin_arrays : dict
+        Pre-extracted binary arrays (each shape (B,)):
+        'f', 'Mc', 'D_comov', 'z', 'ra', 'dec', 'psi', 'phi0', 'iota'
+    pulsar_cache : dict
+        Must contain 'raj_arr' (N,), 'decj_arr' (N,).
+    time_arr : ndarray, shape (T,)
+        Time samples starting at 0 [s].
+
+    Returns
+    -------
+    h : ndarray, shape (B, N, T)
+        Strain at every binary–pulsar–time combination.
+    """
+    B = bin_arrays['f'].size
+    N = pulsar_cache['raj_arr'].size
+
+    # Antenna patterns — (B, N) each
+    Fp, Fx = antenna_response_vectorised(
+        pulsar_cache['raj_arr'],
+        pulsar_cache['decj_arr'],
+        bin_arrays['ra'],
+        bin_arrays['dec'],
+        bin_arrays['psi'],
+    )  # (B, N)
+
+    # Strain amplitude — (B,)
+    h0 = strain_amplitude(
+        Mc     = bin_arrays['Mc'],
+        fGW    = bin_arrays['f'],
+        d_comov= bin_arrays['D_comov'],
+        z      = bin_arrays['z'],
+    )  # (B,)
+
+    # Polarisation amplitudes — (B,)
+    cos_iota = np.cos(bin_arrays['iota'])
+    A_plus   = h0 * (1.0 + cos_iota**2)   # (B,)
+    A_cross  = h0 * (-2.0 * cos_iota)     # (B,)
+
+    # Phase — (B, T):  2π f_b t_k + φ₀_b
+    # bin_arrays['f'][:, None] is (B, 1), time_arr[None, :] is (1, T)
+    phase = 2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :] \
+            + bin_arrays['phi0'][:, None]            # (B, T)
+
+    # h+ and hx — (B, T)
+    hp = A_plus[:, None]  * np.sin(phase)   # (B, T)
+    hx = A_cross[:, None] * np.cos(phase)   # (B, T)
+
+    # Contract with antenna patterns:
+    # Fp is (B, N), hp is (B, T) → need (B, N, T)
+    # h[b, n, t] = Fp[b,n]*hp[b,t] + Fx[b,n]*hx[b,t]
+    h = Fp[:, :, None] * hp[:, None, :] \
+      + Fx[:, :, None] * hx[:, None, :]   # (B, N, T)
+
+    return h
+
+
+def SNR_sq_all_pairs_all_binaries_vectorised(
+    binaries:           list,
+    pulsars:            list,
+    pulsar_noise_params: dict,
+    strain_data:        dict,
+    time_arr_npoints:   int   = 10_001,
+    chunk_size:         int   = None,
+    target_memory_GB:   float = 1.0,
+    inc_GW:              bool = True,
+    inc_red_noise:       bool = True,
+    inc_white_noise:     bool = True,
+) -> np.ndarray:
+    """
+    Compute ρ² for every binary summed over all unique pulsar pairs — fully
+    vectorised, no Python loops over binaries, pulsars, or time steps.
+
+    The SNR² formula per binary, summed over pairs (i < j):
+
+        ρ²_b = Σ_{i<j} Δf_b ∫ S_h^{ij}(t) / [N_i(t) N_j(t)] dt
+
+    approximated as a midpoint Riemann sum over T time steps.
+
+    Memory scales as  B × N × T × 8 bytes  per chunk.
+    With N=50 pulsars, T=10001 time steps, float64:
+        1 GB ≈ 25 binaries per chunk  →  auto chunk_size handles this.
+
+    Parameters
+    ----------
+    binaries : list of dict
+        Each must contain 'f', 'Mc', 'D_comov', 'z', 'ra', 'dec',
+        and optionally 'psi', 'phi0', 'iota', 'freq_bin'.
+    pulsars : list of Pulsar
+    pulsar_noise_params : dict
+    strain_data : dict
+        Must contain 'bin_edges'.
+    time_arr_npoints : int
+        Number of time samples per pulsar span. Default 10 001.
+    chunk_size : int or None
+        Binaries per chunk. None = auto from target_memory_GB.
+    target_memory_GB : float
+        Memory budget for auto chunk sizing [GB].
+
+    Returns
+    -------
+    snr_sq_arr : ndarray, shape (B,)
+        ρ² for each binary, summed over all pulsar pairs.
+    """
+    cache     = build_pulsar_cache_time_domain(pulsars, pulsar_noise_params)
+    i_idx     = cache['i_idx']   # (P,)
+    j_idx     = cache['j_idx']   # (P,)
+
+    # ------------------------------------------------------------------ binary arrays
+    B = len(binaries)
+    bin_arrays = {
+        'f':       np.array([b['f']             for b in binaries]),
+        'Mc':      np.array([b['Mc']            for b in binaries]),
+        'D_comov': np.array([b['D_comov']       for b in binaries]),
+        'z':       np.array([b['z']             for b in binaries]),
+        'ra':      np.array([b['ra']            for b in binaries]),
+        'dec':     np.array([b['dec']           for b in binaries]),
+        'psi':     np.array([b.get('psi',  0.0) for b in binaries]),
+        'phi0':    np.array([b.get('phi0', 0.0) for b in binaries]),
+        'iota':    np.array([b.get('iota', 0.0) for b in binaries]),
+    }
+    bin_edges = strain_data['bin_edges']
+    delta_fs  = np.array([
+        bin_edges[b['freq_bin'] + 1] - bin_edges[b['freq_bin']] for b in binaries
+    ])  # (B,)
+
+    # ------------------------------------------------------------------ per-pair Tspan
+    tspans      = np.array([p.toas.max() - p.toas.min() for p in pulsars])  # (N,)
+    tspan_pairs = np.minimum(tspans[i_idx], tspans[j_idx])                  # (P,)
+
+    # Group pairs by unique Tspan to avoid a per-pair Python loop
+    unique_tspans, pair_group_ids = np.unique(tspan_pairs, return_inverse=True)
+    # pair_group_ids[p] = index into unique_tspans for pair p
+
+    # ------------------------------------------------------------------ chunk sizing
+    N = len(pulsars)
+    T = time_arr_npoints
+    if chunk_size is None:
+        bytes_per_binary = N * T * 8 * 6   # h, Sh_ii, Sh_jj, Sh_ij, Ni, Nj
+        chunk_size = max(1, int(target_memory_GB * 1024**3 / bytes_per_binary))
+        print(f"Auto chunk size: {chunk_size} binaries (N={N}, T={T}, "
+              f"target={target_memory_GB} GB)")
+
+    snr_sq_arr = np.zeros(B)
+
+    for start in range(0, B, chunk_size):
+        end   = min(start + chunk_size, B)
+        chunk = slice(start, end)
+        Bc    = end - start
+        print(f"  Chunk binaries {start}–{end - 1}")
+
+        ba = {k: v[chunk] for k, v in bin_arrays.items()}   # each (Bc,)
+
+        # Noise base (Bc, N): red + white, no signal term yet
+        fyr   = 1.0 / (365.25 * 86400)
+        A_red = 10.0 ** cache['log10A_arr']
+        rn    = (
+            A_red**2 / (12.0 * np.pi**2)
+            * (ba['f'][:, None] / fyr) ** (-cache['gamma_arr'])
+            * fyr**-3.0
+        )  # (Bc, N)
+
+        N_base = np.zeros((Bc, N))
+        if inc_red_noise:
+            N_base += rn                              # (Bc, N)
+        if inc_white_noise:
+            N_base += cache['white_noise_arr']        # (Bc, N)
+
+        # Accumulate SNR² over Tspan groups — one time grid per group
+        snr_sq_chunk = np.zeros(Bc)
+
+        for g, Tspan in enumerate(unique_tspans):
+            # Which pairs belong to this Tspan group
+            pair_mask = pair_group_ids == g          # (P,) boolean
+            gi        = i_idx[pair_mask]             # pulsar i indices for this group
+            gj        = j_idx[pair_mask]             # pulsar j indices for this group
+            Pg        = pair_mask.sum()
+            if Pg == 0:
+                continue
+
+            time_arr = np.linspace(0.0, Tspan, T)   # (T,)
+            dt       = np.diff(time_arr)             # (T-1,)
+
+            # Strain for all binaries × all pulsars on this time grid — (Bc, N, T)
+            h = measured_strain_all_binaries_all_pulsars(ba, cache, time_arr)
+
+            # PSD normalisation factor per binary — (Bc,)
+            norm = 1.0 / (12.0 * np.pi**2 * ba['f']**3)
+
+            # Auto-PSDs for pulsars in this group's pairs — (Bc, Pg, T)
+            Sh_ii = h[:, gi, :]**2 * norm[:, None, None]   # (Bc, Pg, T)
+            Sh_jj = h[:, gj, :]**2 * norm[:, None, None]   # (Bc, Pg, T)
+
+            # Cross-PSD — (Bc, Pg, T)
+            Sh_ij = h[:, gi, :] * h[:, gj, :] * norm[:, None, None]
+
+            # Total noise: N_k(t) = N_base_k + S_h^{kk}(t)
+            Ni = N_base[:, gi, None] + Sh_ii   # (Bc, Pg, T)
+            Nj = N_base[:, gj, None] + Sh_jj   # (Bc, Pg, T)
+
+            # Midpoint Riemann sum
+            Sh_mid = 0.5 * (Sh_ij[:, :, :-1] + Sh_ij[:, :, 1:])   # (Bc, Pg, T-1)
+            Ni_mid = 0.5 * (Ni[:, :, :-1]    + Ni[:, :, 1:])       # (Bc, Pg, T-1)
+            Nj_mid = 0.5 * (Nj[:, :, :-1]    + Nj[:, :, 1:])       # (Bc, Pg, T-1)
+
+            integrand = 2 * dt[None, None, :] * Sh_mid**2 / (Ni_mid * Nj_mid)  # (Bc, Pg, T-1)
+
+            # Sum over pairs and time, weight by Δf
+            snr_sq_chunk += delta_fs[chunk] * integrand.sum(axis=(1, 2))
+
+        snr_sq_arr[chunk] = snr_sq_chunk
+
+    return snr_sq_arr
+
+
+def build_pulsar_cache_time_domain(pulsars, pulsar_noise_params):
+    """
+    Pulsar cache for the time-domain vectorised SNR² path.
+
+    Identical to `build_pulsar_cache` but also stores raw position arrays
+    for use by `antenna_response_vectorised`.
+    """
+    N = len(pulsars)
+
+    white_noise_arr = np.array([
+        pulsar_white_noise_psd(sigma_t=np.median(p.toaerrs), delta_t=1.0 / 20.0)
+        for p in pulsars
+    ])  # (N,)
+    log10A_arr = np.array([pulsar_noise_params[p.name]['red_noise']['log10_A'] for p in pulsars])
+    gamma_arr  = np.array([pulsar_noise_params[p.name]['red_noise']['gamma']   for p in pulsars])
+    raj_arr    = np.array([p._raj  for p in pulsars])
+    decj_arr   = np.array([p._decj for p in pulsars])
+    i_idx, j_idx = np.triu_indices(N, k=1)
+
+    return {
+        'white_noise_arr': white_noise_arr,   # (N,)
+        'log10A_arr':      log10A_arr,         # (N,)
+        'gamma_arr':       gamma_arr,          # (N,)
+        'raj_arr':         raj_arr,            # (N,)
+        'decj_arr':        decj_arr,           # (N,)
+        'i_idx':           i_idx,              # (P,)
+        'j_idx':           j_idx,              # (P,)
+        'pulsars':         pulsars,
+    }
+
+
+def find_N_needed(
+    binaries:            list,
+    pulsars:             list,
+    pulsar_noise_params: dict,
+    strain_data:         dict,
+    target_SNR:          float,
+    time_arr_npoints:    int   = 1_001,
+    chunk_size:          int   = None,
+    target_memory_GB:    float = 1.0,
+    inc_GW:              bool  = True,
+    inc_red_noise:       bool  = False,
+    inc_white_noise:     bool  = False,
+) -> tuple[list, int, float, np.ndarray]:
+    """
+    Find the minimum number of binaries needed to reach a target cumulative SNR.
+
+    Drop-in replacement for the original `find_N_needed` using the fully
+    vectorised time-domain SNR² path.
+    """
+    snr_sq_arr = SNR_sq_all_pairs_all_binaries_vectorised(
+        binaries            = binaries,
+        pulsars             = pulsars,
+        pulsar_noise_params = pulsar_noise_params,
+        strain_data         = strain_data,
+        time_arr_npoints    = time_arr_npoints,
+        chunk_size          = chunk_size,
+        target_memory_GB    = target_memory_GB,
+        inc_GW              = inc_GW,
+        inc_red_noise       = inc_red_noise,
+        inc_white_noise     = inc_white_noise
+    )
+
+    cum_snr_sq = np.cumsum(snr_sq_arr)
+    cum_snr    = np.sqrt(np.abs(cum_snr_sq))
+
+    neg_mask = snr_sq_arr < 0
+    if neg_mask.any():
+        print(f"Warning: negative SNR² at binary indices {np.where(neg_mask)[0].tolist()}. "
+              "Check noise model for bugs.")
+
+    crossing_idx = int(np.searchsorted(cum_snr, target_SNR))
+
+    if crossing_idx < len(binaries):
+        N_needed          = crossing_idx + 1
+        SNR_current       = float(cum_snr[crossing_idx])
+        selected_binaries = binaries[:N_needed]
+        print(f"Target SNR {target_SNR:.3f} reached with {N_needed} binaries "
+              f"(SNR = {SNR_current:.3f}, SNR² = {cum_snr_sq[crossing_idx]:.3e})")
+    else:
+        N_needed          = len(binaries)
+        SNR_current       = float(cum_snr[-1])
+        selected_binaries = binaries
+        print(f"Target SNR {target_SNR:.3f} not reached. "
+              f"Max SNR = {SNR_current:.3f} with all {N_needed} binaries.")
+
+
+    # For one binary and one pulsar, both should agree
+    Fp_vec, Fx_vec = antenna_response_vectorised(
+        np.array([pulsars[0]._raj]), np.array([pulsars[0]._decj]),
+        np.array([binaries[0]['ra']]), np.array([binaries[0]['dec']]), np.array([binaries[0]['psi']])
+    )
+    Fp_scalar, Fx_scalar = antenna_response(pulsars[0]._raj, pulsars[0]._decj, 
+                                            binaries[0]['ra'], binaries[0]['dec'], binaries[0]['psi'])
+    
+    return selected_binaries, N_needed, SNR_current, snr_sq_arr

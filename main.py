@@ -16,7 +16,7 @@ from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
 from memory_profile import log_memory
 from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
-from optimal_SNR_calc import N_needed_for_population, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function
+from optimal_SNR_calc import N_needed_for_population, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, print_population_diagnostics, print_scaling_summary
 from pulsar_noise_using_enterprise import get_noise_matrix
@@ -336,9 +336,13 @@ def main():
 
     if config.OPTIMAL_SNR_POPULATION:
         population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_years=Tspan/(365.25*86400))
-        selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
+        # selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
+        #         population, psrs_clean, pulsar_noise_params, strain_data,
+        #         target_SNR=args.target_snr, T_obs=Tspan )
+        
+        selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
                 population, psrs_clean, pulsar_noise_params, strain_data,
-                target_SNR=args.target_snr, T_obs=Tspan )
+                target_SNR=args.target_snr)
         
         # plot_snr_population(
         #     binaries=population,
@@ -355,9 +359,9 @@ def main():
         # plot_overlap_reduction_function(
         #     pulsars=psrs_clean, binaries=population, pulsar_noise_params=pulsar_noise_params
         # )
-        pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_clean, noise_params_15yr=noise_params, Tspan=Tspan
-        )
+        # pta, model, params_complete = build_pta_and_params(
+        #     psrs=psrs_clean, noise_params_15yr=noise_params, Tspan=Tspan
+        # )
         # get_noise_matrix(psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan)
         # save_results({
         #     'N_needed': N_needed,

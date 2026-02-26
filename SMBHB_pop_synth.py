@@ -678,7 +678,7 @@ def compute_characteristic_strain_squared_circular(
             a = 1.0 + np.cos(i_loc)**2
             b = -2.0 * np.cos(i_loc)
             MeanAng = np.sqrt(2 * (a**2 + b**2))
-            h_squared[i] = const * MeanAng**2 \
+            h_squared[i] = const * MeanAng**2 * \
                         (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
                         (2.0 * np.pi * f_rest_orbital)**(4.0/3.0) 
     
@@ -963,10 +963,9 @@ def generate_smbhb_population(
     
     # Inclination angle: uniform on [0, π]
     inclination = rng.uniform(0, np.pi, size=n_binaries)
-    
+
     # Initial GW phase: uniform on [0, 2π]
     initial_phase = rng.uniform(0, 2*np.pi, size=n_binaries)
-    
     # ========================================================================
     # STEP 6: Compute strain (optional)
     # ========================================================================
@@ -979,7 +978,8 @@ def generate_smbhb_population(
             gw_frequencies, 
             chirp_masses, 
             comoving_dist, 
-            redshift
+            redshift,
+            inclination
         )
         # Bin into frequency bins and compute h_c
         bin_centres, h_c_total, h_c_individual = bin_characteristic_strain(
