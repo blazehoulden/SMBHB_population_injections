@@ -23,7 +23,8 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
         if profile:
             t0 = time.time()
         psrs_injected = inject_population_into_psrs(
-            psrs_clean, population, pure_signal=True, verbose=False
+            psrs_clean, population, pure_signal=True, verbose=False,
+            pulsar_noise_params=params
         )
         if profile:
             t_inject = time.time() - t0
@@ -217,14 +218,16 @@ def find_N_binaries_for_target_snr(
             psrs_injected = inject_population_subset_cached(
                 psrs_clean, population, N,
                 psrs_injected_cache=signal_cache,
-                pure_signal=True, verbose=False
+                pure_signal=True, verbose=False,
+                pulsar_noise_params=params
             )
         else:
             # Compute signals on-the-fly
             subset_population = population[:N]
             psrs_injected = inject_population_into_psrs(
                 psrs_clean, subset_population,
-                pure_signal=True, verbose=False
+                pure_signal=True, verbose=False,
+                pulsar_noise_params=params
             )
         
         # Now build PTA and compute OS

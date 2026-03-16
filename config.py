@@ -12,23 +12,23 @@ pc = 3.085677581e16   # Parsec [m]
 # Population configuration presets
 POPULATION_CONFIGS = {
     'optimistic': {
-        'n_binaries': 2,
+        'n_binaries': 2_000,
         'mass_distribution': 'power_law',
         'mass_cutoff_0': 1e9,
         'z_max': 2.0,
         'description': 'Larger mass, higher spread in distance, small population'
     },
     'realistic': {
-        'n_binaries': 4_000,
+        'n_binaries': 6_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 1e10,
         'z_max': 1.2,
         'description': 'Medium mass, medium spread in distance, medium population'
     },
     'pessimistic': {
-        'n_binaries': 10_000,
+        'n_binaries': 60_000,
         'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 1e9,
+        'mass_cutoff_0': 10**(9),
         'z_max': 1.0,
         'description': 'Lower mass, lower spread in distance, large population'
     }
@@ -77,7 +77,7 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, compute_strain=False, T_obs_years=15):
+def generate_population(config, smbhb_module, compute_strain=False, T_obs_years=16.03):
     """Generate SMBHB population with given configuration."""
     if compute_strain:
 

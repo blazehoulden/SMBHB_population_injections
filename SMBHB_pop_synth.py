@@ -785,7 +785,7 @@ def generate_smbhb_population(
     mass_max=1e11,
     mass_cutoff_0=1e9,
     mass_cutoff_z=0.0,
-    compute_strain=False,
+    compute_strain=True,
     n_freq_bins=50,
     T_obs=15,
     random_seed=None
@@ -990,11 +990,20 @@ def generate_smbhb_population(
         )
         
         # Find which bin each binary belongs to
-        f_min = np.min(gw_frequencies)
-        f_max = np.max(gw_frequencies)
+        f_min = 1.0 / (T_obs * YEAR_IN_SECONDS)
+        f_max = 3e-7
         f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
         N_bin_f = int((f_max - f_min) / f_step) + 1
+
         bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
+        bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        # bin_widths = bin_edges[1:] - bin_edges[:-1]
+        
+        # f_min = np.min(gw_frequencies)
+        # f_max = np.max(gw_frequencies)
+        # f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
+        # N_bin_f = int((f_max - f_min) / f_step) + 1
+        # bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
         bin_assignment = np.digitize(gw_frequencies, bin_edges) - 1
         bin_assignment = np.clip(bin_assignment, 0, n_freq_bins-1)
         

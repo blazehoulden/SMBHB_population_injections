@@ -5,7 +5,7 @@ from pta_builder import build_pta_and_params
 from SMBHB_population_injection.data_loader_for_tempo2 import restore_original_residuals
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 
-def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False, timer=False, profile=False):
+def compute_population_snr(population, psrs_clean, detailed_noise_params, Tspan, verbose=False, timer=False, profile=False):
     """
     Compute SNR for a given population of binaries (accounting for interference).
     
@@ -33,7 +33,7 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
         if profile:
             t0 = time.time()
         pta, _, params_out = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=params, 
+            psrs=psrs_injected, noise_params_15yr=detailed_noise_params, 
             Tspan=Tspan, use_efac_only=True
         )
         if profile:
@@ -500,7 +500,7 @@ def generate_snr_consistent_population(
 
 
 def generate_snr_consistent_populations(
-    config_template, smbhb_module, psrs_clean, params, Tspan,
+    config_template, smbhb_module, psrs_clean, detailed_noise_params, pulsar_noise_params_classified, Tspan,
     SNR_range, N_sims=20, N_initial_guess=2000, N_max_initial=10000,
     verbose=True, save_populations=True, profile=False,
     use_cache=True, cache_threshold=7000, batch_size=10000
@@ -516,7 +516,8 @@ def generate_snr_consistent_populations(
         config_template: base config dict for population generation
         smbhb_module: module containing binary evolution functions
         psrs_clean: clean pulsar data
-        params: noise parameters
+        detailed_noise_params: noise parameters in full detail from noise file
+        pulsar_noise_params_classified: parsed noise parameters
         Tspan: observation timespan
         SNR_range: tuple (SNR_min, SNR_max) for target SNR range
         N_sims: number of populations to generate
@@ -569,7 +570,8 @@ def generate_snr_consistent_populations(
             config_template=config_template,
             smbhb_module=smbhb_module,
             psrs_clean=psrs_clean,
-            params=params,
+            detailed_noise_params=detailed_noise_params,
+
             Tspan=Tspan,
             SNR_range=SNR_range,
             N_initial_guess=N_initial_guess,

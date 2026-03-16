@@ -89,7 +89,7 @@ def monitor_script():
     # Inject population (most memory intensive)
     print("Injecting population (memory intensive)...")
     psrs_injected = inject_population_into_psrs(
-        psrs_filtered, population, pure_signal=True, verbose=False
+        psrs_filtered, population, pure_signal=True, verbose=False, pulsar_noise_params=noise_params
     )
     
     mem_after_injection = get_memory_usage()

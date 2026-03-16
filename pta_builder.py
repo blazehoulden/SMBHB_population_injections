@@ -6,7 +6,8 @@ import numpy as np
 
 def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
                          gw_log10_A=np.log10(2.4e-15), gw_gamma=13.0/3.0, 
-                         include_GW=True, include_RN=False, include_WN=False):
+                         include_GW=True, include_RN=True, include_WN=True,
+                         nmodes=30):
     """
     Build PTA model and ensure all required parameters exist.
     
@@ -45,9 +46,9 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
         mn = white_signals.MeasurementNoise(efac=parameter.Constant(val=1e-8), log10_t2equad=parameter.Constant(val=-12), selection=selection)
 
     pl   = utils.powerlaw(log10_A=log10_A, gamma=gamma)
-    rn   = gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan)
+    rn   = gp_signals.FourierBasisGP(spectrum=pl, components=nmodes, Tspan=Tspan)
     cpl  = utils.powerlaw(log10_A=gw_log10_A, gamma=gw_gamma)
-    curn = gp_signals.FourierBasisGP(spectrum=cpl, components=14, Tspan=Tspan, name=crn_name)
+    curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
 
     model = tm
     if include_GW:
@@ -58,14 +59,11 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
         model += ec + mn
     if include_WN == False:
         model += mn
-    # if include_GW and include_RN:
-    #     model = tm + mn + ec + rn + curn
-    # elif include_GW and (include_RN == False):
-    #     model = tm + mn + ec + curn
-    # elif (include_GW == False) and include_RN:
-    #     model = tm + mn + ec + rn
-    # elif (include_GW == False) and (include_RN == False):
-    #     model = tm + mn + ec
+    if include_GW == False:
+        gw_log10_A=-18.0 # should be negligible enough
+        cpl  = utils.powerlaw(log10_A=gw_log10_A, gamma=gw_gamma)
+        curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
+        model += curn
 
     # ---- Instantiate per pulsar ----
     pta = signal_base.PTA([model(psr) for psr in psrs])

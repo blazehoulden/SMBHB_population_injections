@@ -16,15 +16,15 @@ def compute_os_for_N_binaries_incremental(N_total, N_prev, population, psrs_prev
         
         if N_prev == 0:
             psrs_new = inject_population_into_psrs(
-                psrs_clean, binaries_to_inject, pure_signal=True, add=False, verbose=False
+                psrs_clean, binaries_to_inject, pure_signal=True, add=False, verbose=False, pulsar_noise_params=params
             )
         else:
             psrs_new = inject_population_into_psrs(
-                psrs_prev, binaries_to_inject, pure_signal=True, add=True, verbose=False
+                psrs_prev, binaries_to_inject, pure_signal=True, add=True, verbose=False, pulsar_noise_params=params
             )
         
         pta_temp, _, params_out = build_pta_and_params(
-            psrs=psrs_new, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+            psrs=psrs_new, noise_params_15yr=params, Tspan=Tspan,
         )
         
         ostat = opt_stat.OptimalStatistic(psrs_new, pta=pta_temp, orf='hd')

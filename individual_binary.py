@@ -11,11 +11,11 @@ from config import Msun
 def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
     """Compute OS for single binary with detailed diagnostics."""
     try:
-        psrs_single = inject_population_into_psrs(psrs_clean, [binary], pure_signal=True)
+        psrs_single = inject_population_into_psrs(psrs_clean, [binary], pure_signal=True, pulsar_noise_params=noise_params_15yr)
         
         pta_single, _, params = build_pta_and_params(
             psrs=psrs_single, noise_params_15yr=noise_params_15yr, 
-            Tspan=Tspan, use_efac_only=True, crn_name="gw"
+            Tspan=Tspan, crn_name="gw"
         )
         
         ostat = opt_stat.OptimalStatistic(psrs_single, pta=pta_single, orf='hd')

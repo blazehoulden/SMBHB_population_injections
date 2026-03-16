@@ -6,6 +6,7 @@ Run with: python main.py
 import argparse
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 from datetime import datetime
 import config
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
@@ -16,10 +17,12 @@ from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
 from memory_profile import log_memory
 from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
-from optimal_SNR_calc import N_needed_for_population, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed
+from optimal_SNR_calc import N_needed_for_population, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, test_psd_vs_residuals_consistency
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, print_population_diagnostics, print_scaling_summary
-from pulsar_noise_using_enterprise import get_noise_matrix
+# from pulsar_noise_using_enterprise import get_noise_matrix
+from enterprise.signals.gp_bases import createfourierdesignmatrix_red
+
 import gc
 
 def parse_args():
@@ -119,12 +122,12 @@ def main():
     
     # ========== LOAD PULSARS ==========
     print("\n📡 Loading pulsars...")
-    psrs = load_pulsars(verbose=True)
+    psrs_unfiltered = load_pulsars(verbose=True)
     if toggle_memory_profiling:
         log_memory("After loading pulsars")
     
     print("\n🔍 Filtering pulsars...")
-    psrs_filtered, noise_params = filter_pulsars_15yr(psrs, verbose=True)
+    psrs_filtered, raw_noise_params = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
     if toggle_memory_profiling:
         log_memory("After filtering pulsars")
     
@@ -133,7 +136,11 @@ def main():
     if toggle_memory_profiling:
         log_memory("After getting clean pulsars and Tspan")
 
-    pulsar_noise_params = parse_pulsar_parameters(config.NOISEFILE)
+    parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
+
+    # testing code 
+    # from debug.test_noise_residuals import run_all_tests
+    # results = run_all_tests(psrs_clean, parsed_noise_params, Tspan, n_pulsars_to_test=5)
 
     # Force garbage collection
     gc.collect()
@@ -168,11 +175,11 @@ def main():
         print("="*70)
         
         psrs_injected = inject_population_into_psrs(
-            psrs_filtered, population, pure_signal=True, verbose=True
+            psrs_filtered, population, pure_signal=True, verbose=True, pulsar_noise_params=parsed_noise_params
         )
         
         pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=noise_params, Tspan=Tspan
+            psrs=psrs_injected, noise_params_15yr=raw_noise_params, Tspan=Tspan
         )
         
         print(f"✓ PTA built with {len(pta.params)} parameters")
@@ -195,7 +202,7 @@ def main():
         print("="*70)
         
         results, N_needed = run_scaling_analysis(
-            population, psrs_clean, noise_params, Tspan, 
+            population, psrs_clean, raw_noise_params, Tspan, 
             target_SNR=4.0, n_test_points=5
         )
         
@@ -218,7 +225,7 @@ def main():
         print("="*70)
         
         df = analyze_individual_binaries(
-            population, psrs_clean, noise_params, Tspan, max_binaries=50
+            population, psrs_clean, raw_noise_params, Tspan, max_binaries=50
         )
         print(df.head())
         
@@ -253,7 +260,7 @@ def main():
         SNR_low, SNR_high = args.snr_range
 
         ensemble_results = find_N_ensemble(
-            selected_config, smbhb_module, psrs_clean, noise_params, Tspan,
+            selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan,
             target_SNR=args.target_snr,
             SNR_range=(SNR_low, SNR_high),
             n_realisations=args.realisations,
@@ -289,7 +296,7 @@ def main():
         SNR_low, SNR_high = args.snr_range
         
         consistent_results = generate_snr_consistent_populations(
-            selected_config, smbhb_module, psrs_clean, noise_params, Tspan,
+            selected_config, smbhb_module, psrs_clean, raw_noise_params, parsed_noise_params, Tspan,
             SNR_range=(SNR_low, SNR_high),
             N_sims=args.simulations,
             N_initial_guess=N_initial_guess,
@@ -339,14 +346,48 @@ def main():
         # selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
         #         population, psrs_clean, pulsar_noise_params, strain_data,
         #         target_SNR=args.target_snr, T_obs=Tspan )
-        
+
+        # results = compare_pulsar_psd_methods(psrs_clean, raw_noise_params, parsed_noise_params, Tspan)
+        # for psr in psrs_clean:
+        #     fig = plot_psd_comparison(results, pulsar_name=psr.name)                 
+        #     plt.show()
+
+        # fig = plot_psd_comparison(results, pulsar_name="B1937+21")                        # first pulsar
+        # plt.show()
+        # fig = plot_psd_comparison(results, pulsar_name="B1953+29")                        # first pulsar
+        # plt.show()
+        # fig = plot_psd_comparison(results)                        # first pulsar
+        # plt.show()
+        # results = test_psd_vs_residuals_consistency(
+        #     psrs                = psrs_clean,
+        #     parsed_noise_params = parsed_noise_params,
+        #     raw_noise_params    = raw_noise_params,
+        #     Tspan               = Tspan,
+        #     nmodes              = 30,
+        #     n_realisations      = 500,
+        #     test_pulsar_idx     = 57,
+        # )
+
+        print("\nFinding optimal SNR population using enterprise noise model...")
         selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
-                population, psrs_clean, pulsar_noise_params, strain_data,
-                target_SNR=args.target_snr)
+                population, psrs_clean, parsed_noise_params, raw_noise_params, strain_data, Tspan,
+                target_SNR=args.target_snr, noise_method='enterprise')
+        
+        # print("\nFinding optimal SNR population using analytic noise model...")
+        # selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
+        #         population, psrs_clean, parsed_noise_params, raw_noise_params, strain_data, Tspan,
+        #         target_SNR=args.target_snr, noise_method='analytic')
+        results = {
+            'population': (selected_population[:N_needed], N_needed, final_SNR, SNR_sq_binaries),
+                }
+        # Save results
+        save_path = os.path.join(save_dir, 'optimal_SNR_population.json')
+        save_results(results, save_path)
+
         
         # plot_snr_population(
-        #     binaries=population,
-        #     SNR_sq_binaries=SNR_sq_binaries,
+        #     binaries=selected_population,
+        #     SNR_sq_binaries=SNR_sq_binaries[:N_needed],
         #     psrs=psrs_clean,
         #     top_N=50,
         #     selected_binaries=selected_population,   # marks N_needed on the cumulative plot

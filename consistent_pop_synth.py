@@ -2,13 +2,15 @@ import gc
 import numpy as np
 import time
 import config
-from signal_injection import precompute_binary_signals, inject_population_subset_cached, inject_population_into_psrs
+from signal_injection import precompute_binary_signals, inject_population_subset_cached, inject_population_into_psrs, _auto_chunk_size, r_k, _gw_residuals_chunked, _gw_residuals_vec
 from pta_builder import build_pta_and_params
 from data_loader import restore_original_residuals
 from memory_profile import log_memory
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
-def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False, timer=False, profile=False):
+
+def compute_population_snr(population, psrs_clean, detailed_noise_params, pulsar_noise_params_classified, Tspan, verbose=False, timer=False, profile=False):
     """
     Compute SNR for a given population of binaries (accounting for interference).
     
@@ -27,7 +29,7 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
         if profile:
             t0 = time.time()
         psrs_injected = inject_population_into_psrs(
-            psrs_clean, population, pure_signal=True, verbose=False
+            psrs_clean, population, pure_signal=True, verbose=False, pulsar_noise_params=pulsar_noise_params_classified
         )
         if profile:
             t_inject = time.time() - t0
@@ -36,7 +38,7 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
         if profile:
             t0 = time.time()
         pta, _, params_out = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=params, 
+            psrs=psrs_injected, noise_params_15yr=detailed_noise_params, 
             Tspan=Tspan
         )
         if profile:
@@ -84,69 +86,32 @@ def compute_population_snr(population, psrs_clean, params, Tspan, verbose=False,
         else:
             return np.nan
 
-
 def generate_snr_consistent_population(
-    config_template, smbhb_module, psrs_clean, params, Tspan,
+    config_template, smbhb_module, psrs_clean, detailed_noise_params, 
+    pulsar_noise_params_classified, Tspan,
     SNR_range, N_initial_guess=2000, N_max_initial=10000,
     max_iterations=10, tolerance=0.05, verbose=True, profile=False,
-    use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=False,
-    convergence_threshold=0.05, detailed_output_SNR = False
+    use_cache=True, cache_threshold=7000, batch_size=10000, 
+    toggle_memory_profiling=False, convergence_threshold=0.05, 
+    detailed_output_SNR=False, block_size=2000
 ):
-    """
-    Generate a single SMBHB population consistent with target SNR range.
-    
-    This function searches for the minimum number of binaries needed to achieve
-    an SNR within the specified range, then returns that population along with
-    all binary properties.
-    
-    Parameters:
-        config_template: base config dict for population generation
-        smbhb_module: module containing binary evolution functions
-        psrs_clean: clean pulsar data
-        params: noise parameters
-        Tspan: observation timespan
-        SNR_range: tuple (SNR_min, SNR_max) for target SNR range
-        N_initial_guess: starting N value for search
-        N_max_initial: initial population pool size
-        max_iterations: max bisection iterations
-        tolerance: relative convergence criterion
-        verbose: print progress
-        use_cache: if True, pre-compute signal cache for populations below cache_threshold
-        cache_threshold: max population size for caching (default 50000)
-        batch_size: if N_max_initial > cache_threshold, generate in batches of this size
-    
-    Returns:
-        dict containing:
-            'population': list of binary objects (with all properties)
-            'n_bininaries': number of binaries in consistent population
-            'SNR_achieved': actual SNR value achieved
-            'SNR_target': target SNR range
-            'search_metadata': dict with search history
-    """
     from config import generate_population
-    
+
     SNR_min, SNR_max = SNR_range
     if SNR_min >= SNR_max:
         raise ValueError(f"SNR_range must be (min, max) with min < max, got {SNR_range}")
-    
+
     # =====================================================================
-    # Phase 0: Generate initial population pool
+    # Phase 0: Generate and filter initial population pool
     # =====================================================================
     N_current = N_max_initial
-    
+
     if verbose:
         print(f"\nGenerating SNR-consistent population...")
         print(f"Target SNR range: [{SNR_min}, {SNR_max}]")
         print(f"Initial guess: N = {N_initial_guess}")
         print(f"Generating initial population pool: N = {N_current}")
-        if use_cache and N_current <= cache_threshold:
-            print(f"Caching enabled (threshold: {cache_threshold})")
-        else:
-            print(f"Caching disabled (population size {N_current} > threshold {cache_threshold})")
-        if N_current > cache_threshold:
-            print(f"Using batch generation (batch size: {batch_size})")
-    
-    # Generate population - use batching for large populations
+
     if N_current > batch_size:
         if verbose:
             print(f"Generating population in batches...")
@@ -154,98 +119,192 @@ def generate_snr_consistent_population(
         n_batches = int(np.ceil(N_current / batch_size))
         for batch_idx in range(n_batches):
             batch_n = min(batch_size, N_current - len(population))
-            if verbose:
-                print(f"  Batch {batch_idx+1}/{n_batches}: generating {batch_n} binaries...")
             config_batch = {**config_template, 'n_binaries': batch_n}
-            population.extend(generate_population(config_batch, smbhb_module, T_obs_years=Tspan/(365.25*86400)))
+            population.extend(generate_population(
+                config_batch, smbhb_module, 
+                T_obs_years=Tspan/(365.25*86400)
+            ))
     else:
         config = {**config_template, 'n_binaries': N_current}
-        population = generate_population(config, smbhb_module, T_obs_years=Tspan/(365.25*86400))
-    
+        population = generate_population(
+            config, smbhb_module, 
+            T_obs_years=Tspan/(365.25*86400)
+        )
+
     # =====================================================================
-    # Optionally pre-compute signal cache
+    # KEY OPTIMISATION 1: Pre-compute ALL per-binary GW signals once
     # =====================================================================
-    signal_cache = None
-    use_cached_injection = use_cache and N_current <= cache_threshold
+    # Each binary's residual for each pulsar is computed once and stored.
+    # compute_and_cache then just sums the first N entries — O(N*n_psr)
+    # instead of recomputing from scratch each time — O(N*n_psr*n_toa).
+    #
+    # Memory: n_psr * N_max * n_toa_avg * 8 bytes
+    # For 67 pulsars, 3000 binaries, 10000 TOAs avg: ~16 GB — too large
+    # So we store per-pulsar cumulative sums instead (see below).
     
-    if use_cached_injection:
-        if verbose:
-            print(f"Pre-computing binary signals for caching...")
-        signal_cache = precompute_binary_signals(psrs_clean, population)
-        if verbose:
-            print(f"✓ Signal cache ready\n")
-    else:
-        if verbose:
-            print(f"✓ Population ready (no caching)\n")
+    if verbose:
+        print(f"Pre-computing per-binary GW signals...")
     
-    # SNR cache: N -> SNR
-    snr_cache = {}
+    if verbose:
+        print(f"Initialising lazy signal cache (block_size={block_size})...")
+
+    signal_cache = LazyCumsumCache(
+        psrs=psrs_clean,
+        population=population,
+        block_size=block_size,           # tune based on n_toa and available memory
+        n_workers=min(8, len(psrs_clean)),
+        max_memory_mb=500,
+        verbose=verbose,
+    )
+
+    if verbose:
+        print(f"✓ Lazy cache ready — signals computed on demand\n")
+    # =====================================================================
+    # KEY OPTIMISATION 2: Build PTA and OptimalStatistic ONCE
+    # =====================================================================
+    # OptimalStatistic.__init__ only stores:
+    #   - references to psrs_clean (not residual values)
+    #   - the ORF matrix (HD coefficients, depends only on pulsar positions)
+    #   - PTA signal collections
+    # It does NOT read psr.residuals at construction time.
+    #
+    # compute_os() reads psr.residuals fresh on every call, so as long as
+    # we update psr._residuals before each compute_os call, the OS sees
+    # the correct injected signal. This means we can safely reuse the same
+    # ostat object across all N values tested in the search.
+    #
+    # build_pta_and_params uses:
+    #   - psrs_clean: pulsar objects (residuals don't matter here — 
+    #                 PTA is built from noise params only)
+    #   - detailed_noise_params: full noisefile params (EFAC/EQUAD/ECORR/RN)
+    #   - Tspan: observation span for Fourier basis construction
+    # pulsar_noise_params_classified is NOT used here — that's the parsed
+    # version used for drawing noise realisations in inject_population_into_psrs,
+    # which we no longer call inside compute_and_cache (we use cumsum instead).
+
+    if verbose:
+        print(f"Building PTA and OptimalStatistic (once)...")
+
+    # Zero residuals for PTA construction — the noise model (EFAC/EQUAD/RN)
+    # is built from detailed_noise_params, not from the residual values.
+    # Zeroing here just ensures nothing unexpected is in psr.residuals
+    # when enterprise initialises its internal structures.
+    for psr in psrs_clean:
+        psr._residuals = np.zeros(len(psr.toas))
+
+    # detailed_noise_params: the raw noisefile dict with keys like
+    # '{psr_name}_efac', '{psr_name}_red_noise_log10_A' etc.
+    # This is what build_pta_and_params uses to set Constant() parameters.
+    pta, _, params_out = build_pta_and_params(
+        psrs=psrs_clean,
+        noise_params_15yr=detailed_noise_params,
+        Tspan=Tspan
+    )
+
+    # Build OS
+    # orf='hd' uses Hellings-Downs coefficients (isotropic GWB assumption).
+    # NOTE: for finite SMBHB populations this is an approximation — see
+    # compute_antenna_pattern_orf_vectorised for the correct discrete-source ORF.
+    ostat = opt_stat.OptimalStatistic(psrs_clean, pta=pta, orf='hd')
+
+    # Pre-compute OS_sig (denominator) once.
+    # OS_sig = 1/sqrt(sum_ab tr(C_a^{-1} S_ab C_b^{-1} S_ba))
+    # This depends only on:
+    #   - C_a: noise covariance (from detailed_noise_params via pta)
+    #   - S_ab: GWB cross-correlation template (from ORF + PSD model)
+    # Neither depends on the injected signal, so OS_sig is identical
+    # across all calls regardless of what is in psr.residuals.
+    _, _, _, _, OS_sig = ostat.compute_os(params=params_out)
+
+
+    if verbose:
+        print(f"✓ PTA built. OS_sig = {OS_sig:.3e} (constant for all N)\n")
+
+    # =====================================================================
+    # Caches and helpers
+    # =====================================================================
+    snr_cache        = {}
     os_details_cache = {}
-    N_tested_list = []
-    SNR_tested_list = []
-    timing_list = []
-    
+    N_tested_list    = []
+    SNR_tested_list  = []
+    timing_list      = []
+
+
     def compute_and_cache(N):
-        """Compute SNR for N binaries, use cache if available."""
-        if toggle_memory_profiling:
-            log_memory(f"  Before injection N={N}")
+        """
+        Compute OS SNR for first N binaries from the population.
+
+        Flow:
+          1. inject_from_cumsum(N)  — set psr._residuals to GW signal
+          2. ostat.compute_os()     — reads psr.residuals, computes OS numerator
+          3. snr = OS / OS_sig      — OS_sig pre-computed, constant
+
+        Variables from outer scope:
+          psrs_clean               — pulsar objects (residuals updated in place)
+          ostat                    — pre-built OptimalStatistic (reused)
+          params_out               — noise params dict from build_pta_and_params
+                                     (uses detailed_noise_params internally)
+          OS_sig                   — pre-computed denominator (constant)
+          binary_signals           — cumsum cache keyed by psr.name
+          pulsar_noise_params_classified — NOT used here (no noise injection)
+        """
         if N in snr_cache:
             return snr_cache[N]
-        
+
         if N > len(population):
             raise ValueError(f"N={N} exceeds population size {len(population)}")
-        
         if N < 1:
             raise ValueError(f"N must be >= 1, got {N}")
-        
-        if profile:
-            t0 = time.time()
-        
-        # CRITICAL: Restore original residuals before each injection
+
+        if toggle_memory_profiling:
+            log_memory(f"  Before injection N={N}")
+
+        t0_total = time.time() if profile else None
+
+        # Restore clean baseline then inject GW signal from first N binaries
         restore_original_residuals(psrs_clean)
         
-        # Choose injection method based on caching
-        if use_cached_injection and signal_cache is not None:
-            psrs_injected = inject_population_subset_cached(
-                psrs_clean, population, N,
-                psrs_injected_cache=signal_cache,
-                pure_signal=True, verbose=False
-            )
-        else:
-            subset_population = population[:N]
-            psrs_injected = inject_population_into_psrs(
-                psrs_clean, subset_population,
-                pure_signal=True, verbose=False
-            )
-        
-        if profile:
-            t_inject = time.time() - t0
+        subset_population = population[:N]
+        psrs_injected = inject_population_into_psrs(
+            psrs_clean, subset_population,
+            pure_signal=True, verbose=False,
+            pulsar_noise_params=pulsar_noise_params_classified
+        )
 
-        if profile:
-            t0 = time.time()
-        
-        # Build PTA and compute OS
+        # Build PTA with injected residuals
         pta, _, params_out = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=params, 
+            psrs=psrs_injected,
+            noise_params_15yr=detailed_noise_params,
             Tspan=Tspan
         )
-        
-        if profile:
-            t_pta = time.time() - t0
-        
-        if profile:
-            t0 = time.time()
+
+        # # Set psr._residuals = cumsum of GW signals from first N binaries.
+        # # After this call, psrs_clean[i].residuals is the pure GW signal
+        # # from binaries 0..N-1, ready for compute_os to read.
+        # signal_cache.inject(N)
+
+        # Clear enterprise's internal delay cache on every signal collection.
+        # enterprise caches get_delay() keyed only on params — so when residuals
+        # change but params don't, it returns the stale cached delay from the
+        # first call. Clearing forces it to recompute from current psr.residuals.
+        for sc in pta._signalcollections:
+            sc._cache_get_delay = {}
+            sc._cache_list_get_delay = []
+
+        # compute_os reads psr.residuals (just set above) and computes:
+        #   OS  = sum_ab r_a^T C_a^{-1} S_ab C_b^{-1} r_b   (numerator)
+        #   OS_sig = 1/sqrt(sum_ab tr(C_a^{-1} S_ab C_b^{-1} S_ba)) (denominator)
+        # We discard the returned OS_sig and use the pre-computed one.
         ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
-        if profile:
-            t_ostat_init = time.time() - t0
+        xi, rho, sig, OS, _ = ostat.compute_os(params=params_out)
+        snr = OS / OS_sig
+
+        if toggle_memory_profiling:
+            log_memory(f"  After compute_os N={N}")
 
         if profile:
-            t0 = time.time()
-        xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_out)
-        if profile:
-            t_compute_os = time.time() - t0
-        
-        snr = OS / OS_sig
+            timing_list.append({'N': N, 'total': time.time() - t0_total})
+
         if detailed_output_SNR:
             os_details_cache[N] = {
                 'xi':     xi.tolist(),
@@ -255,162 +314,150 @@ def generate_snr_consistent_population(
                 'OS_sig': float(OS_sig),
             }
 
-        if toggle_memory_profiling:
-            log_memory(f"  After compute_os N={N}")
-        
-        if profile:
-            timing = {
-                'inject': t_inject,
-                'pta': t_pta,
-                'ostat_init': t_ostat_init,
-                'compute_os': t_compute_os,
-                'total': t_inject + t_pta + t_ostat_init + t_compute_os,
-            }
-            timing_list.append({'N': N, 'timing': timing})
-
-        # CRITICAL: Clean up heavy objects immediately
-        del pta, ostat, psrs_injected
-        gc.collect()
-        gc.collect()
         gc.collect()
 
         if toggle_memory_profiling:
             log_memory(f"  After cleanup N={N}")
-        snr_cache[N] = snr
+
+        snr_cache[N]     = snr
         N_tested_list.append(N)
         SNR_tested_list.append(snr)
         return snr
-    
+
     # =====================================================================
-    # Phase 1: Test initial guess and determine search direction
+    # Phase 1: Test initial guess
     # =====================================================================
-    N_test = min(N_initial_guess, N_current)
+    N_test   = min(N_initial_guess, len(population))
     snr_test = compute_and_cache(N_test)
-    
+
     if verbose:
         print(f"  N = {N_test}: SNR = {snr_test:.3f}")
-    
-    # Determine search direction
+
     if SNR_min <= snr_test <= SNR_max:
         search_direction = "verify"
-        N_low = 1
-        SNR_low = None
-        N_high = N_test
-        SNR_high = snr_test
+        N_low, SNR_low   = 1, None
+        N_high, SNR_high = N_test, snr_test
     elif snr_test < SNR_min:
         search_direction = "upward"
-        N_low = N_test
-        SNR_low = snr_test
-        N_high = None
-        SNR_high = None
-    else:  # snr_test > SNR_max
+        N_low, SNR_low   = N_test, snr_test
+        N_high, SNR_high = None, None
+    else:
         search_direction = "downward"
-        N_high = N_test
-        SNR_high = snr_test
-        N_low = 1
-        SNR_low = None
-    
+        N_high, SNR_high = N_test, snr_test
+        N_low,  SNR_low  = 1, None
+
     if verbose:
-        status = "in range!" if search_direction == "verify" else ("below" if search_direction == "upward" else "above") + " target"
+        status = ("in range!" if search_direction == "verify" 
+                  else ("below" if search_direction == "upward" else "above") + " target")
         print(f"  Initial guess is {status}")
         print(f"  Searching {search_direction}...\n")
-    
+
     # =====================================================================
     # Phase 2: Find bracketing points
     # =====================================================================
     expansion_count = 0
-    max_expansions = 6  # You can change this parameter
+    max_expansions  = 6
+
+    # Handle downward search: test N=1 before entering loop
+    if search_direction == "downward":
+        snr_at_1 = compute_and_cache(1)
+        if verbose:
+            print(f"  N = 1: SNR = {snr_at_1:.3f}")
+
+        if snr_at_1 > SNR_max:
+            if verbose:
+                print(f"\n  ✗ BROKEN: SNR at N=1 ({snr_at_1:.3f}) exceeds target "
+                      f"max ({SNR_max:.3f}) — check filter_population and OS_sig")
+            return {
+                'population': population[:1],
+                'n_bininaries': 1,
+                'SNR_achieved': float(snr_at_1),
+                'SNR_target': SNR_range,
+                'search_metadata': {
+                    'N_tested': N_tested_list,
+                    'SNR_tested': SNR_tested_list,
+                    'iterations': 0, 'expansions': 0,
+                    'used_cache': True,
+                    'warning': 'SNR_at_N1_exceeds_target',
+                    'broken': True,
+                }
+            }
+        elif SNR_min <= snr_at_1 <= SNR_max:
+            if verbose:
+                print(f"  ✓ N=1 already in target range, done.")
+            return {
+                'population': population[:1],
+                'n_bininaries': 1,
+                'SNR_achieved': float(snr_at_1),
+                'SNR_target': SNR_range,
+                'search_metadata': {
+                    'N_tested': N_tested_list,
+                    'SNR_tested': SNR_tested_list,
+                    'iterations': 0, 'expansions': 0,
+                    'used_cache': True,
+                    'warning': None, 'broken': False,
+                }
+            }
+        else:
+            N_low, SNR_low = 1, snr_at_1
+            if verbose:
+                print(f"  N=1 below target, bracket [{N_low}, {N_high}]")
 
     while expansion_count < max_expansions:
         if search_direction == "upward":
-            # Calculate what N_high should be
-            if N_high is None:
-                N_high_target = int(N_low * 1.5)
-            else:
-                N_high_target = int(N_high * 1.5)
-            
-            # FIX: Expand population BEFORE trying to use N_high_target
+            N_high_target = int((N_high or N_low) * 1.5)
+
             while N_high_target > len(population):
                 if expansion_count >= max_expansions:
-                    if verbose:
-                        print(f"  ⚠ Max expansions ({max_expansions}) reached")
-                        print(f"  Using population size: {len(population)}")
                     N_high_target = len(population)
                     break
-                
+
                 expansion_count += 1
-                N_to_add = int(len(population) * 0.5)
-                N_current = len(population) + N_to_add
-                
+                N_to_add   = int(len(population) * 0.5)
+                N_current  = len(population) + N_to_add
+
                 if verbose:
                     print(f"  ⚠ Expanding population: +{N_to_add} (total {N_current})")
-                
-                # Generate additional binaries
-                config_add = {**config_template, 'n_bininaries': N_to_add}
-                new_binaries = generate_population(config_add, smbhb_module, T_obs_years=Tspan/(365.25*86400))
-                population.extend(new_binaries)
-                
-                # Update cache if needed
-                if use_cached_injection and N_current <= cache_threshold and signal_cache is not None:
-                    if verbose:
-                        print(f"  Updating signal cache...")
-                    signal_cache = precompute_binary_signals(psrs_clean, population)
-                elif use_cached_injection and N_current > cache_threshold:
-                    if verbose:
-                        print(f"  Population exceeded cache threshold, disabling cache")
-                    signal_cache = None
-                    use_cached_injection = False
-            
-            # NOW safe to set N_high and compute SNR
-            N_high = N_high_target
-            snr_high = compute_and_cache(N_high)
-            
+
+                config_add   = {**config_template, 'n_binaries': N_to_add}
+                new_binaries = generate_population(config_add, smbhb_module,
+                                        T_obs_years=Tspan/(365.25*86400))
+                    
+                signal_cache.extend_population(new_binaries)
+
+
+            N_high    = N_high_target
+            snr_high  = compute_and_cache(N_high)
+
             if verbose:
                 print(f"  N = {N_high}: SNR = {snr_high:.3f}")
-            
-            # Update bracket based on where SNR falls
-            if snr_high >= SNR_min and snr_high <= SNR_max:
-                # In range! Use this as upper bound and stop
+
+            if snr_high > SNR_max:
                 SNR_high = snr_high
                 if SNR_low is not None and SNR_low < SNR_min:
-                    break  # Valid bracket found: [below_range, in_range]
-            elif snr_high > SNR_max:
-                # Above range - we have a valid bracket if N_low is below range
+                    break
+            elif snr_high >= SNR_min:
                 SNR_high = snr_high
                 if SNR_low is not None and SNR_low < SNR_min:
-                    break  # Valid bracket found: [below_range, above_range]
+                    break
             else:
-                # snr_high < SNR_min - still below target, update lower bound
-                N_low = N_high
-                SNR_low = snr_high
-            
+                N_low, SNR_low = N_high, snr_high
+
         elif search_direction == "downward":
-            if N_low == 1 and SNR_low is None:
-                snr_low = compute_and_cache(1)
-                if verbose:
-                    print(f"  N = 1: SNR = {snr_low:.3f}")
-                
-                if snr_low < SNR_min and SNR_high > SNR_max:
-                    SNR_low = snr_low
-                    break
-            else:
-                N_new = max(1, (N_low + N_high) // 2)
-                if N_new == N_low or N_new == N_high:
-                    break
-                
-                snr_new = compute_and_cache(N_new)
-                if verbose:
-                    print(f"  N = {N_new}: SNR = {snr_new:.3f}")
-                
-                if snr_new < SNR_min:
-                    N_low = N_new
-                    SNR_low = snr_new
-                    break
-                
-                N_high = N_new
-                SNR_high = snr_new
-        
-        else:  # search_direction == "verify"
+            N_new = max(1, (N_low + N_high) // 2)
+            if N_new == N_low or N_new == N_high:
+                break
+
+            snr_new = compute_and_cache(N_new)
+            if verbose:
+                print(f"  N = {N_new}: SNR = {snr_new:.3f}")
+
+            if snr_new < SNR_min:
+                N_low, SNR_low = N_new, snr_new
+                break
+            N_high, SNR_high = N_new, snr_new
+
+        else:  # verify
             break
 
     # =====================================================================
@@ -418,45 +465,37 @@ def generate_snr_consistent_population(
     # =====================================================================
     if SNR_low is None or SNR_high is None:
         if verbose:
-            print(f"\n  ⚠ WARNING: Could not bracket target SNR after {expansion_count} expansions")
-            print(f"  Population size: {len(population)}")
-            print(f"  This likely indicates bugs in SNR calculation")
-        # Return what we have
-        pass
+            print(f"\n  ⚠ WARNING: Could not bracket after {expansion_count} expansions")
     elif verbose:
-        print(f"\n  ✓ Bracketed: N ∈ [{N_low}, {N_high}], SNR ∈ [{SNR_low:.3f}, {SNR_high:.3f}]")
-    
+        print(f"\n  ✓ Bracketed: N ∈ [{N_low}, {N_high}], "
+              f"SNR ∈ [{SNR_low:.3f}, {SNR_high:.3f}]")
+
     # =====================================================================
-    # Phase 4: Bisection to find minimum N in range
+    # Phase 4: Bisection
     # =====================================================================
     found_in_range = False
-    
+    iteration      = 0
+
     for iteration in range(max_iterations):
-        # Check convergence: either N difference ≤ 1 OR within 5% when in range
         if N_high - N_low <= 1:
             if verbose:
-                print(f"✓ Bracket converged (difference ≤ 1)")
+                print(f"✓ Bracket converged (N difference ≤ 1)")
             break
-        
+
         if found_in_range and (N_high - N_low) / N_high <= convergence_threshold:
             if verbose:
-                print(f"✓ Bracket converged (within {convergence_threshold*100:.0f}% of N={N_high})")
+                print(f"✓ Bracket converged (within "
+                      f"{convergence_threshold*100:.0f}% of N={N_high})")
             break
-        
-        # Adaptive step size
-        if found_in_range:
-            frac = 0.15  # Small steps when in range
-        else:
-            frac = 0.5  # Normal bisection
-        
+
+        frac  = 0.15 if found_in_range else 0.5
         N_mid = int(N_low + frac * (N_high - N_low))
         N_mid = max(N_low + 1, min(N_mid, N_high - 1))
-        
+
         snr_mid = compute_and_cache(N_mid)
         if verbose:
             print(f"  Iter {iteration+1}: N = {N_mid}, SNR = {snr_mid:.3f}")
-        
-        # Update bracket
+
         if snr_mid < SNR_min:
             N_low, SNR_low = N_mid, snr_mid
             found_in_range = False
@@ -464,83 +503,57 @@ def generate_snr_consistent_population(
             N_high, SNR_high = N_mid, snr_mid
             found_in_range = False
         else:
-            # In range! Search downward for minimum
-            found_in_range = True
+            found_in_range   = True
             N_high, SNR_high = N_mid, snr_mid
 
     # =====================================================================
     # Phase 5: Select final population
     # =====================================================================
-
-    # Find all tested N that land inside the target SNR range
-    valid_indices = [
-        i for i, snr in enumerate(SNR_tested_list)
-        if SNR_min <= snr <= SNR_max
-    ]
+    valid_indices = [i for i, snr in enumerate(SNR_tested_list)
+                     if SNR_min <= snr <= SNR_max]
 
     if valid_indices:
-        # NEW BEHAVIOR:
-        # pick the minimum N that is in-range (not nearest to midpoint)
         best_idx = min(valid_indices, key=lambda i: N_tested_list[i])
-        N_final = N_tested_list[best_idx]
-        SNR_final = SNR_tested_list[best_idx]
-
     else:
-        # Fall back if target range never reached:
-        # choose first N whose SNR exceeds upper bound (if any)
-        above_indices = [
-            i for i, snr in enumerate(SNR_tested_list)
-            if snr > SNR_max
-        ]
-
+        above_indices = [i for i, snr in enumerate(SNR_tested_list)
+                         if snr > SNR_max]
         if above_indices:
-            # pick smallest N above range (monotonic upward fallback)
             best_idx = min(above_indices, key=lambda i: N_tested_list[i])
-            N_final = N_tested_list[best_idx]
-            SNR_final = SNR_tested_list[best_idx]
         else:
-            # final fallback: closest to midpoint (original behavior)
             range_mid = 0.5 * (SNR_min + SNR_max)
-            closest_idx = min(
-                range(len(SNR_tested_list)),
-                key=lambda i: abs(SNR_tested_list[i] - range_mid)
-            )
-            N_final = N_tested_list[closest_idx]
-            SNR_final = SNR_tested_list[closest_idx]
+            best_idx  = min(range(len(SNR_tested_list)),
+                            key=lambda i: abs(SNR_tested_list[i] - range_mid))
+
+    N_final   = N_tested_list[best_idx]
+    SNR_final = SNR_tested_list[best_idx]
 
     if verbose:
         print(f"\n✓ Population generated: N = {N_final}, SNR = {SNR_final:.3f}")
         print(f"  (Target range: [{SNR_min}, {SNR_max}])\n")
 
-    
-    # Return the first N_final binaries from the population
-    final_population = population[:N_final]
-    # Return the first N_final binaries from the population
     result = {
-        'population': final_population,
-        'n_bininaries': N_final,
-        'SNR_achieved': float(SNR_final),
-        'SNR_target': SNR_range,
+        'population':      population[:N_final],
+        'n_bininaries':    N_final,
+        'SNR_achieved':    float(SNR_final),
+        'SNR_target':      SNR_range,
         'search_metadata': {
-            'N_tested': N_tested_list,
-            'SNR_tested': SNR_tested_list,
-            'iterations': iteration + 1,
-            'expansions': expansion_count,
-            'used_cache': signal_cache is not None
+            'N_tested':    N_tested_list,
+            'SNR_tested':  SNR_tested_list,
+            'iterations':  iteration + 1,
+            'expansions':  expansion_count,
+            'used_cache':  True,
         }
     }
 
     if detailed_output_SNR:
-        # os_details_cache is keyed by N; attach the entry for the chosen N_final,
-        # plus the full history so the caller can inspect every tested N if desired.
-        result['os_details'] = os_details_cache.get(N_final)
-        result['os_details_history'] = os_details_cache   # all N -> detail mappings
+        result['os_details']         = os_details_cache.get(N_final)
+        result['os_details_history'] = os_details_cache
 
     return result
 
 
 def generate_snr_consistent_populations(
-    config_template, smbhb_module, psrs_clean, params, Tspan,
+    config_template, smbhb_module, psrs_clean, detailed_noise_params, pulsar_noise_params_classified, Tspan,
     SNR_range, N_sims=20, N_initial_guess=2000, N_max_initial=10000,
     verbose=True, save_populations=True, profile=False,
     use_cache=True, cache_threshold=7000, batch_size=10000, toggle_memory_profiling=config.MEMORY_PROFILE_ENABLED,
@@ -557,7 +570,8 @@ def generate_snr_consistent_populations(
         config_template: base config dict for population generation
         smbhb_module: module containing binary evolution functions
         psrs_clean: clean pulsar data
-        params: noise parameters
+        detailed_noise_params: full noise parameters from noise file
+        detailed_noise_params: parsed noise parameters from noise file
         Tspan: observation timespan
         SNR_range: tuple (SNR_min, SNR_max) for target SNR range
         N_sims: number of populations to generate
@@ -610,7 +624,8 @@ def generate_snr_consistent_populations(
             config_template=config_template,
             smbhb_module=smbhb_module,
             psrs_clean=psrs_clean,
-            params=params,
+            detailed_noise_params=detailed_noise_params,
+            pulsar_noise_params_classified=pulsar_noise_params_classified,
             Tspan=Tspan,
             SNR_range=SNR_range,
             N_initial_guess=N_initial_guess,
@@ -769,3 +784,184 @@ def extract_binary_properties(populations_result, property_names=None):
                     })
     
     return all_properties
+
+
+class LazyCumsumCache:
+    """
+    Computes per-binary GW signals on demand, in blocks, parallelised over pulsars.
+
+    Design
+    ------
+    Rather than precomputing GW signals for all N_pool binaries upfront
+    (expensive for N_pool ~ 180k), signals are computed lazily in blocks
+    of `block_size` binaries only when a new N value is requested.
+
+    At each block boundary a checkpoint is saved:
+        checkpoints[psr_name] = [(N_boundary, cumsum_at_boundary), ...]
+    so that get_signal(N) can find the nearest checkpoint below N and only
+    recompute the tail (at most block_size individual r_k calls).
+
+    Parallelism
+    -----------
+    Each block is computed in parallel across pulsars using ThreadPoolExecutor.
+    The GW computation (numpy-dominated) releases the GIL so thread parallelism
+    is effective. For 67 pulsars on 8 cores this gives ~5-6x block speedup.
+
+    Memory
+    ------
+    Only checkpoint arrays are stored long-term: n_checkpoints * n_psr * n_toa * 8 bytes.
+    For 67 pulsars, 3000 TOAs avg, block_size=2000, N_pool=180k:
+        n_checkpoints = 90, memory ~ 90 * 67 * 3000 * 8 ~ 145 MB  (manageable)
+    """
+
+    def __init__(self, psrs, population, block_size=2000, n_workers=4,
+                 max_memory_mb=200, verbose=False):
+        self.psrs       = psrs
+        self.population = population
+        self.block_size = block_size
+        self.n_workers  = n_workers
+        self.verbose    = verbose
+
+        # Pre-extract TOA arrays and build pulsar lookup — avoids generator
+        # searches inside threads which are slow and not thread-safe
+        self.toas    = {psr.name: np.asarray(psr.toas, dtype=np.float64)
+                        for psr in psrs}
+        self.psr_map = {psr.name: psr for psr in psrs}
+
+        # Auto chunk size per pulsar for vectorised GW computation
+        self.cs = {psr.name: _auto_chunk_size(len(psr.toas), max_memory_mb)
+                   for psr in psrs}
+
+        # Checkpoints: list of (N_at_boundary, cumsum_array) per pulsar
+        # Initialised with a zero checkpoint at N=0
+        zeros = {psr.name: np.zeros(len(psr.toas), dtype=np.float64)
+                 for psr in psrs}
+        self.checkpoints = {psr.name: [(0, zeros[psr.name].copy())]
+                            for psr in psrs}
+
+        # Running cumulative sum — updated as blocks are computed
+        self.running_sum = {psr.name: np.zeros(len(psr.toas), dtype=np.float64)
+                            for psr in psrs}
+
+        # How many binaries have been fully processed into checkpoints
+        self.N_computed = 0
+
+    def _block_signal_for_psr(self, psr_name, block_start, block_end):
+        """
+        Compute the SUM of GW residuals from population[block_start:block_end]
+        for one pulsar. Returns (n_toa,) float64.
+
+        Called inside ThreadPoolExecutor — uses only pre-extracted arrays
+        (self.toas, self.psr_map) which are read-only and thread-safe.
+        """
+        t_sec = self.toas[psr_name]
+        psr   = self.psr_map[psr_name]
+        block = self.population[block_start:block_end]
+        cs    = self.cs[psr_name]
+
+        if len(block) <= cs:
+            return _gw_residuals_vec(t_sec, psr, block).astype(np.float64)
+        else:
+            return _gw_residuals_chunked(t_sec, psr, block, cs).astype(np.float64)
+
+    def ensure_computed_up_to(self, N):
+        """
+        Ensure checkpoint data exists for all binaries up to index N.
+        Computes any missing blocks, saving a checkpoint at each block boundary.
+        Is a no-op if N <= self.N_computed.
+        """
+        N = min(N, len(self.population))
+        if N <= self.N_computed:
+            return
+
+        start = self.N_computed
+        end   = N
+
+        if self.verbose:
+            n_new_blocks = int(np.ceil((end - start) / self.block_size))
+            print(f"  [Cache] Computing blocks for binaries {start}→{end} "
+                  f"({n_new_blocks} blocks × {len(self.psrs)} pulsars)...")
+
+        psr_names = [psr.name for psr in self.psrs]
+
+        with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
+            for block_start in range(start, end, self.block_size):
+                block_end = min(block_start + self.block_size, end)
+
+                # Submit all pulsars for this block in parallel
+                futures = {
+                    name: executor.submit(
+                        self._block_signal_for_psr, name, block_start, block_end
+                    )
+                    for name in psr_names
+                }
+
+                # Collect and accumulate — futures.result() blocks until done
+                for name in psr_names:
+                    self.running_sum[name] += futures[name].result()
+
+                # Checkpoint at block boundary
+                N_boundary = block_end
+                for name in psr_names:
+                    self.checkpoints[name].append(
+                        (N_boundary, self.running_sum[name].copy())
+                    )
+
+        self.N_computed = end
+
+        if self.verbose:
+            print(f"  [Cache] ✓ Ready up to N={end}")
+
+    def get_signal(self, N, psr_name):
+        """
+        Return total GW residual from first N binaries for psr_name.
+
+        Finds the largest checkpoint <= N, then adds individual r_k calls
+        for the tail [checkpoint_N, N). Tail length <= block_size.
+        """
+        self.ensure_computed_up_to(N)
+
+        checkpoints = self.checkpoints[psr_name]
+
+        # Binary search for largest checkpoint index <= N
+        lo, hi = 0, len(checkpoints) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if checkpoints[mid][0] <= N:
+                lo = mid
+            else:
+                hi = mid - 1
+
+        N_cp, cumsum_cp = checkpoints[lo]
+
+        if N_cp == N:
+            return cumsum_cp.copy()
+
+        # Add tail: individual binaries from N_cp to N
+        # At most block_size calls — fast even without vectorisation
+        t_sec  = self.toas[psr_name]
+        psr    = self.psr_map[psr_name]
+        extra  = np.zeros(len(t_sec), dtype=np.float64)
+        for binary in self.population[N_cp:N]:
+            extra += r_k(t_sec, psr, binary)
+
+        return cumsum_cp + extra
+
+    def inject(self, N):
+        """
+        Set psr._residuals for all pulsars to GW signal from first N binaries.
+        This is what compute_and_cache calls before each ostat.compute_os().
+        """
+        self.ensure_computed_up_to(N)
+        for psr in self.psrs:
+            psr._residuals = self.get_signal(N, psr.name)
+
+    def extend_population(self, new_binaries):
+        """
+        Append new binaries. Their signals are computed lazily on next inject().
+        N_computed stays unchanged — new signals only computed when needed.
+        """
+        self.population.extend(new_binaries)
+        if self.verbose:
+            print(f"  [Cache] Population extended to {len(self.population)} binaries "
+                  f"(computed up to {self.N_computed})")
