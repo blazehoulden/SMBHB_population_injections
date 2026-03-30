@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LogLocator, AutoMinorLocator
-from signal_injection import inject_population_into_psrs, strain_amplitude
+from signal_injection import inject_population_nufft
 from pta_builder import build_pta_and_params
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from config import Msun
@@ -11,7 +11,7 @@ from config import Msun
 def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
     """Compute OS for single binary with detailed diagnostics."""
     try:
-        psrs_single = inject_population_into_psrs(psrs_clean, [binary], pure_signal=True, pulsar_noise_params=noise_params_15yr)
+        psrs_single = inject_population_nufft(psrs_clean, [binary], pure_signal=True, verbose=False)
         
         pta_single, _, params = build_pta_and_params(
             psrs=psrs_single, noise_params_15yr=noise_params_15yr, 
@@ -22,8 +22,8 @@ def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
         xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params)
         
         snr = OS / OS_sig
-        h_0 = strain_amplitude(binary['Mc'], binary['f'], binary['D'])
-        r_amp = h_0 / (2 * np.pi * binary['f'])
+        h_0 = binary.h0
+        r_amp = h_0 / (2 * np.pi * binary.f)
         
         # Sky location metrics relative to pulsars
         psr_separations = []
@@ -31,8 +31,8 @@ def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
             psr_ra = psr._raj
             psr_dec = psr._decj
             # Angular separation (small angle approximation)
-            delta_ra = binary['ra'] - psr_ra
-            delta_dec = binary['dec'] - psr_dec
+            delta_ra = binary.ra - psr_ra
+            delta_dec = binary.dec - psr_dec
             sep = np.sqrt(delta_ra**2 + delta_dec**2)
             psr_separations.append(np.degrees(sep))
         
@@ -44,11 +44,11 @@ def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
             'abs_SNR': abs(snr),
             'h_0': h_0,
             'residual_amplitude_us': r_amp * 1e6,
-            'frequency_nHz': binary['f'] * 1e9,
-            'chirp_mass_Msun': binary['Mc'] / Msun,
-            'comoving_distance_Mpc': binary['D_comov'],
-            'ra_deg': np.degrees(binary['ra']),
-            'dec_deg': np.degrees(binary['dec']),
+            'frequency_nHz': binary.f * 1e9,
+            'chirp_mass_Msun': binary.Mc / Msun,
+            'comoving_distance_Mpc': binary.D_comov,
+            'ra_deg': np.degrees(binary.ra),
+            'dec_deg': np.degrees(binary.dec),
             'mean_rho': np.mean(rho),
             'std_rho': np.std(rho),
             'pos_corr': np.sum(rho > 0),
@@ -69,11 +69,9 @@ def analyze_individual_binaries(population, psrs_clean, noise_params_15yr, Tspan
     print(f"Analyzing top {N_analyze} binaries by strain amplitude...")
     
     # Pre-screen by strain
-    lum_dist = np.array([b['D_comov'] for b in population])
-    lum_dist *= (1 + np.array([b['z'] for b in population]))
-    h0_values = []
-    for b, d_L in zip(population, lum_dist):
-        h0_values.append(strain_amplitude(b['Mc'], b['f'], d_L))
+    lum_dist = np.array([b.D_comov for b in population])
+    lum_dist *= (1 + np.array([b.z for b in population]))
+    h0_values = np.array([b.h0 for b in population])
     top_indices = np.argsort(h0_values)[::-1][:N_analyze]
     
     results = []

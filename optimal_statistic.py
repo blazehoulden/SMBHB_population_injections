@@ -1,7 +1,7 @@
 import time
 import numpy as np
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
-from signal_injection import inject_population_into_psrs
+from signal_injection import inject_population_nufft
 from pta_builder import build_pta_and_params
 
 
@@ -15,12 +15,12 @@ def compute_os_for_N_binaries_incremental(N_total, N_prev, population, psrs_prev
         ΔN = len(binaries_to_inject)
         
         if N_prev == 0:
-            psrs_new = inject_population_into_psrs(
-                psrs_clean, binaries_to_inject, pure_signal=True, add=False, verbose=False, pulsar_noise_params=params
+            psrs_new = inject_population_nufft(
+                psrs_clean, binaries_to_inject, pure_signal=True,verbose=False
             )
         else:
-            psrs_new = inject_population_into_psrs(
-                psrs_prev, binaries_to_inject, pure_signal=True, add=True, verbose=False, pulsar_noise_params=params
+            psrs_new = inject_population_nufft(
+                psrs_prev, binaries_to_inject, pure_signal=True, verbose=False
             )
         
         pta_temp, _, params_out = build_pta_and_params(

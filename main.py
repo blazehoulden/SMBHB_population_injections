@@ -3,21 +3,25 @@
 Main execution script for SMBHB population analysis.
 Run with: python main.py
 """
-import argparse
 import os
-import config_new
+
+from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+import argparse
+import config
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-import config
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
+from SMBHB_pop_synth import chosen_population
 from data_loader import load_pulsars, filter_pulsars_15yr, get_clean_pulsars_and_tspan, parse_pulsar_parameters
-from signal_injection import inject_population_into_psrs
+from signal_injection import inject_population_nufft
 from pta_builder import build_pta_and_params
 from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
 from memory_profile import log_memory
-from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
+from consistent_pop_synth import compute_population_snr
+# from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
 from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, print_population_diagnostics, print_scaling_summary
@@ -167,7 +171,7 @@ def main():
     # Generate population
     print("\n📊 Generating sample SMBHB population...")
     population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
-    print_population_diagnostics(population)
+    # print_population_diagnostics(population)
     
     # ========== INITIAL INJECTION (OPTIONAL) ==========
     if config.RUN_INITIAL_INJECTION_ANALYSIS:
@@ -247,46 +251,44 @@ def main():
             )
     
     # ========== ENSEMBLE ANALYSIS ==========
-    if config.RUN_ENSEMBLE_ANALYSIS:
-        print("\n" + "="*70)
-        print("ENSEMBLE ANALYSIS")
-        print("="*70)
+    # if config.RUN_ENSEMBLE_ANALYSIS:
+        # print("\n" + "="*70)
+        # print("ENSEMBLE ANALYSIS")
+        # print("="*70)
         
-        # auto guess: default = 0.5 * n_binaries
-        if args.initial_guess == "auto":
-            N_initial_guess = int(0.5 * selected_config['n_binaries'])
-        else:
-            N_initial_guess = int(args.initial_guess)
+        # # auto guess: default = 0.5 * n_binaries
+        # if args.initial_guess == "auto":
+        #     N_initial_guess = int(0.5 * selected_config['n_binaries'])
+        # else:
+        #     N_initial_guess = int(args.initial_guess)
 
-        SNR_low, SNR_high = args.snr_range
+        # SNR_low, SNR_high = args.snr_range
 
-        ensemble_results = find_N_ensemble(
-            selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan_seconds,
-            target_SNR=args.target_snr,
-            SNR_range=(SNR_low, SNR_high),
-            n_realisations=args.realisations,
-            N_initial_guess=N_initial_guess,
-            N_max_initial=selected_config['n_binaries'] * 3
-        )
+        # ensemble_results = find_N_ensemble(
+        #     selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan_seconds,
+        #     target_SNR=args.target_snr,
+        #     SNR_range=(SNR_low, SNR_high),
+        #     n_realisations=args.realisations,
+        #     N_initial_guess=N_initial_guess,
+        #     N_max_initial=selected_config['n_binaries'] * 3
+        # )
         
-        if 'statistics' in ensemble_results:
-            stats = ensemble_results['statistics']
-            print(f"\nn_binaries statistics:")
-            print(f"  Mean: {stats['mean']:.0f}")
-            print(f"  Median: {stats['median']:.0f}")
-            print(f"  Std: {stats['std']:.0f}")
+        # if 'statistics' in ensemble_results:
+        #     stats = ensemble_results['statistics']
+        #     print(f"\nn_binaries statistics:")
+        #     print(f"  Mean: {stats['mean']:.0f}")
+        #     print(f"  Median: {stats['median']:.0f}")
+        #     print(f"  Std: {stats['std']:.0f}")
 
-        # Save results
-        save_path = os.path.join(save_dir, 'ensemble_results.json')
-        save_results(ensemble_results, save_path)
+        # # Save results
+        # save_path = os.path.join(save_dir, 'ensemble_results.json')
+        # save_results(ensemble_results, save_path)
         
     # ========== CONSISTENT POPULATION SYNTHESIS ==========
     if config.RUN_CONSISTENT_POP_SYNTH:
         print("\n" + "="*70)
         print("CONSISTENT POPULATION SYNTHESIS")
         print("="*70)
-        
-        from consistent_pop_synth_new import generate_snr_consistent_populations
         
         # auto guess: default = full n_binaries for consistent pop
         if args.initial_guess == "auto":
@@ -296,30 +298,25 @@ def main():
         
         SNR_low, SNR_high = args.snr_range
         
-        consistent_results = generate_snr_consistent_populations(
-            selected_config, smbhb_module, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds,
-            SNR_range=(SNR_low, SNR_high),
+        consistent_results = generate_snr_consistent_populations_distance_scaling(
+            config_template=selected_config,
+            smbhb_module=smbhb_module,
+            psrs_clean=psrs_clean,
+            raw_noise_params=raw_noise_params,
+            Tspan=Tspan_seconds,
+            target_SNR= SNR_high,
             N_sims=args.simulations,
-            N_initial_guess=N_initial_guess,
-            N_max_initial=selected_config['n_binaries'] * 3,
             verbose=True,
+            save_populations=True,
             profile=False,
-            use_cache=False,
-            cache_threshold=0,
-            detailed_output_SNR=True
+            test=False
         )
-        
+                
         # Save results
-        save_path = os.path.join(save_dir, 'consistent_pop_synth.json')
+        file_name = f'consistent_population_{CONFIG_NAME}_targetSNR{SNR_high}_sims{args.simulations}.json'
+        save_path = os.path.join(save_dir, file_name)
         save_results(consistent_results, save_path)
-
         
-        # ORF = consistent_results["populations"]["ORF"]
-        # xi_sorted = sorted(ORF)
-        # for i in range(len(xi_sorted)):
-        #     xi_sorted[i] *= 180.0 / np.pi
-        # with np.printoptions(threshold=np.inf):
-        #     print(xi_sorted)
         
 
 
@@ -343,7 +340,7 @@ def main():
     print("="*70)
 
     if config.OPTIMAL_SNR_POPULATION:
-        population, strain_data = config_new.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
+        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
 
             # print("\nFinding optimal SNR population using enterprise noise model...")
             # selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
@@ -401,7 +398,6 @@ def main():
         # diagnose_high_snr('complete_breakdown.json')
     if config.SNR_COMPARISON_CHOSEN_POP:
 
-        from SMBHB_pop_synth import chosen_population
         sample_pop, strain_data = chosen_population(
             n_binaries = 1,
             chirp_mass_msun=1e10,
@@ -425,7 +421,6 @@ def main():
             strain_data=strain_data,
             Tspan=Tspan_seconds
             )
-        from consistent_pop_synth import compute_population_snr
         snr, ostat = compute_population_snr(
             population=sample_pop, 
             psrs_clean=psrs_clean, 

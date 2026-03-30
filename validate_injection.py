@@ -8,11 +8,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from copy import deepcopy
 
-from signal_injection_new import inject_population_direct, inject_population_nufft, inject_population_nufft
-from SMBHB_pop_synth_new import precompute_amplitudes
-
-# Old method lives in your original residuals.py
-from signal_injection import population_residuals_vectorised
+from signal_injection import inject_population_direct, inject_population_nufft, inject_population_nufft, population_residuals_vectorised
+from SMBHB_pop_synth import precompute_amplitudes
+from consistent_pop_synth import compute_population_snr
 
 
 def compare_injection_methods(
@@ -158,7 +156,7 @@ def compare_injection_methods(
 
 
 def compare_os_snr(psrs, population, Tspan, detailed_noise_params,
-                   build_pta_and_params, opt_stat, verbose=True):
+                   verbose=True):
     """
     Run the full OS SNR comparison between both injection methods.
 
@@ -168,49 +166,37 @@ def compare_os_snr(psrs, population, Tspan, detailed_noise_params,
     from copy import deepcopy
 
     # Need independent copies of psrs so the two methods don't interfere
-    psrs_nufft = deepcopy(psrs)
-    psrs_old   = deepcopy(psrs)
-
     pop_dict = population.to_dict_list()
-
-    # ── precompute for NUFFT ─────────────────────────────────────────────────
-    for psr in psrs_nufft:
-        precompute_amplitudes(population, psr)
-
-    # ── inject NUFFT ─────────────────────────────────────────────────────────
-    inject_population_nufft(
-        psrs_nufft, population,
-        N_freq=None, pure_signal=True, verbose=False,
-    )
-
     # ── inject old ───────────────────────────────────────────────────────────
-    for psr in psrs_old:
+    for psr in psrs:
         t_sec = np.asarray(psr.toas, dtype=np.float64)
         psr._residuals = population_residuals_vectorised(
             t_sec, psr, pop_dict, Tspan=Tspan,
             include_GW=True, include_RN=False, include_WN=False,
         )
 
-    # ── OS SNR for each ──────────────────────────────────────────────────────
-    def get_snr(psrs_injected):
-        pta, _, params_out = build_pta_and_params(
-            psrs=psrs_injected,
-            noise_params_15yr=detailed_noise_params,
-            Tspan=Tspan,
-        )
-        ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
-        _, _, _, OS, OS_sig = ostat.compute_os(params=params_out)
-        return OS / OS_sig, OS, OS_sig
+    snr_old = compute_population_snr(population, psrs, raw_noise_params=detailed_noise_params, Tspan=Tspan)
+    
+    from consistent_pop_synth import _restore_zero_residuals
+    _restore_zero_residuals(psrs)
+        # ── precompute for NUFFT ─────────────────────────────────────────────────
+    for psr in psrs:
+        precompute_amplitudes(population, psr)
 
-    snr_nufft, OS_nufft, OS_sig_nufft = get_snr(psrs_nufft)
-    snr_old,   OS_old,   OS_sig_old   = get_snr(psrs_old)
+    # ── inject NUFFT ─────────────────────────────────────────────────────────
+    inject_population_nufft(
+        psrs, population,
+        N_freq=None, pure_signal=True, verbose=False,
+    )
+
+    snr_nufft = compute_population_snr(population, psrs, raw_noise_params=detailed_noise_params, Tspan=Tspan)
 
     if verbose:
         print(f"\n{'='*50}")
         print(f"OS SNR COMPARISON")
         print(f"{'='*50}")
-        print(f"  NUFFT method:  SNR = {snr_nufft:.6f}  (OS={OS_nufft:.3e}, OS_sig={OS_sig_nufft:.3e})")
-        print(f"  Old method:    SNR = {snr_old:.6f}  (OS={OS_old:.3e},   OS_sig={OS_sig_old:.3e})")
+        print(f"  NUFFT method:  SNR = {snr_nufft:.6f}")
+        print(f"  Old method:    SNR = {snr_old:.6f}")
         print(f"  Relative diff: {abs(snr_nufft - snr_old)/abs(snr_old)*100:.4f}%")
         print(f"{'='*50}")
 

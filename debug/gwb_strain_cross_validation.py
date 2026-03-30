@@ -121,9 +121,9 @@ def compute_gwb_strain_method1(population, T_obs=30.0, n_freq_bins=100):
     
     # Process each source
     for n_s, binary in enumerate(population):
-        Mc = binary['Mc']
-        z_loc = binary['z']
-        f = binary['f']  # GW frequency
+        Mc = binary.Mc
+        z_loc = binary.z
+        f = binary.f  # GW frequency
         i_loc = binary.get('iota', 0.0)
         e_loc = binary.get('e', 1e-6)
         
@@ -214,10 +214,10 @@ def compute_gwb_strain_method2(population, T_obs=30.0, n_freq_bins=100,
     
     # Extract arrays
     n_binaries = len(population)
-    gw_frequencies = np.array([b['f'] for b in population])
-    chirp_masses = np.array([b['Mc'] for b in population])
-    comoving_dist = np.array([b['D_comov'] for b in population])
-    redshift = np.array([b['z'] for b in population])
+    gw_frequencies = np.array([b.f for b in population])
+    chirp_masses = np.array([b.Mc for b in population])
+    comoving_dist = np.array([b.D_comov for b in population])
+    redshift = np.array([b.z for b in population])
     
     # Check for inclination
     if use_inclination and 'iota' in population[0]:

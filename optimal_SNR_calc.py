@@ -1,5 +1,5 @@
 import numpy as np
-from SMBHB_pop_synth import H0_KMS_MPC, MEGAPARSEC_IN_METERS
+from SMBHB_pop_synth import H0_KMS_MPC, MEGAPARSEC_M
 import sys
 from config import generate_population
 from signal_injection import draw_red_noise_residuals, strain_amplitude, white_noise_residual
@@ -455,8 +455,8 @@ def overlap_reduction_function(pulsar1, pulsar2, binary):
     float
         Overlap reduction function Γ_{IJ} - when the number of binaries approaches infinity, this becomes the HD correlation.
     """
-    ant_rep_p1_plus, ant_rep_p1_cross = antenna_response(pulsar1._raj, pulsar1._dec, binary['ra'], binary['dec'], binary['psi'])
-    ant_rep_p2_plus, ant_rep_p2_cross = antenna_response(pulsar2._raj, pulsar2._dec, binary['ra'], binary['dec'], binary['psi'])
+    ant_rep_p1_plus, ant_rep_p1_cross = antenna_response(pulsar1._raj, pulsar1._dec, binary.ra, binary.dec, binary.psi)
+    ant_rep_p2_plus, ant_rep_p2_cross = antenna_response(pulsar2._raj, pulsar2._dec, binary.ra, binary.dec, binary.psi)
     beta = 1  # normalization factor for the ORF
     return beta * (ant_rep_p1_plus * ant_rep_p2_plus + ant_rep_p1_cross * ant_rep_p2_cross)
 
@@ -501,9 +501,9 @@ def compute_orf_sq_chunk(binaries_chunk, pulsars, i_idx, j_idx):
     for b, binary in enumerate(binaries_chunk):
         # Pre-compute antenna responses for every pulsar for this binary
         # shape: (N, 2) — [Fp, Fx] per pulsar
-        ra  = binary['ra']
-        dec = binary['dec']
-        psi = binary['psi']
+        ra  = binary.ra
+        dec = binary.dec
+        psi = binary.psi
         beta = 1  # normalization factor for the ORF
 
         ant = np.array([
@@ -758,11 +758,12 @@ def SNR_sq_all_binaries(binaries, pulsar_cache, strain_data, T_obs,
         SNR² contribution of each binary.
     """
     bin_edges    = strain_data['bin_edges']
-    freqs        = np.array([b['f']           for b in binaries])   # (B,)
-    h_contribs   = np.array([b['h_c_contrib'] for b in binaries])   # (B,)
-    chirp_masses = np.array([b['Mc']          for b in binaries])   # (B,)
+    freqs        = np.array([b.f           for b in binaries])   # (B,)
+    h_contribs   = strain_data['h_c_individual_contribs']  # (B,)
+
+    chirp_masses = np.array([b.Mc          for b in binaries])   # (B,)
     delta_fs     = np.array([
-        bin_edges[b['freq_bin'] + 1] - bin_edges[b['freq_bin']] for b in binaries
+        bin_edges[strain_data['bin_assignment'] + 1] - bin_edges[strain_data['bin_assignment']] for b in binaries
     ])  # (B,)
 
     B = len(binaries)
@@ -967,12 +968,12 @@ def convergence_test(binaries, pulsars, parsed_noise_params, strain_data, T_obs,
         binaries = copy.deepcopy(binaries)
         for b in binaries:
             if 'ra' not in b:
-                b['ra']  = rng.uniform(0.0, 2 * np.pi)
+                b.ra  = rng.uniform(0.0, 2 * np.pi)
             if 'dec' not in b:
                 # isotropic: dec = arcsin(uniform(-1, 1))
-                b['dec'] = np.arcsin(rng.uniform(-1.0, 1.0))
+                b.dec = np.arcsin(rng.uniform(-1.0, 1.0))
             if 'psi' not in b:
-                b['psi'] = rng.uniform(0.0, np.pi)
+                b.psi = rng.uniform(0.0, np.pi)
 
     pulsar_cache = build_pulsar_cache(pulsars, parsed_noise_params)
 
@@ -1164,29 +1165,26 @@ def measured_strain_all_binaries_all_pulsars(
     bin_freqs: (B, 2*n_neighbours+1)     corresponding frequencies per binary
     delta_f  : (B,)                      bin width (same for all bins, per binary)
     """
-    B = bin_arrays['f'].size
+    B = bin_arrays.f.size
     N = pulsar_cache['raj_arr'].size
     K = 2 * n_neighbours + 1          # total bins returned per binary
 
     # --- Antenna patterns, strain amplitude, phase (unchanged) ---
     Fp, Fx = antenna_response_vectorised(
         pulsar_cache['raj_arr'], pulsar_cache['decj_arr'],
-        bin_arrays['ra'], bin_arrays['dec'], bin_arrays['psi'],
+        bin_arrays.ra, bin_arrays.dec, bin_arrays.psi,
     )  # (B, N)
 
 
-    h0       = strain_amplitude(
-        Mc=bin_arrays['Mc'], fGW=bin_arrays['f'],
-        d_comov=bin_arrays['D_comov'], z=bin_arrays['z'],
-    )  # (B,)
+    h0       = bin_arrays.h0                                # (B,)
 
 
-    cos_iota = np.cos(bin_arrays['iota'])
+    cos_iota = np.cos(bin_arrays.iota)
     A_plus   = h0 * (1.0 + cos_iota**2)   # (B,)
     A_cross  = h0 * (-2.0 * cos_iota)     # (B,)
 
-    phase = (2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :]
-             + bin_arrays['phi0'][:, None])          # (B, T)
+    phase = (2.0 * np.pi * bin_arrays.f[:, None] * time_arr[None, :]
+             + bin_arrays.phi0[:, None])          # (B, T)
 
     hp = A_plus[:, None]  * np.sin(phase)            # (B, T)
     hx = A_cross[:, None] * np.cos(phase)            # (B, T)
@@ -1349,21 +1347,21 @@ def SNR_sq_all_pairs_all_binaries_vectorised(
     # ----------------------------------------------------------------
     B = len(binaries)
     bin_arrays = {
-        'f':           np.array([b['f']                     for b in binaries]),
-        'Mc':          np.array([b['Mc']                    for b in binaries]),
-        'D_comov':     np.array([b['D_comov']               for b in binaries]),
-        'z':           np.array([b['z']                     for b in binaries]),
-        'ra':          np.array([b['ra']                    for b in binaries]),
-        'dec':         np.array([b['dec']                   for b in binaries]),
-        'psi':         np.array([b.get('psi',  0.0)         for b in binaries]),
-        'phi0':        np.array([b.get('phi0', 0.0)         for b in binaries]),
-        'iota':        np.array([b.get('iota', 0.0)         for b in binaries]),
-        'h_c_contrib': np.array([b.get('h_c_contrib', 0.0)  for b in binaries]),
+        'f':           np.array([b.f                     for b in binaries]),
+        'Mc':          np.array([b.Mc                    for b in binaries]),
+        'D_comov':     np.array([b.D_comov               for b in binaries]),
+        'z':           np.array([b.z                     for b in binaries]),
+        'ra':          np.array([b.ra                    for b in binaries]),
+        'dec':         np.array([b.dec                   for b in binaries]),
+        'psi':         np.array([b.psi                   for b in binaries]),
+        'phi0':        np.array([b.phi0                  for b in binaries]),
+        'iota':        np.array([b.iota                  for b in binaries]),
+        'h_c_contrib': np.array([b.h_c_contrib           for b in binaries]),
     }
 
     bin_edges = strain_data['bin_edges']
     delta_fs  = np.array([
-        bin_edges[b['freq_bin'] + 1] - bin_edges[b['freq_bin']]
+        bin_edges[strain_data['bin_assignment'] + 1] - bin_edges[strain_data['bin_assignment']]
         for b in binaries
     ])
 

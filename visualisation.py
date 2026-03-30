@@ -96,7 +96,7 @@ def plot_initial_injection_analysis(psrs_injected, population, snr, xi, rho):
     
     # Mark injected frequencies (first 5 binaries)
     for binary in population[:5]:
-        f_nHz = binary['f'] * 1e9
+        f_nHz = binary.f * 1e9
         ax5.axvline(f_nHz, color='red', linestyle='--', alpha=0.5, linewidth=1)
     
     plt.suptitle(f'SMBHB Injection Analysis | {len(psrs_injected)} Pulsars | SNR={snr:.1f}', 
@@ -672,27 +672,14 @@ def plot_binaries_vs_frequency(
     from config import Msun
     
     # Extract frequencies
-    fGW = np.array([b['f'] for b in population])
+    fGW = np.array([b.f for b in population])
     
     # Extract or compute total masses
     total_mass = []
     for b in population:
-        if 'Mtot' in b:
-            M_tot = b['Mtot'] * Msun
-        elif 'M1' in b and 'M2' in b:
-            M_tot = b['M1'] + b['M2']
-        elif 'Mc' in b and 'q' in b:
-            # Convert chirp mass + mass ratio to total mass
-            # Mc = (M1 * M2)^(3/5) / (M1 + M2)^(1/5)
-            # q = M2/M1, M_tot = M1 + M2 = M1(1+q)
-            # Mc = M1^(3/5) * (M1*q)^(3/5) / (M1(1+q))^(1/5)
-            # Mc = M1 * q^(3/5) / (1+q)^(1/5)
-            # M_tot = Mc * (1+q)^(6/5) / q^(3/5)
-            q = b['q']
-            Mc = b['Mc']
-            M_tot = Mc * (1 + q)**(6/5) / q**(3/5)
-        else:
-            raise ValueError("Population must have 'M_total', or ('M1','M2'), or ('Mc','q')")
+        
+        M_tot = b.Mtot * Msun
+
         total_mass.append(M_tot / Msun)  # Convert to solar masses
     
     total_mass = np.array(total_mass)
@@ -840,7 +827,7 @@ def plot_binaries_vs_frequency_mc(
         mass_bins = np.arange(7.5, 10.6, 0.5)
 
     if freq_bins is None:
-        all_f = np.concatenate([[b['f'] for b in pop] for pop in populations])
+        all_f = np.concatenate([[b.f for b in pop] for pop in populations])
         freq_bins = np.logspace(
             np.log10(all_f.min()),
             np.log10(all_f.max()),
@@ -854,20 +841,11 @@ def plot_binaries_vs_frequency_mc(
     # Helper: histogram for one population
     # ------------------------------------------------------------------
     def compute_histograms(pop):
-        fGW = np.array([b['f'] for b in pop])
+        fGW = np.array([b.f for b in pop])
 
         total_mass = []
         for b in pop:
-            if 'Mtot' in b:
-                M_tot = b['Mtot'] * Msun
-            elif 'M1' in b and 'M2' in b:
-                M_tot = b['M1'] + b['M2']
-            elif 'Mc' in b and 'q' in b:
-                q = b['q']
-                Mc = b['Mc']
-                M_tot = Mc * (1 + q)**(6/5) / q**(3/5)
-            else:
-                raise ValueError("Binary mass information missing")
+            M_tot = b.Mtot * Msun
 
             total_mass.append(M_tot / Msun)
 
@@ -1035,12 +1013,12 @@ def build_snr_df(binaries, SNR_sq_binaries):
     records = []
     for binary, snr_sq in zip(binaries, SNR_sq_binaries):
         records.append({
-            'frequency_nHz':         binary['f'] * 1e9,
-            'chirp_mass_Msun':       binary['Mc'] / 1.989e30,
-            'comoving_distance_Mpc': binary['D_comov'],
-            'ra_deg':                np.degrees(binary['ra']),
-            'dec_deg':               np.degrees(binary['dec']),
-            'h_c_contrib':           binary['h_c_contrib'],
+            'frequency_nHz':         binary.f * 1e9,
+            'chirp_mass_Msun':       binary.Mc / 1.989e30,
+            'comoving_distance_Mpc': binary.D_comov,
+            'ra_deg':                np.degrees(binary.ra),
+            'dec_deg':               np.degrees(binary.dec),
+            # 'h_c_contrib':           binary.h_c_contrib, # no longer have
             'SNR_sq':                snr_sq,
             'SNR':                   np.sqrt(np.maximum(snr_sq, 0)),
         })

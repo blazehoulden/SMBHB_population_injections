@@ -124,9 +124,9 @@ def analyze_snr_calculation_complete(population, strain_data, pulsars, pulsar_no
         print(f"{'='*80}")
         
         # Extract binary parameters
-        freq = binary['f']
-        Mc = binary['Mc']
-        D_comov = binary['D_comov']
+        freq = binary.f
+        Mc = binary.Mc
+        D_comov = binary.D_comov
         h_square = binary.get('h_square', 0)
         h_c_contrib = binary.get('h_c_contrib', strain_data.get('h_c_individual', [0])[bin_idx])
         freq_bin_str = binary.get('freq_bin', str(bin_idx))

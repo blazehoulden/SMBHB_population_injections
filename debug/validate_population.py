@@ -39,7 +39,7 @@ def prepare_population_for_gwb_code(population, strain_data=None):
     for i, binary in enumerate(population):
         # Ensure comoving distance is computed
         if 'D_comov' not in binary:
-            z = binary['z']
+            z = binary.z
             binary['D_comov'] = comoving_distance(z, cosmo_par)
         
         # Ensure eccentricity (default to nearly circular)

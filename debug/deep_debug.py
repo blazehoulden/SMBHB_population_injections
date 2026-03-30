@@ -119,9 +119,9 @@ def compute_gwb_strain_method1_debug(population, T_obs=30.0, n_freq_bins=100, de
     print(f"DEBUGGING BINARY {debug_binary_idx} (DETAILED STEP-BY-STEP)")
     print(f"{'='*70}")
     
-    Mc = binary['Mc']
-    z_loc = binary['z']
-    f = binary['f']
+    Mc = binary.Mc
+    z_loc = binary.z
+    f = binary.f
     i_loc = binary.get('iota', 0.0)
     e_loc = binary.get('e', 1e-6)
     
@@ -232,9 +232,9 @@ def compute_gwb_strain_method1_debug(population, T_obs=30.0, n_freq_bins=100, de
     print("Computing full population...")
     
     for n_s, binary in enumerate(population):
-        Mc = binary['Mc']
-        z_loc = binary['z']
-        f = binary['f']
+        Mc = binary.Mc
+        z_loc = binary.z
+        f = binary.f
         i_loc = binary.get('iota', 0.0)
         e_loc = binary.get('e', 1e-6)
         
@@ -321,10 +321,10 @@ def compute_gwb_strain_method2_debug(population, T_obs=30.0, n_freq_bins=100, de
     print(f"DEBUGGING BINARY {debug_binary_idx} (DETAILED STEP-BY-STEP)")
     print(f"{'='*70}")
     
-    Mc = binary['Mc']
-    z = binary['z']
-    f_gw = binary['f']
-    D_c = binary['D_comov']
+    Mc = binary.Mc
+    z = binary.z
+    f_gw = binary.f
+    D_c = binary.D_comov
     
     print(f"\nInput parameters:")
     print(f"  Chirp mass Mc = {Mc:.6e} M_sun")

@@ -296,7 +296,7 @@ def optimal_SNR_sq_single_BH_vectorized(binary, strain_data, pulsar_pair_data,
     float
         Total SNR² for this binary summed over all pulsar pairs
     """
-    freq = binary['f']
+    freq = binary.f
     
     # Find which binary this is in the population
     bin_idx = binary.get('freq_bin', binary_idx if binary_idx is not None else 0)
@@ -382,8 +382,8 @@ def find_N_needed_for_target_SNR_optimized(population, strain_data, pulsars, pul
     
     for i, binary in enumerate(population):
         # Compute PSD at this binary's frequency
-        freq = binary['f']
-        freq_bin = binary['freq_bin']
+        freq = binary.f
+        freq_bin = strain_data['bin_assignment']
         psd_at_freq = psd_matrix_full[:, freq_bin]
         
         # Add this binary's contribution
@@ -444,7 +444,7 @@ def optimal_SNR_total_population_vectorized(population, strain_data, pulsars, pu
     SNR_squared_total = 0.0
     
     # Get unique frequencies from population
-    frequencies = np.array([binary['f'] for binary in population])
+    frequencies = np.array([binary.f for binary in population])
     
     # Compute PSD matrix for all pulsars at all frequencies
     psd_matrix_full = compute_psd_matrix(pulsars, pulsar_noise_params, frequencies)
@@ -500,7 +500,7 @@ def compute_SNR_vs_N_binaries(population, strain_data, pulsars, pulsar_noise_par
     pulsar_pair_data = precompute_pulsar_pairs(pulsars)
     
     # Get all frequencies
-    frequencies = np.array([binary['f'] for binary in population])
+    frequencies = np.array([binary.f for binary in population])
     psd_matrix_full = compute_psd_matrix(pulsars, pulsar_noise_params, frequencies)
     
     SNR_array = np.zeros(len(N_samples))
@@ -538,7 +538,7 @@ def SNR_contribution_generator(population, strain_data, pulsars, pulsar_noise_pa
     WITH DEBUGGING
     """
     pulsar_pair_data = precompute_pulsar_pairs(pulsars)
-    frequencies = np.array([binary['f'] for binary in population])
+    frequencies = np.array([binary.f for binary in population])
     psd_matrix_full = compute_psd_matrix(pulsars, pulsar_noise_params, frequencies)
     
     for i, binary in enumerate(population):
