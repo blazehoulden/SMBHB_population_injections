@@ -26,7 +26,7 @@ POPULATION_CONFIGS = {
         'description': 'Medium mass, medium spread in distance, medium population'
     },
     'pessimistic': {
-        'n_binaries': 60_000,
+        'n_binaries': 500_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9),
         'z_max': 1.0,
@@ -66,10 +66,10 @@ PSD_COMPARISON = False
 # Memory profiling
 MEMORY_PROFILE_ENABLED = True
 
-def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
+def load_smbhb_module(module_path="SMBHB_pop_synth_new.py"):
     """Load the SMBHB population synthesis module."""
     file_path = Path(module_path)
-    module_name = "SMBHB_pop_synth"
+    module_name = "SMBHB_pop_synth_new"
     
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     module = importlib.util.module_from_spec(spec)
@@ -94,14 +94,14 @@ def generate_population(config, smbhb_module, compute_strain=False, T_obs_second
             mass_cutoff_0=config['mass_cutoff_0'],
             mass_cutoff_z=0.0,
             compute_strain=compute_strain,
-            n_freq_bins=50,
+            # n_freq_bins=50,
             random_seed=None,
             T_obs_seconds=T_obs_seconds
         )
         # Convert masses if needed
-        if max([b['Mc'] for b in population]) < 1e20:
+        if max([b.Mc for b in population]) < 1e20:
             for binary in population:
-                binary['Mc'] = binary['Mc'] * Msun
+                binary.Mc = binary.Mc * Msun
         return population, strain_data
     elif not compute_strain:
         population = smbhb_module.generate_smbhb_population(
@@ -114,15 +114,14 @@ def generate_population(config, smbhb_module, compute_strain=False, T_obs_second
             mass_cutoff_0=config['mass_cutoff_0'],
             mass_cutoff_z=0.0,
             compute_strain=compute_strain,
-            n_freq_bins=50,
+            # n_freq_bins=50,
             random_seed=None,
             T_obs_seconds=T_obs_seconds
         )
         strain_data = None
-    
         # Convert masses if needed - this is needed throughout the rest of the directory, should come back and change this, but works for now
-        if max([b['Mc'] for b in population]) < 1e20:
+        if max([b.Mc for b in population]) < 1e20:
             for binary in population:
-                binary['Mc'] = binary['Mc'] * Msun
+                binary.Mc = binary.Mc * Msun
         
         return population

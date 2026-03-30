@@ -9,9 +9,9 @@ from enterprise.signals.utils import create_quantization_matrix
 
 def strain_amplitude(Mc, fGW, d_comov, z):
     """Calculate strain amplitude for circular binary. See Eqn. 26 in https://arxiv.org/pdf/1003.0677"""
-    f_rest = 0.5 * fGW * (1 + z)
+    f_rest_orb = 0.5 * fGW * (1 + z)
     d_comov_si = d_comov * 1e6 * pc
-    return (2 * (G * Mc)**(5/3) * (2 * np.pi * f_rest)**(2/3)) / (c**4 * d_comov_si)
+    return (2 * (G * Mc)**(5/3) * (2 * np.pi * f_rest_orb)**(2/3)) / (c**4 * d_comov_si)
 
 
 def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi, norm = True):
@@ -58,15 +58,6 @@ def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi, norm = True):
         np.sin(src_polar_angle)
     ])
 
-    # # Following enterprise: There is a factor of 3/2 difference between the Hellings & Downs
-    # # integral, and the one presented in Jenet et al. (2005; also used by Gair
-    # # et al. 2014). This factor 'normalises' the correlation matrix.    
-    # if norm:
-    #     # Add extra factor of 3/2
-    #     c = np.sqrt(1.5) 
-    # else:
-    #     c = 1.0 
-
     m_rot = np.cos(psi) * m_hat + np.sin(psi) * n_hat
     n_rot = -np.sin(psi) * m_hat + np.cos(psi) * n_hat
     m_hat, n_hat = m_rot, n_rot
@@ -78,53 +69,6 @@ def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi, norm = True):
 
     return Fp, Fx
 
-
-# function from enterprise copied below
-# def createSignalResponse_pol(pphi, ptheta, gwphi, gwtheta, plus=True, norm=True):
-#     """
-#     Create the signal response matrix. All parameters are assumed to be of the
-#     same dimensionality.
-
-#     @param pphi:    Phi of the pulsars
-#     @param ptheta:  Theta of the pulsars
-#     @param gwphi:   Phi of GW propagation direction
-#     @param gwtheta: Theta of GW propagation direction
-#     @param plus:    Whether or not this is the plus-polarization
-#     @param norm:    Normalise the correlations to equal Jenet et. al (2005)
-
-#     @return:    Signal response matrix of Earth-term
-#     """
-#     # Create the unit-direction vectors. First dimension
-#     # will be collapsed later. Sign convention of Gair et al. (2014)
-#     Omega = np.array([-np.sin(gwtheta) * np.cos(gwphi), -np.sin(gwtheta) * np.sin(gwphi), -np.cos(gwtheta)])
-
-#     mhat = np.array([-np.sin(gwphi), np.cos(gwphi), np.zeros(gwphi.shape)])
-#     nhat = np.array([-np.cos(gwphi) * np.cos(gwtheta), -np.cos(gwtheta) * np.sin(gwphi), np.sin(gwtheta)])
-
-#     p = np.array([np.cos(pphi) * np.sin(ptheta), np.sin(pphi) * np.sin(ptheta), np.cos(ptheta)])
-
-#     # There is a factor of 3/2 difference between the Hellings & Downs
-#     # integral, and the one presented in Jenet et al. (2005; also used by Gair
-#     # et al. 2014). This factor 'normalises' the correlation matrix.
-#     npixels = Omega.shape[2]
-#     if norm:
-#         # Add extra factor of 3/2
-#         c = np.sqrt(1.5) / np.sqrt(npixels)
-#     else:
-#         c = 1.0 / np.sqrt(npixels)
-
-#     # Calculate the Fplus or Fcross antenna pattern. Definitions as in Gair et
-#     # al. (2014), with right-handed coordinate system
-#     if plus:
-#         # The sum over axis=0 represents an inner-product
-#         Fsig = (
-#             0.5 * c * (np.sum(nhat * p, axis=0) ** 2 - np.sum(mhat * p, axis=0) ** 2) / (1 - np.sum(Omega * p, axis=0))
-#         )
-#     else:
-#         # The sum over axis=0 represents an inner-product
-#         Fsig = c * np.sum(mhat * p, axis=0) * np.sum(nhat * p, axis=0) / (1 - np.sum(Omega * p, axis=0))
-
-#     return Fsig
 
 
 def r_k(t, psr, binary):
@@ -154,6 +98,9 @@ def r_k(t, psr, binary):
 
     r = (Fp * h_plus + Fx * h_cross) / (2 * np.pi * f) # Eq. 4.21-23 nHz GW Astronomer
     return r
+
+
+#### EFFECT OF NOISE REALISATIONS ON RESIDUALS AND SNR CALCULATION - UNSURE IF NECESSARY ####
 
 def draw_red_noise_residuals(psr, log10_A, gamma, Tobs, nmodes=30):
     # Build F matrix
@@ -248,8 +195,8 @@ def white_noise_residual(pulsar, pulsar_noise_params):
 def population_residuals(t, psr, population, Tspan,
                          pulsar_noise_params=None,
                          include_GW=True,
-                         include_RN=True,   # changed from True
-                         include_WN=True):  # changed from True
+                         include_RN=False,  
+                         include_WN=False): 
     """
     Scalar (loop-based) calculation of total timing residuals for one pulsar.
     Kept for debugging and for small populations where vectorisation overhead
@@ -268,8 +215,7 @@ def population_residuals(t, psr, population, Tspan,
                           The OS noise model marginalises over RN analytically via
                           F Phi F^T in the covariance. Including a RN realisation
                           in the residuals double-counts the red noise and produces
-                          spurious cross-correlations. See Chamberlin et al. (2015)
-                          PRD 91, 044048, eq. 26-27.
+                          spurious cross-correlations. See Chamberlin et al. (2015).
     include_WN          : include white noise draw (default False)
                           Same reasoning as include_RN — WN is handled analytically
                           by the OS via the N_WN = diag[(EFAC*sigma)^2 + EQUAD^2]
@@ -306,7 +252,7 @@ def population_residuals(t, psr, population, Tspan,
     # EQUAD: additive noise floor per backend (pulse jitter etc.)
     # ECORR: epoch-correlated noise — single shared offset per observing epoch
     #        per backend, implemented via the quantization matrix U.
-    # See Lentati et al. (2014) MNRAS 437, 3004 for the full model.
+    # See Lentati et al. (2014) for the full model.
     if include_WN:
         if pulsar_noise_params is None:
             raise ValueError("pulsar_noise_params required when include_WN=True")
@@ -451,7 +397,7 @@ def population_residuals_vectorised(
     The OS covariance C_a = N_WN + F Phi F^T already contains both noise
     contributions analytically — adding noise realisations to the residuals
     on top of this double-counts the noise and produces spurious SNR.
-    Reference: Chamberlin et al. (2015) PRD 91, 044048, eq. 26-27.
+    Reference: Chamberlin et al. (2015).
 
     For realistic noise simulations (SNR distributions, false alarm studies),
     set both to True and average OS results over many realisations.

@@ -3,6 +3,10 @@ from SMBHB_pop_synth import H0_KMS_MPC, MEGAPARSEC_IN_METERS
 import sys
 from config import generate_population
 from signal_injection import draw_red_noise_residuals, strain_amplitude, white_noise_residual
+from pta_builder import build_pta_and_params
+from enterprise.signals.gp_bases import createfourierdesignmatrix_red
+from enterprise.signals.utils import create_quantization_matrix
+from scipy.interpolate import interp1d
 from enterprise.signals import white_signals, selections
 import enterprise.signals.parameter as parameter
 import matplotlib.pyplot as plt
@@ -579,7 +583,7 @@ def build_pulsar_cache(pulsars, parsed_noise_params):
     }
 
 
-def estimate_chunk_size(N_pulsars, target_memory_GB=1.0, dtype=np.float64):
+def estimate_chunk_size(N_pulsars, target_memory_GB=2.0, dtype=np.float64):
     """
     Estimate a safe chunk size (number of binaries per batch) so that the
     dominant working array — total_noise of shape (B, N) used to form
@@ -1058,73 +1062,6 @@ def plot_overlap_reduction_function(pulsars, binaries, parsed_noise_params):
     plt.savefig("figures/orf_plot.png")
     plt.show()
 
-# def ind_pulsar_pair_SNR(binaries, freqs, pulsar1, pulsar2, T_obs, parsed_noise_params):
-#     red_PSD_pulsar1 = pulsar_red_noise_psd(freqs, parsed_noise_params[pulsar1.name]['red_noise']['log10_A'])
-#     red_PSD_pulsar2 = pulsar_red_noise_psd(freqs, parsed_noise_params[pulsar2.name]['red_noise']['log10_A'])
-#     # White noise: one value per pulsar, depends only on TOA errors and cadence
-#     white_noise_arr_p1 = pulsar_white_noise_psd(sigma_t=np.median(pulsar1.toaerrs), delta_t=1.0 / 20.0)
-#     white_noise_arr_p2 = pulsar_white_noise_psd(sigma_t=np.median(pulsar2.toaerrs), delta_t=1.0 / 20.0)
-
-# # ------------------------------------------------------------------ unpack binary arrays
-#     bin_edges    = strain_data['bin_edges']
-#     freqs        = np.array([b['f']           for b in binaries])   # (B,)
-#     h_contribs   = np.array([b['h_c_contrib'] for b in binaries])   # (B,)
-#     chirp_masses = np.array([b['Mc']          for b in binaries])   # (B,)
-#     delta_fs     = np.array([
-#         bin_edges[b['freq_bin'] + 1] - bin_edges[b['freq_bin']] for b in binaries
-#     ])  # (B,)
-
-#     B = len(binaries)
-
-#     fyr = 1.0 / (365.25 * 86400)
-#     for b in range(len(binaries)):
-#         signal
-   
-#     return SNR_sq_binaries, chi_sq_pairs
-
-
-# #Load pulsars (par/tim)
-# psrs = [Pulsar(par, tim) for (par, tim) in par_tim_list]
-
-# # Set up noise params
-# params = {}
-# for psr in psrs:
-#     name = psr.name
-#     params[f"{name}_red_noise_log10_A"] = noise_file[name]["log10_A_red"]
-#     params[f"{name}_red_noise_gamma"]   = noise_file[name]["gamma_red"]
-
-#     params[f"{name}_efac"]  = noise_file[name]["efac"]
-#     params[f"{name}_equad"] = noise_file[name]["equad"]
-#     params[f"{name}_ecorr"] = noise_file[name]["ecorr"] 
-
-
-# #Build model
-# efac  = white_signals.MeasurementNoise(efac=utils.get_parameter(params, "efac"))
-# equad = white_signals.EquadNoise(log10_equad=utils.get_parameter(params, "equad"))
-# ecorr = white_signals.EcorrKernelNoise(log10_ecorr=utils.get_parameter(params, "ecorr"))
-
-# .....
-# #Per-pulsar intrinsic red noise
-# rn_pl = utils.powerlaw(log10_A=utils.get_parameter(params, "red_noise_log10_A"),
-# gamma=utils.get_parameter(params, "red_noise_gamma"))
-# red_noise = gp_signals.FourierBasisGP(spectrum=rn_pl, components=30)
-
-# #combine signal model for each pulsar
-# models = []
-# for psr in psrs:
-# s = (efac + equad + ecorr + red_noise)
-# models.append(s(psr))
-
-# pta = signal_base.PTA(models)
-
-# # Build covariance
-# lnL = pta.get_lnlikelihood(params)
-
-
-from pta_builder import build_pta_and_params
-import numpy as np
-from enterprise.signals.gp_bases import createfourierdesignmatrix_red
-from enterprise.signals.utils import create_quantization_matrix
 
 def pulsar_PSD_using_enterprise(psrs, raw_noise_params, parsed_noise_params, Tspan, nmodes=30, debug_pulsar_idx=0):
     pta, model, params = build_pta_and_params(psrs=psrs, noise_params_15yr=raw_noise_params, Tspan=Tspan, include_GW=True, nmodes=nmodes)
@@ -1153,13 +1090,15 @@ def pulsar_PSD_using_enterprise(psrs, raw_noise_params, parsed_noise_params, Tsp
         if sc is None:
             raise RuntimeError(f"No signal collection found for {pulsar.name}")
 
-        rn_signal = next(sig for sig in sc._signals if sig.name == f"{pulsar.name}_red_noise")
-        kappa_full  = rn_signal.get_phi(params)   # shape (nmodes,) — RN only
-        # print("sc._signals keys: ", sc._signals.keys())
-        # ---- red noise via get_phi ----
-        # kappa_full = sc.get_phi(params)
-
-        red_PSD = kappa_full[:nmodes] * Tspan
+        rn_signal = next(sig for sig in sc._signals 
+                 if sig.name == f"{pulsar.name}_red_noise")
+        gw_signal = next((sig for sig in sc._signals 
+                        if sig.name == f"{pulsar.name}_gw"), None)
+        
+        
+        # only need every second bc values are identical for sine and cosine
+        kappa_full = rn_signal.get_phi(params)
+        red_PSD = kappa_full[::2][:nmodes] * Tspan
 
         # ---- white noise ----
         Nvec_raw = sc.get_ndiag(params)
@@ -1190,13 +1129,16 @@ def pulsar_PSD_using_enterprise(psrs, raw_noise_params, parsed_noise_params, Tsp
         psr_wn = parsed_noise_params[pulsar.name]['white_noise']
         for backend, bp in psr_wn.items():
             ecorr = 10 ** bp['log10_ecorr']
-            mask  = pulsar._flags['f'] == backend
+            mask = pulsar._flags['f'] == backend
             if not np.any(mask):
                 continue
-            U_be, _ = create_quantization_matrix(pulsar.toas[mask], nmin=2)
-            n_epochs_be = U_be.shape[1]
-            # Each epoch in this backend gets ecorr² added — pad/truncate to n_epochs
-            ecorr_variance[:n_epochs_be] += ecorr**2
+            
+            # Find which global epochs this backend contributes to
+            # An epoch j belongs to this backend if any TOA in that epoch has this flag
+            for j in range(n_epochs):
+                epoch_mask = U[:, j].astype(bool)
+                if np.any(epoch_mask & mask):
+                    ecorr_variance[j] += ecorr**2
 
         sigma_epoch_sq = np.median(epoch_variance + ecorr_variance)
         white_PSD = np.full(nmodes, 2.0 * sigma_epoch_sq * cadence)
@@ -1204,447 +1146,131 @@ def pulsar_PSD_using_enterprise(psrs, raw_noise_params, parsed_noise_params, Tsp
         pulsar_PSD_red[i]   = red_PSD
         pulsar_PSD_white[i] = white_PSD
         pulsar_PSD_total[i] = red_PSD + white_PSD
-
     return pulsar_PSD_total, pulsar_PSD_red, pulsar_PSD_white, freqs
 
-
-
-def measured_strain_all_binaries_all_pulsars_old(
-    bin_arrays:  dict,          # pre-extracted binary arrays, each shape (B,)
-    pulsar_cache: dict,         # output of build_pulsar_cache_time_domain
-    time_arr:    np.ndarray,    # (T,) common time grid [s]
-) -> np.ndarray:
-    """
-    Compute GW strain time series for every binary × every pulsar simultaneously.
-
-    Follows Eq. 40 of arXiv:2512.18822:
-        h(t) = F+ * h+(t) + Fx * hx(t)
-        h+(t) = h0 * (1 + cos²ι) * sin(2π f t + φ₀)
-        hx(t) = h0 * (−2 cosι)   * cos(2π f t + φ₀)
-
-    Parameters
-    ----------
-    bin_arrays : dict
-        Pre-extracted binary arrays (each shape (B,)):
-        'f', 'Mc', 'D_comov', 'z', 'ra', 'dec', 'psi', 'phi0', 'iota'
-    pulsar_cache : dict
-        Must contain 'raj_arr' (N,), 'decj_arr' (N,).
-    time_arr : ndarray, shape (T,)
-        Time samples starting at 0 [s].
-
-    Returns
-    -------
-    h : ndarray, shape (B, N, T)
-        Strain at every binary–pulsar–time combination.
-    """
-    B = bin_arrays['f'].size
-    N = pulsar_cache['raj_arr'].size
-
-    # Antenna patterns — (B, N) each
-    Fp, Fx = antenna_response_vectorised(
-        pulsar_cache['raj_arr'],
-        pulsar_cache['decj_arr'],
-        bin_arrays['ra'],
-        bin_arrays['dec'],
-        bin_arrays['psi'],
-    )  # (B, N)
-
-    # Strain amplitude — (B,)
-    h0 = strain_amplitude(
-        Mc     = bin_arrays['Mc'],
-        fGW    = bin_arrays['f'],
-        d_comov= bin_arrays['D_comov'],
-        z      = bin_arrays['z'],
-    )  # (B,)
-
-    # Polarisation amplitudes — (B,)
-    cos_iota = np.cos(bin_arrays['iota'])
-    A_plus   = h0 * (1.0 + cos_iota**2)   # (B,)
-    A_cross  = h0 * (-2.0 * cos_iota)     # (B,)
-
-    # Phase — (B, T):  2π f_b t_k + φ₀_b
-    # bin_arrays['f'][:, None] is (B, 1), time_arr[None, :] is (1, T)
-    phase = 2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :] \
-            + bin_arrays['phi0'][:, None]            # (B, T)
-
-    # h+ and hx — (B, T)
-    hp = A_plus[:, None]  * np.sin(phase)   # (B, T)
-    hx = A_cross[:, None] * np.cos(phase)   # (B, T)
-
-    # Fourier transform the time domain h+, hx into frequency domain
-    hp_f = np.fft.rfft(hp, norm="forward") # norm = forward gets 1 / N normalisation
-    hx_f = np.fft.rfft(hx, norm="forward")
-
-    time_step = time_arr[1] - time_arr[0]
-    hp_size = hp.size
-    freq_p = np.fft.rfftfreq(hp_size, d = time_step)
-
-    hx_size = hx.size
-    freq_x = np.fft.rfftfreq(hx_size, d = time_step)
-
-    # Where is the actual peak bin?
-    peak_idx = np.argmax(np.abs(hp_f[0] + hx_f[0]))
-    print(bin_arrays['h_c_contrib'], bin_arrays['f'])
-
-    print(f"Peak at freq: {freq_p[peak_idx]:.3e}, amplitude: {2 * np.abs(hp_f[0, peak_idx] + hx_f[0, peak_idx]):.3e}")
-
-    # And print a few bins around it
-    print(freq_p[peak_idx-2:peak_idx+3])
-    print(np.abs(hp_f[0, peak_idx-2:peak_idx+3]))
-    # print(freq, freq.shape, time_arr.shape, hp_size, len(phase))
-    
-    plt.scatter(freq_p, np.abs(hp_f[0]))
-    plt.scatter(freq_x, np.abs(hx_f[0]))
-    plt.xscale("log")
-    plt.show()
-
-
-    # print(np.linalg.norm(np.sum(hp_f + hx_f))) # seems to be different to h_c by a factor of (2 * np.pi)**2
-    # print(np.linalg.norm(np.sum(hp_f + hx_f))) # seems to be different to h_c by a factor of (2 * np.pi)**2
-    
-    # print(bin_arrays['h_c_contrib'], bin_arrays['f'])
-    # #  make plots to check that the peak matches the binary frequency
-    # # freq = np.array([1e-7])
-    # # time_arr = np.linspace(0, 16*86400*365.25, 10000000)
-    # h0 = 1e-12
-    # A_plus   = h0 * np.ones(B)
-    # f = 1e-8
-    # bin_arrays['f'] = f * np.ones(B)
-
-    # phase = 2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :] #\ 
-    #   #  + bin_arrays['phi0'][:, None]            # (B, T)
-    # hp = A_plus[:, None]  * np.sin(phase)   # (B, T)
-    # hp_size = hp.size
-    # hp_f = np.fft.rfft(hp, axis=-1, norm="forward")
-    # freq = np.fft.rfftfreq(hp.shape[-1], d = time_step)
-
-    # # Where is the actual peak bin?
-    # peak_idx = np.argmax(np.abs(hp_f[0]))
-
-    # print(len(time_arr))
-    # print(f"Peak at freq: {freq[peak_idx]:.3e}, amplitude: {np.abs(hp_f[0, peak_idx]):.3e}")
-    # print(np.abs(hp_f))
-
-    # # And print a few bins around it
-    # print(freq[peak_idx-2:peak_idx+3])
-    # print(np.abs(hp_f[0, peak_idx-2:peak_idx+3]))
-    # # print(freq, freq.shape, time_arr.shape, hp_size, len(phase))
-    
-    # plt.scatter(freq, np.abs(hp_f[0]))
-    # plt.xscale("log")
-    # plt.show()
-
-    
-    # Contract with antenna patterns:
-    # Fp is (B, N), hp is (B, T) → need (B, N, T)
-    # h[b, n, t] = Fp[b,n]*hp[b,t] + Fx[b,n]*hx[b,t]
-    h_f = Fp[:, :, None] * hp_f[:, None, :] \
-      + Fx[:, :, None] * hx_f[:, None, :]   # (B, N, T)
-
-
-    return h_f
-
 def measured_strain_all_binaries_all_pulsars(
-    bin_arrays:  dict,          # pre-extracted binary arrays, each shape (B,)
-    pulsar_cache: dict,         # output of build_pulsar_cache_time_domain
-    time_arr:    np.ndarray,    # (T,) common time grid [s]
-    test_case:  bool=False,
-    plot_first_four: bool=True
-) -> np.ndarray:
+    bin_arrays:   dict,
+    pulsar_cache: dict,
+    time_arr:     np.ndarray,
+    n_neighbours: int  = 2,       # number of bins either side of peak to include
+    full_spectrum: bool = True,
+    test_case:    bool = False,
+    plot_first_four: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute GW strain time series for every binary × every pulsar simultaneously.
-
-    Follows Eq. 40 of arXiv:2512.18822:
-        h(t) = F+ * h+(t) + Fx * hx(t)
-        h+(t) = h0 * (1 + cos²ι) * sin(2π f t + φ₀)
-        hx(t) = h0 * (−2 cosι)   * cos(2π f t + φ₀)
-
-    Parameters
-    ----------
-    bin_arrays : dict
-        Pre-extracted binary arrays (each shape (B,)):
-        'f', 'Mc', 'D_comov', 'z', 'ra', 'dec', 'psi', 'phi0', 'iota'
-    pulsar_cache : dict
-        Must contain 'raj_arr' (N,), 'decj_arr' (N,).
-    time_arr : ndarray, shape (T,)
-        Time samples starting at 0 [s].
-
     Returns
     -------
-    h : ndarray, shape (B, N, T)
-        Strain at every binary–pulsar–time combination.
+    h_f      : (B, N, 2*n_neighbours+1)  strain at peak ± n_neighbours bins
+    bin_freqs: (B, 2*n_neighbours+1)     corresponding frequencies per binary
+    delta_f  : (B,)                      bin width (same for all bins, per binary)
     """
     B = bin_arrays['f'].size
     N = pulsar_cache['raj_arr'].size
+    K = 2 * n_neighbours + 1          # total bins returned per binary
 
-    # Antenna patterns — (B, N) each
+    # --- Antenna patterns, strain amplitude, phase (unchanged) ---
     Fp, Fx = antenna_response_vectorised(
-        pulsar_cache['raj_arr'],
-        pulsar_cache['decj_arr'],
-        bin_arrays['ra'],
-        bin_arrays['dec'],
-        bin_arrays['psi'],
+        pulsar_cache['raj_arr'], pulsar_cache['decj_arr'],
+        bin_arrays['ra'], bin_arrays['dec'], bin_arrays['psi'],
     )  # (B, N)
 
-    # Strain amplitude — (B,)
-    h0 = strain_amplitude(
-        Mc     = bin_arrays['Mc'],
-        fGW    = bin_arrays['f'],
-        d_comov= bin_arrays['D_comov'],
-        z      = bin_arrays['z'],
+
+    h0       = strain_amplitude(
+        Mc=bin_arrays['Mc'], fGW=bin_arrays['f'],
+        d_comov=bin_arrays['D_comov'], z=bin_arrays['z'],
     )  # (B,)
 
-    # Polarisation amplitudes — (B,)
+
     cos_iota = np.cos(bin_arrays['iota'])
     A_plus   = h0 * (1.0 + cos_iota**2)   # (B,)
     A_cross  = h0 * (-2.0 * cos_iota)     # (B,)
 
-    # Phase — (B, T):  2π f_b t_k + φ₀_b
-    # bin_arrays['f'][:, None] is (B, 1), time_arr[None, :] is (1, T)
-    phase = 2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :] \
-            + bin_arrays['phi0'][:, None]            # (B, T)
+    phase = (2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :]
+             + bin_arrays['phi0'][:, None])          # (B, T)
 
-    # h+ and hx — (B, T)
-    hp = A_plus[:, None]  * np.sin(phase)   # (B, T)
-    hx = A_cross[:, None] * np.cos(phase)   # (B, T)
+    hp = A_plus[:, None]  * np.sin(phase)            # (B, T)
+    hx = A_cross[:, None] * np.cos(phase)            # (B, T)
 
-    # Fourier transform the time domain h+, hx into frequency domain
-    hp_f = np.fft.rfft(hp, norm="forward") # norm = forward gets 1 / N normalisation
-    hx_f = np.fft.rfft(hx, norm="forward")
+    # by setting to "forward", we get the 1 / N_time_arr points normalisation factor
+    hp_f = np.fft.rfft(hp, norm="forward")           # (B, F)
+    hx_f = np.fft.rfft(hx, norm="forward")           # (B, F)
 
     time_step = time_arr[1] - time_arr[0]
-    hp_time = hp.shape[1]
-    freq_p = np.fft.rfftfreq(hp_time, d = time_step)
+    F_total   = hp_f.shape[1]
+    freq_axis = np.fft.rfftfreq(hp.shape[1], d=time_step)  # (F,)
+    delta_f   = freq_axis[1] - freq_axis[0]                # scalar, uniform spacing
 
-    hx_time = hx.shape[1]
-    freq_x = np.fft.rfftfreq(hx_time, d = time_step)
-
-
-
-    # Find peak index per binary (along freq axis)
-    peak_idx = np.argmax(np.abs(hp_f) + np.abs(hx_f), axis=1)  # (B,)
-
-    peak_idx = peak_idx[:, None]  # (B,1)
-
-    h_plus = np.take_along_axis(hp_f, peak_idx, axis=1).squeeze(axis=1)
-    h_cross = np.take_along_axis(hx_f, peak_idx, axis=1).squeeze(axis=1)
-
-    # Combine with antenna patterns
-    # Fp, Fx are (B, N)
-    # h_plus, h_cross are (B,)
-    h_f = Fp * h_plus[:, None] + Fx * h_cross[:, None]  # (B, N)
-
-    # h_det_f = Fp[..., None] * hp_f[:, None, :] + Fx[..., None] * hx_f[:, None, :]
-
-    # Sanity checking code
-    # print(bin_arrays['h_c_contrib'], bin_arrays['f'])
-
-    if test_case:
-        freqs = np.linspace(1e-9, 20e-9, 4)
-        h0_fixed = 1e-12
-
-        colors = ["#88CCEE", "#CC6677", "#DDCC77", "#117733"]
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        for i, f in enumerate(freqs):
-
-            bin_arrays['f'] = f * np.ones(B)
-            A_plus = h0_fixed * np.ones(B)
-            A_cross = h0_fixed * np.ones(B)
-
-            phase = 2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :] \
-                    + bin_arrays['phi0'][:, None]
-
-            hp = A_plus[:, None] * np.sin(phase)
-            hx = A_cross[:, None] * np.cos(phase)
-
-            hp_f = np.fft.rfft(hp, norm="forward")
-            hx_f = np.fft.rfft(hx, norm="forward")
-
-            time_step = time_arr[1] - time_arr[0]
-            freq_axis = np.fft.rfftfreq(hp.shape[1], d=time_step)
-
-            ax.scatter(freq_axis, np.abs(hp_f[0]),
-                       color=colors[i], marker='o', s=18)
-
-            ax.scatter(freq_axis, np.abs(hx_f[0]),
-                       color=colors[i], marker='x', s=18)
-
-        ax.set_xscale("log")
-        ax.set_xlabel("Frequency [Hz]")
-        ax.set_ylabel(r"$|\tilde{h}_A(f)|$")
-
-        freq_handles = [
-            Line2D([0], [0], marker='o', linestyle='None',
-                   markerfacecolor=colors[i], markeredgecolor=colors[i],
-                   markersize=7,
-                   label=f"{freqs[i]*1e9:.0f} nHz")
-            for i in range(len(freqs))
-        ]
-
-        pol_handles = [
-            Line2D([0], [0], marker='o', linestyle='None',
-                   color='black', markersize=7, label='+'),
-            Line2D([0], [0], marker='x', linestyle='None',
-                   color='black', markersize=7, label='×')
-        ]
-
-        leg1 = ax.legend(handles=freq_handles, title="Frequency",
-                         loc="center right")
-        ax.add_artist(leg1)
-        ax.legend(handles=pol_handles, title="Polarisation",
-                  loc="upper right")
-
-        plt.tight_layout()
-        plt.show()
-
-    if plot_first_four:
-
-        colors = ["#88CCEE", "#CC6677", "#DDCC77", "#117733"]
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        for b in range(min(4, B)):
-
-            ax.scatter(freq_p, np.abs(hp_f[b]),
-                       color=colors[b], marker='o', s=18)
-
-            ax.scatter(freq_x, np.abs(hx_f[b]),
-                       color=colors[b], marker='x', s=18)
-
-        # ax.set_xscale("log")
-        ax.set_xlabel("Frequency [Hz]")
-        ax.set_ylabel(r"$|\tilde{h}_A(f)|$")
-
-        bin_handles = [
-            Line2D([0], [0], marker='o', linestyle='None',
-                   markerfacecolor=colors[i], markeredgecolor=colors[i],
-                   markersize=7,
-                   label=f"Binary {i}")
-            for i in range(min(4, B))
-        ]
-
-        pol_handles = [
-            Line2D([0], [0], marker='o', linestyle='None',
-                   color='black', markersize=7, label='+'),
-            Line2D([0], [0], marker='x', linestyle='None',
-                   color='black', markersize=7, label='×')
-        ]
-
-        leg1 = ax.legend(handles=bin_handles, title="Binary",
-                         loc="center right")
-        ax.add_artist(leg1)
-        ax.legend(handles=pol_handles, title="Polarisation",
-                  loc="upper right")
-
-        plt.tight_layout()
-        plt.show()
-
-    return h_f
-
-def build_pulsar_cache_time_domain(pulsars, parsed_noise_params, raw_noise_params):
-    """
-    Pulsar cache for the time-domain vectorised SNR² path.
-
-    Identical to `build_pulsar_cache` but also stores raw position arrays
-    for use by `antenna_response_vectorised`.
-    """
-    N = len(pulsars)
-
-    white_noise_arr = np.array([
-        analytic_white_noise_psd(p, raw_noise_params)
-        for p in pulsars
-    ])  # (N,)
-    log10A_arr = np.array([parsed_noise_params[p.name]['red_noise']['log10_A'] for p in pulsars])
-    gamma_arr  = np.array([parsed_noise_params[p.name]['red_noise']['gamma']   for p in pulsars])
-    raj_arr    = np.array([p._raj  for p in pulsars])
-    decj_arr   = np.array([p._decj for p in pulsars])
-    i_idx, j_idx = np.triu_indices(N, k=1)
-
-    return {
-        'white_noise_arr': white_noise_arr,   # (N,)
-        'log10A_arr':      log10A_arr,         # (N,)
-        'gamma_arr':       gamma_arr,          # (N,)
-        'raj_arr':         raj_arr,            # (N,)
-        'decj_arr':        decj_arr,           # (N,)
-        'i_idx':           i_idx,              # (P,)
-        'j_idx':           j_idx,              # (P,)
-        'pulsars':         pulsars,
-    }
-
-
-def find_N_needed(
-    binaries:            list,
-    pulsars:             list,
-    parsed_noise_params: dict,
-    raw_noise_params: dict,
-    strain_data:         dict,
-    Tspan:              float,
-    target_SNR:          float,
-    time_arr_npoints:    int   = 1_001,
-    nmodes:              int = 30,
-    chunk_size:          int   = None,
-    target_memory_GB:    float = 1.0,
-    inc_GW:              bool  = True,
-    inc_red_noise:       bool  = False,
-    inc_white_noise:     bool  = False,
-) -> tuple[list, int, float, np.ndarray]:
-    """
-    Find the minimum number of binaries needed to reach a target cumulative SNR.
-
-    Drop-in replacement for the original `find_N_needed` using the fully
-    vectorised time-domain SNR² path.
-    """
-    snr_sq_arr = SNR_sq_all_pairs_all_binaries_vectorised(
-        binaries            = binaries,
-        pulsars             = pulsars,
-        parsed_noise_params = parsed_noise_params,
-        raw_noise_params    = raw_noise_params,
-        strain_data         = strain_data,
-        Tspan               = Tspan,
-        time_arr_npoints    = time_arr_npoints,
-        nmodes              = 30,
-        chunk_size          = chunk_size,
-        target_memory_GB    = target_memory_GB,
-        inc_GW              = inc_GW,
-        inc_red_noise       = inc_red_noise,
-        inc_white_noise     = inc_white_noise
-    )
-
-    cum_snr_sq = np.cumsum(snr_sq_arr)
-    cum_snr    = np.sqrt(np.abs(cum_snr_sq))
-
-    neg_mask = snr_sq_arr < 0
-    if neg_mask.any():
-        print(f"Warning: negative SNR² at binary indices {np.where(neg_mask)[0].tolist()}. "
-              "Check noise model for bugs.")
-
-    crossing_idx = int(np.searchsorted(cum_snr, target_SNR))
-
-    if crossing_idx < len(binaries):
-        N_needed          = crossing_idx + 1
-        SNR_current       = float(cum_snr[crossing_idx])
-        selected_binaries = binaries[:N_needed]
-        print(f"Target SNR {target_SNR:.3f} reached with {N_needed} binaries "
-              f"(SNR = {SNR_current:.3f}, SNR² = {cum_snr_sq[crossing_idx]:.3e})")
+    if full_spectrum:
+        # Skip bin 0 (DC), return all remaining bins
+        bin_idxs  = np.tile(np.arange(1, F_total), (B, 1))     # (B, F_total-1)
+        hp_bins   = hp_f[:, 1:]                                  # (B, F_total-1)
+        hx_bins   = hx_f[:, 1:]                                  # (B, F_total-1)
+        bin_freqs = np.tile(freq_axis[1:], (B, 1))              # (B, F_total-1)
     else:
-        N_needed          = len(binaries)
-        SNR_current       = float(cum_snr[-1])
-        selected_binaries = binaries
-        print(f"Target SNR {target_SNR:.3f} not reached. "
-              f"Max SNR = {SNR_current:.3f} with all {N_needed} binaries.")
+        # --- Peak index per binary, clamped so neighbours stay in bounds ---
+        peak_idx_raw = np.argmax(np.abs(hp_f) + np.abs(hx_f), axis=1)  # (B,)
+        peak_idx = np.clip(peak_idx_raw, n_neighbours, F_total - 1 - n_neighbours)  # (B,)
+
+        # --- Gather K bins around each peak ---
+        # offsets: (-n_neighbours, ..., 0, ..., +n_neighbours)
+        offsets  = np.arange(-n_neighbours, n_neighbours + 1)       # (K,)
+        bin_idxs = peak_idx[:, None] + offsets[None, :]             # (B, K)
+
+        # Clamp neighbours to [1, F_total-1] — exclude bin 0 (f=0) but NOT the peak
+        bin_idxs = np.clip(bin_idxs, 1, F_total - 1)               # (B, K)
+
+        # Extract h+, hx at the K bins for all binaries
+        hp_bins = np.take_along_axis(hp_f, bin_idxs, axis=1)     # (B, K)
+        hx_bins = np.take_along_axis(hx_f, bin_idxs, axis=1)     # (B, K)
+
+        # Corresponding frequencies
+        bin_freqs = freq_axis[bin_idxs]                            # (B, K)
+
+    # Combine with antenna patterns → (B, N, K)
+    # Fp, Fx: (B, N) → (B, N, 1) for broadcasting over K
+    h_f = (Fp[:, :, None] * hp_bins[:, None, :]
+         + Fx[:, :, None] * hx_bins[:, None, :])              # (B, N, K)
+
+    # print(Fp, Fx, abs(hp_f)/hp, abs(hx_f)/hx)
+
+    # --- Plotting (updated to show neighbouring bins) ---
+    if plot_first_four:
+        _plot_neighbouring_bins(
+            freq_axis, hp_f, hx_f, bin_idxs, B, n_neighbours
+        )
+
+    # print(np.median(Fp), np.mean(Fp), np.max(Fp), np.min(Fp), np.median(Fx),  np.mean(Fx), np.max(Fx), np.min(Fx),h0, np.median(abs(h_f) / abs(h0)))
+
+    return h_f, bin_freqs, np.full(B, delta_f)
 
 
-    # For one binary and one pulsar, both should agree
-    Fp_vec, Fx_vec = antenna_response_vectorised(
-        np.array([pulsars[0]._raj]), np.array([pulsars[0]._decj]),
-        np.array([binaries[0]['ra']]), np.array([binaries[0]['dec']]), np.array([binaries[0]['psi']])
-    )
-    Fp_scalar, Fx_scalar = antenna_response(pulsars[0]._raj, pulsars[0]._decj, 
-                                            binaries[0]['ra'], binaries[0]['dec'], binaries[0]['psi'])
-    
-    return selected_binaries, N_needed, SNR_current, snr_sq_arr
+def _plot_neighbouring_bins(freq_axis, hp_f, hx_f, bin_idxs, B, n_neighbours):
+    """Plot FFT magnitude for first 4 binaries, highlighting peak ± neighbours."""
+    colors      = ["#88CCEE", "#CC6677", "#DDCC77", "#117733"]
+    fig, axes   = plt.subplots(min(4, B), 1, figsize=(9, 3 * min(4, B)), sharex=True)
+    if B == 1:
+        axes = [axes]
+
+    for b in range(min(4, B)):
+        ax  = axes[b]
+        mag = np.abs(hp_f[b]) + np.abs(hx_f[b])
+
+        ax.plot(freq_axis, mag, color='grey', alpha=0.4, lw=1, label='full spectrum')
+
+        # Highlight the selected K bins
+        k_freqs = freq_axis[bin_idxs[b]]
+        k_mags  = mag[bin_idxs[b]]
+        ax.vlines(k_freqs, 0, k_mags, color=colors[b], lw=2)
+        ax.scatter(k_freqs, k_mags, color=colors[b], zorder=5,
+                   label=f'peak ± {n_neighbours} bins')
+
+        ax.set_ylabel(r'$|\tilde{h}_+| + |\tilde{h}_\times|$')
+        ax.set_title(f'Binary {b}')
+        ax.legend(fontsize=8)
+
+    axes[-1].set_xlabel('Frequency [Hz]')
+    plt.tight_layout()
+    plt.show()
 
 
 def SNR_sq_all_pairs_all_binaries_vectorised(
@@ -1657,7 +1283,7 @@ def SNR_sq_all_pairs_all_binaries_vectorised(
     time_arr_npoints:    int   = 301,
     nmodes:              int   = 301,
     chunk_size:          int   = None,
-    target_memory_GB:    float = 1.0,
+    target_memory_GB:    float = 2.0,
     inc_GW:              bool  = True,
     inc_red_noise:       bool  = True,
     inc_white_noise:     bool  = True,
@@ -1672,7 +1298,6 @@ def SNR_sq_all_pairs_all_binaries_vectorised(
         'enterprise' — uses pulsar_PSD_using_enterprise (full PTA build,
                        exact EFAC/EQUAD/epoch-averaged white noise)
     """
-    from scipy.interpolate import interp1d
 
     assert noise_method in ('analytic', 'enterprise'), \
         f"noise_method must be 'analytic' or 'enterprise', got {noise_method!r}"
@@ -1718,7 +1343,6 @@ def SNR_sq_all_pairs_all_binaries_vectorised(
                             np.log(np.clip(psd_grid[-1], 1e-300, None))), # above range: use highest (white noise)
             )
             psd_interpolators.append(interp_fn)
-        print("ENTERPRISE noise PSDs ready.")
 
     # ----------------------------------------------------------------
     # Binary arrays
@@ -1755,6 +1379,11 @@ def SNR_sq_all_pairs_all_binaries_vectorised(
     unique_tspans, pair_group_ids = np.unique(tspan_pairs, return_inverse=True)
 
     # ----------------------------------------------------------------
+    # Hellings-Downs coefficients for all pairs
+    # ----------------------------------------------------------------
+    chi_coeffs = chi_coeff_matrix(pulsars)  # (N, N)
+
+    # ----------------------------------------------------------------
     # Chunk sizing
     # ----------------------------------------------------------------
     T = time_arr_npoints
@@ -1778,74 +1407,134 @@ def SNR_sq_all_pairs_all_binaries_vectorised(
         ba     = {k: v[chunk] for k, v in bin_arrays.items()}
         f_bin  = ba['f']   # (Bc,)
 
-        # ---- noise PSD matrix (Bc, N) --------------------------------
-        if noise_method == 'enterprise':
-            P_noise = np.zeros((Bc, N))
-            for a in range(N):
-                log_P         = psd_interpolators[a](np.log(f_bin))
-                P_noise[:, a] = np.exp(log_P)
+        # ---- Strain over K bins: (B, N, K) + frequencies (B, K) -------
+        h_f, bin_freqs, delta_f_arr = measured_strain_all_binaries_all_pulsars(
+            ba, cache, time_arr, full_spectrum=True
+        )
+        # h_f:       (Bc, N, K)
+        # bin_freqs: (Bc, K)   — frequencies at each of the K bins
+        # delta_f_arr: (Bc,)   — bin width (same for all K bins)
 
-        else:  # analytic
-            fyr   = 1.0 / (365.25 * 86400)
-            P_noise = np.zeros((Bc, N))
-            if inc_red_noise:
-                A_red = 10.0 ** cache['log10A_arr']          # (N,)
-                rn = (
-                    A_red**2 / (12.0 * np.pi**2)
-                    * (f_bin[:, None] / fyr) ** (-cache['gamma_arr'])
-                    * fyr**-3.0
-                )  # (Bc, N)
-                P_noise += rn
-            if inc_white_noise:
-                P_noise += cache['white_noise_arr']           # (Bc, N) broadcast
-
-        # ---- SNR² over Tspan groups ----------------------------------
+        K = h_f.shape[2]
         snr_sq_chunk = np.zeros(Bc)
 
+
+        # ---- Noise PSD at all K bin frequencies: (Bc, N, K) ------------
+        if noise_method == 'enterprise':
+            P_noise_K = np.zeros((Bc, N, K))
+            for a in range(N):
+                log_P             = psd_interpolators[a](np.log(bin_freqs))  # (Bc, K)
+                P_noise_K[:, a, :] = np.exp(log_P)
+        else:
+            fyr = 1.0 / (365.25 * 86400)
+            P_noise_K = np.zeros((Bc, N, K))
+            if inc_red_noise:
+                A_red = 10.0 ** cache['log10A_arr']   # (N,)
+                # bin_freqs: (Bc, K), gamma: (N,) → need (Bc, N, K)
+                rn = (
+                    A_red[None, :, None]**2 / (12.0 * np.pi**2)
+                    * (bin_freqs[:, None, :] / fyr) ** (-cache['gamma_arr'][None, :, None])
+                    * fyr**-3.0
+                )   # (Bc, N, K)
+                P_noise_K += rn
+            if inc_white_noise:
+                P_noise_K += cache['white_noise_arr'][None, :, None]  # broadcast
+        # ---- Integrand over K bins (for integration + plotting) ---------
         for g, Tspan_g in enumerate(unique_tspans):
+            
             pair_mask = pair_group_ids == g
             gi        = i_idx[pair_mask]
             gj        = j_idx[pair_mask]
-            Pg        = pair_mask.sum()
-            if Pg == 0:
+            if pair_mask.sum() == 0:
                 continue
 
-            h_f      = measured_strain_all_binaries_all_pulsars(ba, cache, time_arr)
-            h_f_conj = h_f.conjugate()
+            # All shapes now have a K dimension at the end
+            # h_f: (Bc, N, K) → index pulsars
+            h_gi = h_f[:, gi, :]         # (Bc, Pg, K)
+            h_gj = h_f[:, gj, :]         # (Bc, Pg, K)
 
-            norm  = 1.0 / (12.0 * np.pi**2 * f_bin**3)   # (Bc,)
-
-            Sh_ii = h_f[:, gi] * h_f_conj[:, gi] * norm[:, None]
-            Sh_jj = h_f[:, gj] * h_f_conj[:, gj] * norm[:, None]
-            Sh_ij = 0.5 * (
-                h_f[:, gi] * h_f_conj[:, gj] +
-                h_f_conj[:, gi] * h_f[:, gj]
-            ) * norm[:, None]
+            # we need to weight the pulsar pairs by considering how much they respond to the signal injected using Hellings-Down coefficientsß
+            chi_coefficient = chi_coeffs[gi, gj]  # (Pg, Pg)
 
 
-            # # NEW METHOD: use Tspan_g normalisation instead of f_bin**-3
-            # norm = 2 / Tspan_g  # (Bc,) — includes the 2 from the one-sided PSD
-            # Sh_ii = h_f[:, gi] * h_f_conj[:, gi] * norm
-            # Sh_jj = h_f[:, gj] * h_f_conj[:, gj] * norm
-            # Sh_ij = h_f[:, gi] * h_f_conj[:, gj] * norm
-            # Sh_ij = Sh_ij.real
 
-            Ni = P_noise[:, gi] + Sh_ii
-            Nj = P_noise[:, gj] + Sh_jj
+            # # norm over K bins: (Bc, K)
+            # norm_K = 1.0 / (12.0 * np.pi**2 * bin_freqs**3)   # (Bc, K)
 
-            integrand = 2.0 * Tspan_g * Sh_ij**2 / (Ni * Nj)
+            # # T_obs  = time_arr[-1] - time_arr[0]    # [s]
+            # # norm_K = T_obs / (4.0 * np.pi**2 * bin_freqs**2)   # (Bc, K)
+            # Sh_ii = h_gi * h_gi.conj() * norm_K[:, None, :]    # (Bc, Pg, K)
+            # Sh_jj = h_gj * h_gj.conj() * norm_K[:, None, :]
+            # Sh_ij = 0.5 * (
+            #     h_gi * h_gj.conj() + h_gi.conj() * h_gj
+            # ) * norm_K[:, None, :]
+            # Ni = P_noise_K[:, gi, :] + Sh_ii                   # (Bc, Pg, K)
+            # Nj = P_noise_K[:, gj, :] + Sh_jj
 
-            # Sanity check: integrand should be real
-            real_imag_ratio = np.abs(np.real(integrand)) / (np.abs(np.imag(integrand)) + 1e-300)
-            if np.any(real_imag_ratio < 1e10):
-                print(f"WARNING: non-negligible imaginary component, "
-                      f"min |Re/Im| = {real_imag_ratio.min():.3e}")
 
-            snr_sq_chunk += delta_fs[chunk] * np.real(integrand).sum(axis=1)
+            # # Integrand at each of the K bins: (Bc, Pg, K)
+            # integrand_K = 2.0 * Tspan_g * chi_coefficient[None, :, None]**2 * Sh_ij**2 / (Ni * Nj)
+            
+            # Power spectral density: Sh_ij = abs(h_i * h_j_conj) / delta f - delta_f_arr is uniform
+            Sh_ii = 2.0 * h_gi * h_gi.conj() / delta_f_arr[0] # [s]
+            Sh_jj = 2.0 * h_gj * h_gj.conj() / delta_f_arr[0] # [s]
+            Sh_ij = 2.0 * 0.5 * (h_gi * h_gj.conj() + h_gi.conj() * h_gj) / delta_f_arr[0] #[s]
+
+            # We want the PSD of the timing residuals - S_tr(f) = Sh(f) / (12 * pi^2 * f^2)
+            norm_K = 1.0 / (12.0 * np.pi**2 * bin_freqs**2)   # (Bc, K)
+            Sr_ii = Sh_ii * norm_K[:, None, :]    # (Bc, Pg, K)
+            Sr_jj = Sh_jj * norm_K[:, None, :]
+            Sr_ij = Sh_ij * norm_K[:, None, :]
+
+
+            Ni = P_noise_K[:, gi, :] + Sr_ii                   # (Bc, Pg, K)
+            Nj = P_noise_K[:, gj, :] + Sr_jj
+
+            integrand_K = 2.0 * Tspan_g * chi_coefficient[None, :, None]**2 * Sr_ij**2 / (Ni * Nj)
+
+            # print(np.median(P_noise_K), np.median(np.abs(h_f)**2))
+            # ---- Plot integrand vs frequency (first binary, first pair) --
+            # Shows you how much it evolves across the K bins
+            # _plot_integrand_vs_freq(bin_freqs, integrand_K, label=f'chunk {start}')
+
+            # ---- Integrate over K bins using trapezoidal rule -------------------
+            # integrand_K: (Bc, Pg, K) → sum over pairs first → (Bc, K), then trapz over K
+
+            integrand_real = np.real(integrand_K).sum(axis=1)   # (Bc, K) — summed over pairs
+
+            snr_sq_chunk += np.trapz(
+                integrand_real,
+                x=bin_freqs[0],    # (Bc, K) — non-uniform spacing handled automatically
+                axis=-1         # integrate over K bins
+            ) 
 
         snr_sq_arr[chunk] = snr_sq_chunk
-
+    
     return snr_sq_arr
+
+def _plot_integrand_vs_freq(bin_freqs, integrand_K, label=''):
+    """
+    Plot the real integrand vs frequency across the K neighbouring bins.
+    bin_freqs:    (Bc, K)
+    integrand_K:  (Bc, Pg, K)  — sum over pairs for display
+    """
+    integrand_summed = np.real(integrand_K[0]).sum(axis=0)   # (K,) first binary, all pairs
+    freqs_plot       = bin_freqs[0]                           # (K,) first binary
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(
+        freqs_plot,
+        integrand_summed,
+        width=np.diff(freqs_plot).mean() * 0.8,
+        color='#88CCEE', edgecolor='k', alpha=0.8,
+        label='integrand per bin'
+    )
+    ax.set_xlabel('Frequency [Hz]')
+    ax.set_ylabel(r'$2 T_\mathrm{span}\, S_{ij}^2 / (N_i N_j)$')
+    ax.set_title(f'Integrand across peak ± neighbours  [{label}]')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
 
 
 def build_pulsar_cache_time_domain(pulsars, parsed_noise_params, raw_noise_params):
@@ -1889,7 +1578,7 @@ def find_N_needed(
     target_SNR:          float,
     time_arr_npoints:    int   = 301, # gets to 3e-7 Hz
     chunk_size:          int   = None,
-    target_memory_GB:    float = 1.0,
+    target_memory_GB:    float = 2.0,
     inc_GW:              bool  = True,
     inc_red_noise:       bool  = True,
     inc_white_noise:     bool  = True,
@@ -1915,7 +1604,7 @@ def find_N_needed(
         inc_red_noise       = inc_red_noise,
         inc_white_noise     = inc_white_noise,
         noise_method        = noise_method,
-    )
+    ) 
 
     cum_snr_sq = np.cumsum(snr_sq_arr)
     cum_snr    = np.sqrt(np.abs(cum_snr_sq))
@@ -1939,7 +1628,6 @@ def find_N_needed(
         selected_binaries = binaries
         print(f"Target SNR {target_SNR:.3f} not reached. "
               f"Max SNR = {SNR_current:.3f} with all {N_needed} binaries.")
-
 
     # For one binary and one pulsar, both should agree
     Fp_vec, Fx_vec = antenna_response_vectorised(
@@ -2597,3 +2285,622 @@ def test_psd_vs_residuals_consistency(
         'enterprise_white':      ent_white,
         'freqs':                 freqs,
     }
+
+
+def compare_to_enterprise_os(
+    os_obj,              # enterprise_extensions OptimalStatistic object
+    raw_noise_params,    # your noise dict passed to build_pta_and_params
+    pulsars,             # list of enterprise pulsar objects
+    Tspan,               # float, seconds
+    psd_interpolators,   # list of interp1d from your SNR function
+    snr_sq_arr,          # (B,) your per-binary SNR^2 output
+    binaries,            # list of binary dicts
+    nmodes,              # int, same as used in pulsar_PSD_using_enterprise
+):
+
+    # ------------------------------------------------------------------
+    # 1. Run enterprise OS at MAP noise params
+    # ------------------------------------------------------------------
+    pta_cmp, _, params_cmp = build_pta_and_params(
+        psrs              = pulsars,
+        noise_params_15yr = raw_noise_params,
+        Tspan             = Tspan,
+        include_GW        = True,
+        nmodes            = nmodes,
+    )
+    os_obj_cmp = os_obj   # reuse passed-in object
+
+    xi, rho, sig, OS, OS_sig = os_obj_cmp.compute_os(params=params_cmp)
+    psrnames = [p.name for p in pulsars]
+    pair_idx = [
+        (i, j)
+        for i in range(len(pulsars))
+        for j in range(i+1, len(pulsars))
+    ]
+
+    print("\n" + "="*70)
+    print("ENTERPRISE OS SUMMARY")
+    print("="*70)
+    print(f"  OS amplitude A^2        = {OS:.6e}")
+    print(f"  OS sigma_A^2            = {OS_sig:.6e}")
+    print(f"  OS SNR = A^2/sigma_A^2  = {OS / OS_sig:.6f}")
+    print(f"  N pairs                 = {len(pair_idx)}")
+
+    # ------------------------------------------------------------------
+    # 2. Per-pair sigma_IJ from enterprise vs yours
+    # ------------------------------------------------------------------
+    print("\n" + "="*70)
+    print("PER-PAIR SIGMA_IJ COMPARISON (first 10 pairs)")
+    print("="*70)
+    print(f"  {'Pair':<40} {'ent sigma_IJ':>14}  {'note'}")
+    print(f"  {'-'*40} {'-'*14}  {'-'*20}")
+    for k, (i, j) in enumerate(pair_idx[:10]):
+        print(f"  {psrnames[i][:18]}-{psrnames[j][:18]}  {sig[k]:>14.6e}")
+
+    # ------------------------------------------------------------------
+    # 3. Reconstruct YOUR sigma_IJ from the noise PSD interpolators
+    #    using the same GWB template enterprise uses internally
+    # ------------------------------------------------------------------
+    print("\n" + "="*70)
+    print("YOUR SIGMA_IJ (from noise PSD interpolators, power-law template)")
+    print("="*70)
+
+    fyr    = 1.0 / (365.25 * 86400)
+    gamma  = 13.0 / 3.0
+    f_grid = np.array([k / Tspan for k in range(1, nmodes + 1)])   # Hz
+
+    # GWB timing residual PSD template at unit amplitude (enterprise convention)
+    # phi_gw(f) = A^2/(12pi^2) * f^{-gamma} * fyr^{gamma-3} / (2*df)
+    # but as a continuous PSD: S_gw(f) = phi_gw * 2*df = A^2/(12pi^2) * f^{-gamma} * fyr^{gamma-3}
+    # In timing residual units (already 1/(2pif)^2 folded in for GWB):
+    # S_r_gw(f) = A^2/(12pi^2) * f^{-gamma} * fyr^{gamma-3} * 1/(2*df)  [enterprise phi units]
+    # As continuous one-sided PSD:
+    S_r_gw = (1.0 / (12.0 * np.pi**2)) * f_grid**(-gamma) * fyr**(gamma - 3)  # s^3, A=1
+
+    your_sigma2_IJ = np.zeros(len(pair_idx))
+    for k, (i, j) in enumerate(pair_idx):
+        P_I = np.exp(psd_interpolators[i](np.log(f_grid)))   # s^3
+        P_J = np.exp(psd_interpolators[j](np.log(f_grid)))   # s^3
+        # sigma^2_IJ = integral S_gw^2 / (P_I * P_J) df
+        integrand = S_r_gw**2 / (P_I * P_J)
+        your_sigma2_IJ[k] = 2.0 * np.trapz(integrand, x=f_grid)
+
+    your_sigma_IJ = np.sqrt(your_sigma2_IJ)
+
+    print(f"  {'Pair':<40} {'ent sigma':>12}  {'yours':>12}  {'ratio y/e':>10}")
+    print(f"  {'-'*40} {'-'*12}  {'-'*12}  {'-'*10}")
+    for k, (i, j) in enumerate(pair_idx[:10]):
+        ratio = your_sigma_IJ[k] / sig[k] if sig[k] > 0 else np.nan
+        print(f"  {psrnames[i][:18]}-{psrnames[j][:18]}  "
+              f"{sig[k]:>12.4e}  {your_sigma_IJ[k]:>12.4e}  {ratio:>10.4f}")
+
+    # ------------------------------------------------------------------
+    # 4. SNR comparison
+    # ------------------------------------------------------------------
+    print("\n" + "="*70)
+    print("SNR COMPARISON")
+    print("="*70)
+
+    # Enterprise OS SNR
+    ent_snr = OS / OS_sig
+    print(f"  Enterprise OS SNR                = {ent_snr:.6f}")
+
+    # Your total SNR (sum in quadrature over all binaries)
+    your_snr_total = np.sqrt(np.nansum(snr_sq_arr))
+    print(f"  Your total SNR sqrt(sum rho^2)   = {your_snr_total:.6f}")
+    print(f"  Ratio yours/enterprise           = {your_snr_total / ent_snr:.4f}")
+
+    # Your sigma_A^2 from the noise-only sigma_IJ (comparable to enterprise)
+    your_sigma_A2 = 1.0 / np.sqrt(np.sum(1.0 / your_sigma2_IJ))
+    print(f"  Your sigma_A^2 (noise PSD only)  = {your_sigma_A2:.6e}")
+    print(f"  Enterprise sigma_A^2             = {OS_sig:.6e}")
+    print(f"  Ratio sigma_A^2 yours/enterprise = {your_sigma_A2 / OS_sig:.4f}")
+
+    # ------------------------------------------------------------------
+    # 5. Noise PSD spot check: yours vs enterprise at key frequencies
+    # ------------------------------------------------------------------
+    print("\n" + "="*70)
+    print("NOISE PSD SPOT CHECK — pulsar 0 at first 5 frequencies")
+    print("="*70)
+
+    sc_0 = next(
+        sc for sc in pta_cmp._signalcollections
+        if sc.psrname == pulsars[0].name
+    )
+    rn_0 = next(
+        sig_obj for sig_obj in sc_0._signals
+        if f'{pulsars[0].name}_red_noise' in sig_obj.name
+    )
+    phi_rn  = rn_0.get_phi(params_cmp)          # per-mode variance, pairs
+    phi_rn_unique = phi_rn[::2][:nmodes]         # one per frequency
+
+    # Enterprise noise PSD (timing residual): S_r(f) = phi_k * 2*df = phi_k * 2/Tspan
+    # But in your interpolator units it is phi_k * Tspan (from pulsar_PSD_using_enterprise)
+    # So the ratio should be Tspan^2/2 ... unless your white noise is in different units
+    # We check both components separately
+
+    Nvec_0     = np.array(sc_0.get_ndiag(params_cmp)._nvec, dtype=float)
+    sigma2_toa = np.mean(Nvec_0)
+    dt_toa     = Tspan / len(pulsars[0].toas)
+    P_white_phys = sigma2_toa * dt_toa
+
+    print(f"  {'f_k (Hz)':>14}  {'phi_rn (ent)':>14}  {'S_r_interp (yours)':>20}  "
+          f"{'P_white_phys':>14}  {'ratio_RN':>10}")
+    for k in range(5):
+        f_k     = f_grid[k]
+        P_yours = float(np.exp(psd_interpolators[0](np.log(f_k))))
+        phi_k   = phi_rn_unique[k]
+        # enterprise per-mode variance → continuous PSD
+        S_r_ent = phi_k * Tspan   # your convention: phi * Tspan
+        print(f"  {f_k:>14.4e}  {phi_k:>14.4e}  {P_yours:>20.4e}  "
+              f"{P_white_phys:>14.4e}  {P_yours/S_r_ent:>10.4f}")
+
+    # ------------------------------------------------------------------
+    # 6. Per-frequency integrand comparison for pair (0,1)
+    # ------------------------------------------------------------------
+    print("\n" + "="*70)
+    print("PER-FREQUENCY INTEGRAND — pair (0,1), GWB template")
+    print("comparing enterprise sigma^2_IJ integrand vs yours")
+    print("="*70)
+
+    i, j = 0, 1
+    P_I_grid = np.exp(psd_interpolators[i](np.log(f_grid)))
+    P_J_grid = np.exp(psd_interpolators[j](np.log(f_grid)))
+    integrand_yours = S_r_gw**2 / (P_I_grid * P_J_grid)
+
+    # Enterprise integrand: use phi_gw and per-pulsar phi from get_phi
+    gw_sigs = [
+        sig_obj for sc in pta_cmp._signalcollections
+        for sig_obj in sc._signals
+        if 'gw' in sig_obj.name.lower() and sc.psrname == pulsars[i].name
+    ]
+    if gw_sigs:
+        phi_gw   = gw_sigs[0].get_phi(params_cmp)[::2][:nmodes]
+        phi_tot_I = (rn_0.get_phi(params_cmp)[::2][:nmodes] + phi_gw)
+        sc_j = next(sc for sc in pta_cmp._signalcollections
+                    if sc.psrname == pulsars[j].name)
+        rn_j = next(s for s in sc_j._signals
+                    if f'{pulsars[j].name}_red_noise' in s.name)
+        phi_tot_J = (rn_j.get_phi(params_cmp)[::2][:nmodes] + phi_gw)
+        # Enterprise integrand in phi units: phi_gw^2 / (phi_I * phi_J)
+        # Convert to PSD units (* Tspan for each phi): ratio is unchanged
+        integrand_ent = phi_gw**2 / (phi_tot_I * phi_tot_J)
+        integrand_ent_psd = S_r_gw**2 / (
+            (phi_tot_I * Tspan) * (phi_tot_J * Tspan) / Tspan**2
+        )
+
+        print(f"  {'f_k':>12}  {'intgd yours':>14}  {'intgd ent':>14}  {'ratio':>10}")
+        print(f"  {'-'*12}  {'-'*14}  {'-'*14}  {'-'*10}")
+        for k in range(10):
+            ratio = integrand_yours[k] / integrand_ent[k] if integrand_ent[k] > 0 else np.nan
+            print(f"  {f_grid[k]:>12.4e}  {integrand_yours[k]:>14.4e}  "
+                  f"{integrand_ent[k]:>14.4e}  {ratio:>10.4f}")
+    else:
+        print("  (GW signal not found in PTA signals — run with include_GW=True)")
+
+
+    # Enterprise total phi per mode (red + white)
+    sc_0 = next(sc for sc in pta_cmp._signalcollections 
+                if sc.psrname == pulsars[0].name)
+    phi_total_ent = sc_0.get_phi(params_cmp)  # includes all noise sources
+    phi_total_unique = phi_total_ent[::2][:nmodes]  # one per freq
+
+    # Your interpolator
+    P_yours = np.exp(psd_interpolators[0](np.log(f_grid)))
+
+    print("f_k | phi_total_ent | P_yours/Tspan | ratio")
+    for k in range(10):
+        ent = phi_total_unique[k]
+        yours = P_yours[k] / Tspan
+        print(f"{f_grid[k]:.3e} | {ent:.4e} | {yours:.4e} | {yours/ent:.4f}")
+
+    print("\n" + "="*70)
+    print("SUMMARY OF LIKELY DISCREPANCY SOURCES")
+    print("="*70)
+    print(f"  sigma_IJ ratio (yours/enterprise): "
+          f"median={np.median(your_sigma_IJ/sig):.4f}, "
+          f"std={np.std(your_sigma_IJ/sig):.4f}")
+    print(f"  If ratio ~1:    noise PSD is consistent, discrepancy is in signal")
+    print(f"  If ratio >1:    your noise PSD is too large → SNR suppressed")
+    print(f"  If ratio <1:    your noise PSD is too small → SNR inflated")
+    print(f"  SNR ratio (yours/enterprise): {your_snr_total/ent_snr:.4f}")
+    print("="*70)
+
+    return {
+        'xi':             xi,
+        'rho':            rho,
+        'sig_enterprise': sig,
+        'sig_yours':      your_sigma_IJ,
+        'OS':             OS,
+        'OS_sig':         OS_sig,
+        'snr_enterprise': ent_snr,
+        'snr_yours':      your_snr_total,
+        'snr_sq_arr':     snr_sq_arr,
+    }
+
+
+def sigma_ab(
+    pulsar_a:             object,
+    pulsar_b:             object,
+    parsed_noise_params: dict,
+    raw_noise_params:    dict,
+    Tspan:               float,
+    nmodes:              int   = 301,
+
+) -> np.ndarray:
+    """
+    Compute sigma for pulsar pairs.
+    This is the denominator of the optimal statistic SNR formula, and is given by:
+
+        sigma_ab^2 = 1/(2 T) * [ integral (P_g^2 / (P_a P_b)) df ]^-1
+    """
+
+    
+    f_min = 1.0 / Tspan
+    f_max = 3e-7
+    f_step = 1.0 / Tspan
+    N_bin_f = int((f_max - f_min) / f_step) + 1
+
+    bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
+    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_widths = bin_edges[1:] - bin_edges[:-1]
+
+
+    time_arr_max = np.max(1.0 / bin_edges)
+    time_arr_min = np.min(1.0 / bin_edges)
+
+    # ----------------------------------------------------------------
+    # Per-pair Tspan
+    # ----------------------------------------------------------------
+    psr_tspan_a  = pulsar_a.toas.max() - pulsar_a.toas.min() 
+    psr_tspan_b  = pulsar_b.toas.max() - pulsar_b.toas.min() 
+    tspan = np.minimum(psr_tspan_a, psr_tspan_b)
+
+    # ----------------------------------------------------------------
+    # Hellings-Downs coefficients for all pairs
+    # ----------------------------------------------------------------
+    pulsars = np.array([pulsar_a, pulsar_b])
+    chi_coeffs = chi_coeff_matrix(pulsars)  # (N, N)
+    # noise_arr_total, noise_red, noise_white, freqs = pulsar_PSD_using_enterprise(pulsars, raw_noise_params, parsed_noise_params, Tspan, nmodes=nmodes)
+
+    freqs = np.array([k / Tspan for k in range(1, nmodes + 1)])   # (nmodes,)
+    # freqs = freqs[0]
+    A_gw = 1.
+    alpha = -2. /3.
+    fyr = 1 / (86400 * 365.25)
+    P_g = A_gw**2 / (12 * np.pi**2) * (freqs/fyr)**(2 * alpha) * freqs**(-3)
+    white_a = analytic_white_noise_psd(pulsar_a, parsed_noise_params)
+    white_b = analytic_white_noise_psd(pulsar_b, parsed_noise_params)
+    
+    red_a = pulsar_red_noise_psd(freqs, parsed_noise_params[pulsar_a.name]['red_noise']['log10_A'], parsed_noise_params[pulsar_a.name]['red_noise']['gamma'], fyr)
+    red_b = pulsar_red_noise_psd(freqs, parsed_noise_params[pulsar_b.name]['red_noise']['log10_A'], parsed_noise_params[pulsar_b.name]['red_noise']['gamma'], fyr)
+
+    # print("red_noise:", noise_red[0]/red_a, "white_noise:", noise_white[0]/white_a)
+
+
+    P_a = white_a + red_a
+    P_b = white_b + red_b
+
+    integrand = P_g**2 / (P_a * P_b)
+
+    integrated_val = np.trapz(
+            integrand,
+            x=freqs,    # (Bc, K) — non-uniform spacing handled automatically
+            axis=-1         # integrate over K bins
+        ) 
+    chi_coeff_ab = chi_coeffs[0, 1]
+    sigma_ab = (2 * Tspan * chi_coeff_ab**2 * integrated_val)**(-0.5)
+    return sigma_ab
+
+def sigma_ab_all_pairs(
+    psrs_clean:          list,
+    parsed_noise_params: dict,
+    raw_noise_params:    dict,
+    Tspan:               float,
+    nmodes:              int = 150,
+    psd:                 list = None,  
+) -> tuple[np.ndarray, list]:
+    """
+    Compute sigma_IJ for all unique pulsar pairs.
+    Returns sigma_arr (N_pairs,) and pair_labels list.
+    """
+    fyr   = 1.0 / (86400.0 * 365.25)
+    gamma = 13.0 / 3.0
+    N     = len(psrs_clean)
+
+    # ------------------------------------------------------------------
+    # 1. Frequency grid — same for all pulsars
+    # ------------------------------------------------------------------
+    freqs = np.array([k / Tspan for k in range(1, nmodes + 1)])   # (nmodes,)
+
+    # ------------------------------------------------------------------
+    # 2. GWB template PSD — computed once
+    # ------------------------------------------------------------------
+    P_gw = (1.0 / (12.0 * np.pi**2)) * freqs**(-gamma) * fyr**(gamma - 3.0)  # (nmodes,) s^3
+
+    # ------------------------------------------------------------------
+    # 3. Per-pulsar noise PSD — computed once per pulsar, not per pair
+    # ------------------------------------------------------------------
+    if psd is None:
+        P_noise = np.zeros((N, nmodes))   # (N, nmodes)
+        for i, psr in enumerate(psrs_clean):
+            white = analytic_white_noise_psd(psr, parsed_noise_params)
+            red   = pulsar_red_noise_psd(
+                freqs,
+                parsed_noise_params[psr.name]['red_noise']['log10_A'],
+                parsed_noise_params[psr.name]['red_noise']['gamma'],
+                fyr,
+            )
+            P_noise[i] = white + red
+    else:
+        P_noise = np.array(psd)  # (N, nmodes)
+
+    # ------------------------------------------------------------------
+    # 4. HD coefficients — computed once for all pairs
+    # ------------------------------------------------------------------
+    chi_mat = chi_coeff_matrix(psrs_clean)   # (N, N)
+
+    # ------------------------------------------------------------------
+    # 5. Pair loop — now just arithmetic, no PTA builds
+    # ------------------------------------------------------------------
+    pair_labels = []
+    sigma_arr   = []
+
+     # Vectorised version of step 5 — replaces the pair loop entirely
+    # Build index arrays for all unique pairs
+    ii, jj     = np.tril_indices(N, k=-1)   # lower triangle indices
+    # ii, jj give j < i; swap to get i < j convention
+    i_idx, j_idx = jj, ii
+
+    # Integrand for all pairs at once: (N_pairs, nmodes)
+    integrand_all = P_gw[None, :]**2 / (P_noise[i_idx] * P_noise[j_idx])
+
+    # Integrate each pair over frequency: (N_pairs,)
+    integral_all  = np.trapz(integrand_all, x=freqs, axis=-1)
+
+    # HD coefficients for all pairs: (N_pairs,)
+    Gamma_all     = chi_mat[i_idx, j_idx]
+
+    # sigma for all pairs: (N_pairs,)
+    sigma_arr     = (2.0 * Tspan * Gamma_all**2 * integral_all) ** (-0.5)
+    # sigma_arr     = (2.0 * Tspan  * integral_all) ** (-0.5)
+
+    pair_labels   = [(psrs_clean[i].name, psrs_clean[j].name)
+                     for i, j in zip(i_idx, j_idx)]
+
+    return np.array(sigma_arr), pair_labels, P_noise
+
+def get_enterprise_noise_per_mode(
+    psrs_clean:       list,
+    raw_noise_params: dict,
+    Tspan:            float,
+    nmodes:           int = 301,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extract N_tilde_I diagonal for the Fourier modes only.
+    Strips timing model columns before inverting.
+    """
+    N = len(psrs_clean)
+
+    pta, _, params = build_pta_and_params(
+        psrs              = psrs_clean,
+        noise_params_15yr = raw_noise_params,
+        Tspan             = Tspan,
+        include_GW        = True,
+        nmodes            = nmodes,
+    )
+
+    # Set GWB and BayesEphem params explicitly
+    param_defaults = {
+        'gw_log10_A':        np.log10(2.4e-15),
+        'gw_gamma':          13.0 / 3.0,
+        'd_jupiter_mass':     0.0,
+        'd_saturn_mass':      0.0,
+        'd_uranus_mass':      0.0,
+        'd_neptune_mass':     0.0,
+        'frame_drift_rate':   0.0,
+        'jup_orb_elements_0': 0.0,
+        'jup_orb_elements_1': 0.0,
+        'jup_orb_elements_2': 0.0,
+        'jup_orb_elements_3': 0.0,
+        'jup_orb_elements_4': 0.0,
+        'jup_orb_elements_5': 0.0,
+    }
+    for k, v in param_defaults.items():
+        if k not in params:
+            params[k] = v
+
+    freqs   = np.array([k / Tspan for k in range(1, nmodes + 1)])
+    N_tilde = np.zeros((N, nmodes))
+    TNT_list = pta.get_TNT(params)
+
+    for i, psr in enumerate(psrs_clean):
+        sc       = next(sc for sc in pta._signalcollections
+                        if sc.psrname == psr.name)
+        phi_full = np.array(sc.get_phi(params))   # (n_tm + 2*nmodes,)
+        TNT_I    = TNT_list[i]                     # (n_tm + 2*nmodes, n_tm + 2*nmodes)
+
+        # Total size and Fourier block size
+        n_total  = len(phi_full)
+        n_fourier = 2 * nmodes                     # always last 2*nmodes entries
+
+        # Verify the last 2*nmodes entries are the Fourier modes
+        # (not the 1e40 timing model entries)
+        phi_fourier = phi_full[-n_fourier:]
+        phi_tm      = phi_full[:-n_fourier]
+
+        print(f"  {psr.name}: phi_full size={n_total}, "
+              f"n_tm={n_total - n_fourier}, "
+              f"phi_tm max={phi_tm.max():.2e}, "
+              f"phi_fourier max={phi_fourier.max():.2e}  "
+              f"<-- phi_tm should be ~1e40, phi_fourier should be ~1e-12")
+
+        # Extract Fourier-only block of TNT
+        TNT_fourier = TNT_I[-n_fourier:, -n_fourier:]   # (2*nmodes, 2*nmodes)
+
+        # Sigma = Phi_fourier^{-1} + TNT_fourier
+        Sigma_fourier = np.diag(1.0 / phi_fourier) + TNT_fourier
+
+        # N_tilde = Sigma^{-1}
+        N_tilde_fourier = np.linalg.inv(Sigma_fourier)   # (2*nmodes, 2*nmodes)
+
+        # One entry per frequency (sin and cos degenerate)
+        N_tilde[i] = np.diag(N_tilde_fourier)[::2][:nmodes]
+
+    return N_tilde, freqs
+
+
+def sigma_ab_all_pairs_enterprise(
+    psrs_clean:       list,
+    raw_noise_params: dict,
+    Tspan:            float,
+    nmodes:           int = 301,
+) -> tuple[np.ndarray, list]:
+    """
+    Compute sigma_IJ for all pairs using enterprise's exact N_tilde_I.
+
+    The formula (Chamberlin+2015, Eq. A9) in per-mode form is:
+
+        sigma_IJ^{-2} = sum_k  2 * Gamma_IJ^2 * phi_gw_k^2
+                                / (N_tilde_I_k * N_tilde_J_k)
+
+    where phi_gw_k is the unit-amplitude GWB per-mode variance.
+    All quantities are in the same phi units (s^2 per mode) so no
+    PSD conversion is needed.
+    """
+    fyr   = 1.0 / (86400.0 * 365.25)
+    gamma = 13.0 / 3.0
+    N     = len(psrs_clean)
+
+    # ------------------------------------------------------------------
+    # 1. Get N_tilde for all pulsars from enterprise
+    # ------------------------------------------------------------------
+    N_tilde, freqs = get_enterprise_noise_per_mode(
+        psrs_clean       = psrs_clean,
+        raw_noise_params = raw_noise_params,
+        Tspan            = Tspan,
+        nmodes           = nmodes,
+    )
+    # N_tilde: (N, nmodes), units s^2 (per-mode variance)
+
+    # ------------------------------------------------------------------
+    # 2. GWB template per-mode variance at unit amplitude
+    #    phi_gw_k = 1/(12pi^2) * f^{-gamma} * fyr^{gamma-3} * Tspan/2
+    #    This is what enterprise stores in phi for the GWB signal
+    # ------------------------------------------------------------------
+    phi_gw = (
+        (1.0 / (12.0 * np.pi**2))
+        * freqs**(-gamma)
+        * fyr**(gamma - 3.0)
+        * Tspan / 2.0
+    )   # (nmodes,) s^2
+
+    # ------------------------------------------------------------------
+    # 3. HD coefficients for all pulsars
+    # ------------------------------------------------------------------
+    # Build PTA again to get chi — or reuse if you have it
+    pta, _, params = build_pta_and_params(
+        psrs              = psrs_clean,
+        noise_params_15yr = raw_noise_params,
+        Tspan             = Tspan,
+        include_GW        = True,
+        nmodes            = nmodes,
+    )
+    chi_mat = chi_coeff_matrix(psrs_clean)   # (N, N)
+
+    # ------------------------------------------------------------------
+    # 4. Vectorised pair computation
+    # ------------------------------------------------------------------
+    ii, jj  = np.tril_indices(N, k=-1)
+    i_idx   = jj
+    j_idx   = ii
+
+    # Per-mode integrand for all pairs: (N_pairs, nmodes)
+    # sigma^{-2} = sum_k  2 * Gamma^2 * phi_gw^2 / (N_tilde_I * N_tilde_J)
+    integrand_all = (
+        2.0 * phi_gw[None, :]**2
+        / (N_tilde[i_idx] * N_tilde[j_idx])
+    )   # (N_pairs, nmodes)
+
+    # Sum over modes: (N_pairs,)
+    sigma_inv2_all = np.sum(integrand_all, axis=-1)
+
+    # HD factor
+    Gamma_all      = chi_mat[i_idx, j_idx]   # (N_pairs,)
+    sigma_inv2_all = sigma_inv2_all * Gamma_all**2
+
+    sigma_arr   = 1.0 / np.sqrt(sigma_inv2_all)   # (N_pairs,)
+    pair_labels = [
+        (psrs_clean[i].name, psrs_clean[j].name)
+        for i, j in zip(i_idx, j_idx)
+    ]
+
+    return sigma_arr, pair_labels
+
+def get_pulsar_noise_psd(pta, params, pulsar_idx, T_span):
+    '''
+    Extract the Woodbury-marginalised total noise PSD for a single pulsar.
+    This is the quantity that appears in the OS noise floor.
+
+    Parameters
+    ----------
+    pta        : enterprise PTA object
+    params     : dict of noise parameters (one posterior sample)
+    pulsar_idx : int, index of the pulsar in pta.pulsars
+    T_span     : float, total timing baseline in seconds
+
+    Returns
+    -------
+    freqs   : array of shape (Nf,), frequencies in Hz
+    psd     : array of shape (Nf,), one-sided noise PSD in s^3
+    '''
+    df = 1.0 / T_span
+
+
+    # ── Step 1: Get the full Phi matrix (all pulsars) ──────────────────
+    # Shape: (2*Npsr*Nf, 2*Npsr*Nf)
+    # Diagonal block for pulsar a is at rows/cols:
+    #   [ a*2*Nf : (a+1)*2*Nf, a*2*Nf : (a+1)*2*Nf ]
+    phi_list = pta.get_phi(params)
+    a = pulsar_idx
+    phi_a_full = np.array(phi_list[a])   # shape (Ntm + 2*Nf,) — flat diagonal
+    # Find where the 1e40 sentinels end — real entries are not 1e40
+    real_mask = phi_a_full < 1e30
+    phi_a_diag = phi_a_full[real_mask]   # shape (2*Nf,), actual red noise variances
+    # Infer Nf from the data
+    Nf = len(phi_a_diag) // 2
+    freqs = np.arange(1, Nf + 1) * df
+
+    # phi_a_diag[2k]   = variance of sin coefficient at freq bin k
+    # phi_a_diag[2k+1] = variance of cos coefficient at freq bin k
+    # Both equal P(fk) * df for an isotropic process
+
+    # ── Step 2: Get TNT for this pulsar ────────────────────────────────
+    # TNT is a list over pulsars, each shape (Ntm + 2Nf, Ntm + 2Nf)
+    TNTs = pta.get_TNT(params)
+
+    # ── Step 3: Slice out the Fourier-only block ───────────────────────
+    # TNT_a has timing model columns first, then Fourier columns.
+    # Ntm = number of timing model parameters for this pulsar.
+    TNT_a = np.array(TNTs[a], dtype=float)  
+    Ntm = TNT_a.shape[0] - 2 * Nf   # total columns minus the 2*Nf Fourier columns
+    FtNF = TNT_a[Ntm:, Ntm:]
+
+    # ── Step 4: Build the Fourier-basis total noise precision matrix ───
+    # ΣF,a⁻¹ = Φred,a⁻¹ + FᵀN⁻¹F
+    # For a diagonal Phi_a, the inverse is just 1/diag
+    Phi_a_inv = np.diag(1.0 / phi_a_diag)
+    Sigma_F_inv = Phi_a_inv + FtNF
+
+    # ── Step 5: Invert to get the total noise covariance ───────────────
+    # ΣF,a = (Φred,a⁻¹ + FᵀN⁻¹F)⁻¹
+    Sigma_F = np.linalg.inv(Sigma_F_inv)
+
+    # ── Step 6: Extract PSD from diagonal ─────────────────────────────
+    # Average sin and cos components (equal by isotropy), divide by df
+    psd = np.array([
+        0.5 * (Sigma_F[2*k, 2*k] + Sigma_F[2*k+1, 2*k+1]) / df
+        for k in range(Nf)
+    ])
+
+    return freqs, psd

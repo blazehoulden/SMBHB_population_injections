@@ -7,7 +7,7 @@ import numpy as np
 def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
                          gw_log10_A=np.log10(2.4e-15), gw_gamma=13.0/3.0, 
                          include_GW=True, include_RN=True, include_WN=True,
-                         nmodes=30):
+                         nmodes=150):
     """
     Build PTA model and ensure all required parameters exist.
     
@@ -42,7 +42,7 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
     tm   = gp_signals.TimingModel(use_svd=True)
     mn   = white_signals.MeasurementNoise(efac=efac, log10_t2equad=t2equad, selection=selection)
     ec   = white_signals.EcorrKernelNoise(log10_ecorr=ecorr, selection=selection)
-    if include_WN == False:
+    if include_WN == False: # need to still include a tiny value for this to work, but it should be negligible enough to not affect results
         mn = white_signals.MeasurementNoise(efac=parameter.Constant(val=1e-8), log10_t2equad=parameter.Constant(val=-12), selection=selection)
 
     pl   = utils.powerlaw(log10_A=log10_A, gamma=gamma)
@@ -60,7 +60,7 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
     if include_WN == False:
         model += mn
     if include_GW == False:
-        gw_log10_A=-18.0 # should be negligible enough
+        gw_log10_A=-20.0 # should be negligible enough - similar to WN above
         cpl  = utils.powerlaw(log10_A=gw_log10_A, gamma=gw_gamma)
         curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
         model += curn

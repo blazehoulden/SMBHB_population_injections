@@ -9,8 +9,8 @@ from memory_profile import log_memory
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
-
-def compute_population_snr(population, psrs_clean, detailed_noise_params, pulsar_noise_params_classified, Tspan, verbose=False, timer=False, profile=False):
+# calculates the SNR for a given population
+def compute_population_snr(population, psrs_clean, raw_noise_params, parsed_noise_params, Tspan, verbose=False, timer=False, profile=False):
     """
     Compute SNR for a given population of binaries (accounting for interference).
     
@@ -29,7 +29,7 @@ def compute_population_snr(population, psrs_clean, detailed_noise_params, pulsar
         if profile:
             t0 = time.time()
         psrs_injected = inject_population_into_psrs(
-            psrs_clean, population, pure_signal=True, verbose=False, pulsar_noise_params=pulsar_noise_params_classified
+            psrs_clean, population, pure_signal=True, verbose=False, pulsar_noise_params=parsed_noise_params
         )
         if profile:
             t_inject = time.time() - t0
@@ -38,7 +38,7 @@ def compute_population_snr(population, psrs_clean, detailed_noise_params, pulsar
         if profile:
             t0 = time.time()
         pta, _, params_out = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=detailed_noise_params, 
+            psrs=psrs_injected, noise_params_15yr=raw_noise_params, 
             Tspan=Tspan
         )
         if profile:
@@ -76,7 +76,7 @@ def compute_population_snr(population, psrs_clean, detailed_noise_params, pulsar
             }
             return snr, timing
         else:
-            return snr
+            return snr, sig
         
     except Exception as e:
         if verbose:
@@ -122,13 +122,13 @@ def generate_snr_consistent_population(
             config_batch = {**config_template, 'n_binaries': batch_n}
             population.extend(generate_population(
                 config_batch, smbhb_module, 
-                T_obs_years=Tspan/(365.25*86400)
+                T_obs_seconds=Tspan
             ))
     else:
         config = {**config_template, 'n_binaries': N_current}
         population = generate_population(
             config, smbhb_module, 
-            T_obs_years=Tspan/(365.25*86400)
+            T_obs_seconds=Tspan
         )
 
     # =====================================================================
@@ -421,7 +421,7 @@ def generate_snr_consistent_population(
 
                 config_add   = {**config_template, 'n_binaries': N_to_add}
                 new_binaries = generate_population(config_add, smbhb_module,
-                                        T_obs_years=Tspan/(365.25*86400))
+                                        T_obs_seconds=Tspan)
                     
                 signal_cache.extend_population(new_binaries)
 

@@ -641,6 +641,8 @@ def compute_characteristic_strain_squared_circular(
     -------
     h_squared : ndarray
         Squared characteristic strain h² [dimensionless]
+    amplitude : ndarray
+        Amplitude factor (without orientation averaging) for each binary
         
     Notes
     -----
@@ -651,6 +653,7 @@ def compute_characteristic_strain_squared_circular(
     """
     n = gw_frequencies.size
     h_squared = np.empty(n, dtype=np.float64)
+    amplitude = np.empty(n, dtype=np.float64)
     
     # Constant factor: 32/(5*c^8)
     if inclination_angle is None:
@@ -665,28 +668,24 @@ def compute_characteristic_strain_squared_circular(
         # Convert to SI units
         Mc_SI = chirp_masses[i] * SOLAR_MASS_KG
         D__COMOV_SI = comoving_distances[i] * MEGAPARSEC_IN_METERS
-        
+        amplitude[i] = 2 * (GRAVITATIONAL_CONSTANT * Mc_SI)**(5.0/3.0) * (2 * np.pi * f_rest_orbital)**(2.0/3.0) / (SPEED_OF_LIGHT_MS**4 * D__COMOV_SI)
         # h² formula for circular orbits
         if inclination_angle is None:
             # Orientation-averaged strain
-            h_squared[i] = const * \
-                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
-                        (2.0 * np.pi * f_rest_orbital)**(4.0/3.0)
+            h_squared[i] = const * (0.5 * amplitude[i])**2
         else: 
             # Polarization contribution
             i_loc = inclination_angle[i]
             a = 1.0 + np.cos(i_loc)**2
             b = -2.0 * np.cos(i_loc)
             MeanAng = np.sqrt(2 * (a**2 + b**2))
-            h_squared[i] = const * MeanAng**2 * \
-                        (GRAVITATIONAL_CONSTANT * Mc_SI)**(10.0/3.0) / D__COMOV_SI**2 * \
-                        (2.0 * np.pi * f_rest_orbital)**(4.0/3.0) 
+            h_squared[i] = const * (0.5 * amplitude[i])**2 * MeanAng**2 
     
-    return h_squared
+    return h_squared, amplitude
 
 
 @njit
-def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
+def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs_seconds=16.03 * 86400 * 365.25):
     """
     Bin individual strain contributions to compute population spectrum.
     
@@ -704,7 +703,7 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
     n_freq_bins : int
         Number of logarithmically-spaced frequency bins
     T_obs : float, optional
-        Observation time [years] (default: 15)
+        Observation time [s] (default: 16.03 yrs)
         
     Returns
     -------
@@ -725,9 +724,9 @@ def bin_characteristic_strain(gw_frequencies, h_squared, n_freq_bins, T_obs=15):
     where the sum is over all binaries in that bin.
     """
     n_binaries = len(gw_frequencies)
-    f_min = 1.0 / (T_obs * YEAR_IN_SECONDS)
+    f_min = 1.0 / (T_obs_seconds)
     f_max = 3e-7
-    f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
+    f_step = 1.0 / (T_obs_seconds)
     N_bin_f = int((f_max - f_min) / f_step) + 1
 
     bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
@@ -787,7 +786,7 @@ def generate_smbhb_population(
     mass_cutoff_z=0.0,
     compute_strain=True,
     n_freq_bins=50,
-    T_obs=15,
+    T_obs_seconds=16.03 * 365.25 * 86400,
     random_seed=None
 ):
     """
@@ -902,7 +901,7 @@ def generate_smbhb_population(
     n_threads = nb.get_num_threads()
     thread_seeds = rng.integers(0, 2**32 - 1, size=n_threads)
     
-    gw_frequencies = sample_gw_frequencies(n_binaries, thread_seeds, t_obs_max=T_obs*YEAR_IN_SECONDS)
+    gw_frequencies = sample_gw_frequencies(n_binaries, thread_seeds, t_obs_max=T_obs_seconds)
     
     # ========================================================================
     # STEP 2: Sample distances and redshifts
@@ -974,7 +973,7 @@ def generate_smbhb_population(
     
     if compute_strain:
         # Compute h² for each binary (circular orbits)
-        h_squared = compute_characteristic_strain_squared_circular(
+        h_squared, amplitude = compute_characteristic_strain_squared_circular(
             gw_frequencies, 
             chirp_masses, 
             comoving_dist, 
@@ -986,13 +985,13 @@ def generate_smbhb_population(
             gw_frequencies, 
             h_squared, 
             n_freq_bins,
-            T_obs=T_obs
+            T_obs_seconds=T_obs_seconds/YEAR_IN_SECONDS
         )
         
         # Find which bin each binary belongs to
-        f_min = 1.0 / (T_obs * YEAR_IN_SECONDS)
+        f_min = 1.0 / (T_obs_seconds)
         f_max = 3e-7
-        f_step = 1.0 / (T_obs * YEAR_IN_SECONDS)
+        f_step = 1.0 / (T_obs_seconds)
         N_bin_f = int((f_max - f_min) / f_step) + 1
 
         bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
@@ -1024,23 +1023,24 @@ def generate_smbhb_population(
     
     for i in range(n_binaries):
         binary_params = {
-            'Mc': chirp_masses[i],
-            'Mtot': total_masses[i],
-            'f': gw_frequencies[i],
-            'D_comov': comoving_dist[i],
-            'z': redshift[i],
-            'ra': right_ascension[i],
-            'dec': declination[i],
-            'psi': polarization[i],
-            'iota': inclination[i],
-            'phi0': initial_phase[i]
+            'Mc': chirp_masses[i], # units of M_sun
+            'Mtot': total_masses[i], # units of M_sun
+            'f': gw_frequencies[i], # units of Hz
+            'D_comov': comoving_dist[i], # units of Mpc
+            'z': redshift[i], # dimensionless
+            'ra': right_ascension[i], # units of radians
+            'dec': declination[i], # units of radians
+            'psi': polarization[i], # units of radians
+            'iota': inclination[i], # units of radians
+            'phi0': initial_phase[i] # units of radians
         }
         
         # Add strain information if computed
         if compute_strain:
-            binary_params['h_square'] = h_squared[i]
-            binary_params['h_c_contrib'] = h_c_individual[i]
-            binary_params['freq_bin'] = bin_assignment[i]
+            binary_params['h_square'] = h_squared[i] # dimensionless
+            binary_params['h_c_contrib'] = h_c_individual[i] # dimensionless
+            binary_params['freq_bin'] = bin_assignment[i] # integer bin index
+            binary_params['h0'] = amplitude[i] # dimensionless
         
         population.append(binary_params)
     
@@ -1052,6 +1052,144 @@ def generate_smbhb_population(
         return population, strain_data
     else:
         return population
+    
+
+def chosen_population(
+    n_binaries,
+    chirp_mass_msun=1e10,
+    mass_ratio=0.5,
+    gw_frequency=1e-8,
+    redshift=0.5,
+    polarization=0.0,
+    inclination=0.0,
+    initial_phase=0.0,
+    right_ascension=0.0,
+    declination=0.0,
+    compute_strain=True,
+    T_obs_seconds=16.03 * 365.25 * 86400,
+):
+    """
+    Generate a population of SMBHBs with fixed (user-specified) properties.
+
+    Parameters
+    ----------
+    n_binaries : int
+        Number of binaries to generate.
+    chirp_mass_msun : float
+        Chirp mass in solar masses (default: 1e10).
+    mass_ratio : float
+        Mass ratio q = m2/m1, must be in (0, 1] (default: 0.5).
+    gw_frequency : float
+        GW frequency in Hz (default: 1e-8).
+    redshift : float
+        Redshift of all binaries (default: 0.5).
+    polarization : float
+        Polarization angle in radians (default: 0.0).
+    inclination : float
+        Inclination angle in radians (default: 0.0).
+    initial_phase : float
+        Initial GW phase in radians (default: 0.0).
+    right_ascension : float
+        Right ascension in radians (default: 0.0).
+    declination : float
+        Declination in radians (default: 0.0).
+    compute_strain : bool
+        If True, compute characteristic strain (default: True).
+    T_obs : float
+        Observation time in years (default: 15).
+
+    Returns
+    -------
+    population : list of dict
+        Same format as generate_smbhb_population.
+    strain_data : dict (only if compute_strain=True)
+        Same format as generate_smbhb_population.
+    """
+
+    # --- Masses ---
+    chirp_masses = (chirp_mass_msun) * np.ones(n_binaries)  # solar masses
+    # Mtot from Mc and q: Mc = Mtot * q^(3/5) / (1+q)^(1/5)
+    # => Mtot = Mc * (1+q)^(1/5) / q^(3/5)
+    total_masses = chirp_masses * (1 + mass_ratio) ** (1/5) / mass_ratio ** (3/5) # solar masses
+
+    # --- Orbital parameters ---
+    gw_frequencies  = gw_frequency  * np.ones(n_binaries)  # Hz
+    redshifts       = redshift       * np.ones(n_binaries)
+    comoving_dist   = COMOVING_DISTANCE_FN(redshift) * np.ones(n_binaries)  # Mpc (or metres, match your convention)
+    polarizations   = polarization   * np.ones(n_binaries)  # rad
+    inclinations    = inclination    * np.ones(n_binaries)  # rad
+    initial_phases  = initial_phase  * np.ones(n_binaries)  # rad
+    right_ascensions = right_ascension * np.ones(n_binaries)  # rad
+    declinations    = declination    * np.ones(n_binaries)  # rad
+
+    # --- Optional strain ---
+    strain_data = None
+    if compute_strain:
+        h_squared, amplitude = compute_characteristic_strain_squared_circular(
+            gw_frequencies,
+            chirp_masses,
+            comoving_dist,
+            redshifts,
+            inclinations,
+        )
+        # Find which bin each binary belongs to
+        f_min = 1.0 / (T_obs_seconds)
+        f_max = 3e-7
+        f_step = 1.0 / (T_obs_seconds)
+        N_bin_f = int((f_max - f_min) / f_step) + 1
+
+        bin_edges = np.linspace(f_min, f_min + N_bin_f * f_step, N_bin_f + 1)
+        bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+        bin_assignment = np.digitize(gw_frequencies, bin_edges) - 1
+        bin_assignment = np.clip(bin_assignment, 0, N_bin_f - 1)
+        # Sum h² within each bin, then convert to h_c
+        h_c_total = np.zeros(N_bin_f)
+        h_c_individual = np.zeros(n_binaries)
+        bin_widths = bin_edges[1:] - bin_edges[:-1]
+
+        for b in range(N_bin_f):
+            mask = bin_assignment == b
+            if mask.any():
+                h_c_total[b] = np.sqrt(np.sum(h_squared[mask]))
+
+        # Per-binary contribution (h_c if it were alone in its bin)
+        h_c_individual = np.sqrt(h_squared)
+
+        strain_data = {
+            'bin_centres':          bin_centres,
+            'h_c_total':            h_c_total,
+            'h_square_individual':  h_squared,
+            'bin_assignment':       bin_assignment,
+            'h_c_individual':       h_c_individual,
+            'bin_edges':            bin_edges,
+        }
+
+    # --- Assemble catalog ---
+    population = []
+    for i in range(n_binaries):
+        binary_params = {
+            'Mc':      SOLAR_MASS_KG * chirp_masses[i],
+            'Mtot':    total_masses[i],
+            'f':       gw_frequencies[i],
+            'D_comov': comoving_dist[i],
+            'z':       redshifts[i],
+            'h0':      amplitude[i],
+            'ra':      right_ascensions[i],
+            'dec':     declinations[i],
+            'psi':     polarizations[i],
+            'iota':    inclinations[i],
+            'phi0':    initial_phases[i],
+        }
+        if compute_strain:
+            binary_params['h_square']    = h_squared[i]
+            binary_params['h_c_contrib'] = h_c_individual[i]
+            binary_params['freq_bin']    = bin_assignment[i]
+
+        population.append(binary_params)
+
+    return (population, strain_data) if compute_strain else population
+
 
 
 # ============================================================================

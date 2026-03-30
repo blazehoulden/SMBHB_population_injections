@@ -3,16 +3,19 @@
 Main execution script for SMBHB population analysis.
 Run with: python main.py
 """
-import argparse
 import os
+
+from consistent_pop_synth_new import generate_consistent_population_from_distance
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+import argparse
 import config_new
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-import config
+import config_new
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from data_loader import load_pulsars, filter_pulsars_15yr, get_clean_pulsars_and_tspan, parse_pulsar_parameters
-from signal_injection import inject_population_into_psrs
+from signal_injection_new import inject_population_nufft
 from pta_builder import build_pta_and_params
 from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
@@ -34,7 +37,7 @@ def parse_args():
     parser.add_argument(
         "--config", "-c",
         default="optimistic",
-        choices=list(config.POPULATION_CONFIGS.keys()),
+        choices=list(config_new.POPULATION_CONFIGS.keys()),
         help="Which population configuration to use"
     )
 
@@ -117,7 +120,7 @@ def main():
     # Setup save directory
     save_dir, run_name = setup_save_directory(args)
 
-    toggle_memory_profiling = config.MEMORY_PROFILE_ENABLED
+    toggle_memory_profiling = config_new.MEMORY_PROFILE_ENABLED
     if toggle_memory_profiling:
         log_memory("Start")
     
@@ -137,7 +140,7 @@ def main():
     if toggle_memory_profiling:
         log_memory("After getting clean pulsars and Tspan")
 
-    parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
+    parsed_noise_params = parse_pulsar_parameters(config_new.NOISEFILE)
 
     # testing code 
     # from debug.test_noise_residuals import run_all_tests
@@ -154,11 +157,11 @@ def main():
     print("="*70)
     
     # Load SMBHB module
-    smbhb_module = config.load_smbhb_module()
+    smbhb_module = config_new.load_smbhb_module()
     
     # Select configuration
     CONFIG_NAME = args.config
-    selected_config = config.POPULATION_CONFIGS[CONFIG_NAME]
+    selected_config = config_new.POPULATION_CONFIGS[CONFIG_NAME]
     
     print(f"\nConfiguration: {CONFIG_NAME}")
     print(f"  {selected_config['description']}")
@@ -166,11 +169,11 @@ def main():
     
     # Generate population
     print("\n📊 Generating sample SMBHB population...")
-    population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
-    print_population_diagnostics(population)
+    population = config_new.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
+    # print_population_diagnostics(population)
     
     # ========== INITIAL INJECTION (OPTIONAL) ==========
-    if config.RUN_INITIAL_INJECTION_ANALYSIS:
+    if config_new.RUN_INITIAL_INJECTION_ANALYSIS:
         print("\n" + "="*70)
         print("INITIAL INJECTION ANALYSIS")
         print("="*70)
@@ -197,7 +200,7 @@ def main():
         )
     
     # ========== SCALING ANALYSIS ==========
-    if config.RUN_SCALING_ANALYSIS:
+    if config_new.RUN_SCALING_ANALYSIS:
         print("\n" + "="*70)
         print("SCALING ANALYSIS")
         print("="*70)
@@ -220,7 +223,7 @@ def main():
         )
     
     # ========== INDIVIDUAL BINARY ANALYSIS ==========
-    if config.RUN_INDIVIDUAL_BINARY_ANALYSIS:
+    if config_new.RUN_INDIVIDUAL_BINARY_ANALYSIS:
         print("\n" + "="*70)
         print("INDIVIDUAL BINARY ANALYSIS")
         print("="*70)
@@ -247,7 +250,7 @@ def main():
             )
     
     # ========== ENSEMBLE ANALYSIS ==========
-    if config.RUN_ENSEMBLE_ANALYSIS:
+    if config_new.RUN_ENSEMBLE_ANALYSIS:
         print("\n" + "="*70)
         print("ENSEMBLE ANALYSIS")
         print("="*70)
@@ -281,7 +284,7 @@ def main():
         save_results(ensemble_results, save_path)
         
     # ========== CONSISTENT POPULATION SYNTHESIS ==========
-    if config.RUN_CONSISTENT_POP_SYNTH:
+    if config_new.RUN_CONSISTENT_POP_SYNTH:
         print("\n" + "="*70)
         print("CONSISTENT POPULATION SYNTHESIS")
         print("="*70)
@@ -296,22 +299,23 @@ def main():
         
         SNR_low, SNR_high = args.snr_range
         
-        consistent_results = generate_snr_consistent_populations(
-            selected_config, smbhb_module, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds,
-            SNR_range=(SNR_low, SNR_high),
-            N_sims=args.simulations,
-            N_initial_guess=N_initial_guess,
-            N_max_initial=selected_config['n_binaries'] * 3,
-            verbose=True,
-            profile=False,
-            use_cache=False,
-            cache_threshold=0,
-            detailed_output_SNR=True
-        )
+        # consistent_results = generate_snr_consistent_populations(
+        #     selected_config, smbhb_module, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds,
+        #     SNR_range=(SNR_low, SNR_high),
+        #     N_sims=args.simulations,
+        #     N_initial_guess=N_initial_guess,
+        #     N_max_initial=selected_config['n_binaries'] * 3,
+        #     verbose=True,
+        #     profile=True,
+        #     use_cache=False,
+        #     cache_threshold=0,
+        #     detailed_output_SNR=True
+        # )
         
-        # Save results
-        save_path = os.path.join(save_dir, 'consistent_pop_synth.json')
-        save_results(consistent_results, save_path)
+        
+        # # Save results
+        # save_path = os.path.join(save_dir, 'consistent_pop_synth.json')
+        # save_results(consistent_results, save_path)
 
         
         # ORF = consistent_results["populations"]["ORF"]
@@ -320,11 +324,20 @@ def main():
         #     xi_sorted[i] *= 180.0 / np.pi
         # with np.printoptions(threshold=np.inf):
         #     print(xi_sorted)
-        
 
+
+        # from validate_injection import compare_injection_methods, compare_os_snr
+        # import enterprise_extensions.frequentist.optimal_statistic as opt_stat
+        # results = compare_injection_methods(psrs_clean, population, Tspan_seconds)
+        # ostat = opt_stat.OptimalStatistic(psrs_clean, orf='hd')
+        # res = compare_os_snr(psrs_clean, population, Tspan_seconds, raw_noise_params, build_pta_and_params, opt_stat)
+        # from consistent_pop_synth import compute_population_snr
+        # snr, ostat = compute_population_snr(population, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
+        # print(f"Population SNR from enterprise: {snr:.3f}")
+        population_snr = generate_consistent_population_from_distance(population, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds, snr_target=SNR_high)
 
     # ========== NG R&G COMPARISON ==========
-    if config.RUN_NG_RG_COMPARISON:
+    if config_new.RUN_NG_RG_COMPARISON:
         print("\n" + "="*70)
         print("NANOGrav Rohan & Gondor COMPARISON")
         print("="*70)
@@ -342,7 +355,7 @@ def main():
     print(f"Results saved to: {save_dir}")
     print("="*70)
 
-    if config.OPTIMAL_SNR_POPULATION:
+    if config_new.OPTIMAL_SNR_POPULATION:
         population, strain_data = config_new.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
 
             # print("\nFinding optimal SNR population using enterprise noise model...")
@@ -399,7 +412,7 @@ def main():
         
         # Then diagnose:
         # diagnose_high_snr('complete_breakdown.json')
-    if config.SNR_COMPARISON_CHOSEN_POP:
+    if config_new.SNR_COMPARISON_CHOSEN_POP:
 
         from SMBHB_pop_synth import chosen_population
         sample_pop, strain_data = chosen_population(
@@ -448,8 +461,8 @@ def main():
         #         binaries          = sample_pop,
         #         nmodes            = 301,
         #     )
-    if config.PSD_COMPARISON:
-        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
+    if config_new.PSD_COMPARISON:
+        population, strain_data = config_new.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
 
 
         from optimal_SNR_calc import get_pulsar_noise_psd
