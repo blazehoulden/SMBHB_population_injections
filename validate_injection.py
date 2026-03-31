@@ -55,7 +55,6 @@ def compare_injection_methods(
         psr._residuals = np.zeros(len(psr.toas))
         inject_population_nufft(
             [psr], population,
-            N_freq      = None,
             pure_signal = True,
             verbose     = True,
         )
@@ -186,7 +185,7 @@ def compare_os_snr(psrs, population, Tspan, detailed_noise_params,
     # ── inject NUFFT ─────────────────────────────────────────────────────────
     inject_population_nufft(
         psrs, population,
-        N_freq=None, pure_signal=True, verbose=False,
+        pure_signal=True, verbose=False,
     )
 
     snr_nufft = compute_population_snr(population, psrs, raw_noise_params=detailed_noise_params, Tspan=Tspan)

@@ -24,7 +24,7 @@ from consistent_pop_synth import compute_population_snr
 # from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
 from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
-from utils import save_results, print_population_diagnostics, print_scaling_summary
+from utils import save_results, save_results_dual, print_population_diagnostics, print_scaling_summary, compact_consistent_results_for_storage
 # from pulsar_noise_using_enterprise import get_noise_matrix
 from enterprise.signals.gp_bases import createfourierdesignmatrix_red
 
@@ -75,6 +75,21 @@ def parse_args():
     parser.add_argument(
         "--save-dir", type=str, default=None,
         help="Optional custom save directory (default: data/YYYY-MM-DD/)"
+    )
+
+    parser.add_argument(
+        "--max-save-mb-per-sim", type=float, default=5.0,
+        help="Target max saved size per simulation for consistent-pop outputs"
+    )
+
+    parser.add_argument(
+        "--save-nearest", type=int, default=100,
+        help="Number of nearest binaries (smallest D_comov) always kept per simulation"
+    )
+
+    parser.add_argument(
+        "--save-loudest", type=int, default=10000,
+        help="Number of loudest binaries (highest h0) always kept per simulation"
     )
 
     return parser.parse_args()
@@ -169,8 +184,9 @@ def main():
     print(f"  N_binaries: {selected_config['n_binaries']}")
     
     # Generate population
-    print("\n📊 Generating sample SMBHB population...")
-    population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
+    if config.GEN_POP:
+        print("\n📊 Generating sample SMBHB population...")
+        population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
     # print_population_diagnostics(population)
     
     # ========== INITIAL INJECTION (OPTIONAL) ==========
@@ -179,8 +195,8 @@ def main():
         print("INITIAL INJECTION ANALYSIS")
         print("="*70)
         
-        psrs_injected = inject_population_into_psrs(
-            psrs_filtered, population, pure_signal=True, verbose=True, pulsar_noise_params=parsed_noise_params
+        psrs_injected = inject_population_nufft(
+            psrs_clean, population, pure_signal=True, verbose=True
         )
         
         pta, model, params_complete = build_pta_and_params(
@@ -215,7 +231,7 @@ def main():
         
         # Save results
         save_path = os.path.join(save_dir, f'scaling_results.json')
-        save_results({'scaling': results, 'N_needed': N_needed}, save_path)
+        save_results_dual({'scaling': results, 'N_needed': N_needed}, save_path)
         
         # Save plots
         plot_scaling_results(
@@ -308,14 +324,28 @@ def main():
             N_sims=args.simulations,
             verbose=True,
             save_populations=True,
-            profile=False,
-            test=False
+            profile=True,
+            test=False,
+            toggle_memory_profiling=False,
+            keep_amplitudes_in_result=False,
+            precompute_parallel=True,
+            inject_eps=1e-6
         )
                 
         # Save results
         file_name = f'consistent_population_{CONFIG_NAME}_targetSNR{SNR_high}_sims{args.simulations}.json'
         save_path = os.path.join(save_dir, file_name)
-        save_results(consistent_results, save_path)
+        compact_results = compact_consistent_results_for_storage(
+            consistent_results,
+            max_mb_per_sim=args.max_save_mb_per_sim,
+            n_nearest=args.save_nearest,
+            n_loudest=args.save_loudest,
+        )
+        save_results_dual(
+            compact_results,
+            save_path,
+            save_compact_npz=False,
+        )
         
         
 

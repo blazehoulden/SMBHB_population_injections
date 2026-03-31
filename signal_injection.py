@@ -57,6 +57,8 @@ Dependencies: numpy (always), finufft.
 
 from SMBHB_pop_synth import precompute_amplitudes
 import numpy as np
+import os
+from concurrent.futures import ThreadPoolExecutor
 from config import c, G, pc
 import finufft 
 
@@ -113,8 +115,57 @@ def antenna_response_vec(psr_ra, psr_dec, ra_arr, dec_arr, psi_arr):
     return Fp, Fx
 
 
-def inject_population_nufft(psrs, population, N_freq=None, pure_signal=True,
-                             verbose=False, eps=1e-6):
+def _topk_indices_from_amplitudes(A_arr, B_arr, k, chunk_size=500_000):
+    """Return top-k indices by A^2 + B^2 using chunked processing."""
+    n = len(A_arr)
+    if k <= 0 or n == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
+
+    k_eff = min(int(k), n)
+    top_idx = np.array([], dtype=np.int64)
+    top_val = np.array([], dtype=np.float64)
+
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        A_chunk = A_arr[start:stop]
+        B_chunk = B_arr[start:stop]
+        score_chunk = A_chunk * A_chunk + B_chunk * B_chunk
+
+        if score_chunk.size <= k_eff:
+            local_rel = np.arange(score_chunk.size, dtype=np.int64)
+        else:
+            local_rel = np.argpartition(score_chunk, score_chunk.size - k_eff)[-k_eff:]
+
+        local_idx = local_rel + start
+        local_val = score_chunk[local_rel]
+
+        if top_idx.size == 0:
+            top_idx = local_idx
+            top_val = local_val
+        else:
+            top_idx = np.concatenate([top_idx, local_idx])
+            top_val = np.concatenate([top_val, local_val])
+
+        if top_idx.size > k_eff:
+            keep = np.argpartition(top_val, top_val.size - k_eff)[-k_eff:]
+            top_idx = top_idx[keep]
+            top_val = top_val[keep]
+
+    order = np.argsort(top_val)[::-1]
+    return top_idx[order].astype(np.int64, copy=False), top_val[order].astype(np.float64, copy=False)
+
+
+def inject_population_nufft(psrs, population, pure_signal=True,
+                             verbose=False, eps=1e-6,
+                             precompute_if_missing=False,
+                             precompute_parallel=False,
+                             precompute_workers=None,
+                             cache_precomputed_amplitudes=True,
+                             track_contributors=False,
+                             top_k_per_pulsar=20,
+                             top_k_global=50,
+                             contributor_chunk_size=500_000,
+                             contributor_summary=None):
     """
     Inject SMBHB population via NUFFT type-3 (no frequency quantisation error).
 
@@ -145,7 +196,21 @@ def inject_population_nufft(psrs, population, N_freq=None, pure_signal=True,
         c_k = (C_k - i S_k) / 2
         r = 2 * Re[ nufft1d3(x, s, c) ]
 
-    No grid, no quantisation — exact to NUFFT tolerance (eps).
+        No grid, no quantisation — exact to NUFFT tolerance (eps).
+
+                Optional amplitude precompute controls:
+            - precompute_if_missing: compute missing amp_A/B entries before injection.
+            - precompute_parallel: precompute missing pulsars concurrently with threads.
+            - precompute_workers: thread count (default = min(missing, cpu_count)).
+                        - cache_precomputed_amplitudes: if False, amp_A/B generated during
+                            this call are removed after each pulsar to reduce peak memory.
+                        - track_contributors: track per-pulsar and global top contributors
+                            by amplitude proxy A^2 + B^2.
+                        - top_k_per_pulsar: number of binaries tracked per pulsar.
+                        - top_k_global: number of globally ranked binaries returned.
+                        - contributor_chunk_size: chunk size for top-k tracking, controls
+                            memory use while scanning A/B arrays.
+                        - contributor_summary: optional dict to populate with tracking output.
     """
     f_arr    = population.f
     phi0_arr = population.phi0
@@ -154,17 +219,52 @@ def inject_population_nufft(psrs, population, N_freq=None, pure_signal=True,
     # No gridding, no rounding — exact frequencies
     s_arr = 2 * np.pi * f_arr   # (N,) rad/s
 
+    if precompute_if_missing:
+        missing_psrs = [psr for psr in psrs if psr.name not in population.amp_A]
+        if missing_psrs:
+            if precompute_parallel and len(missing_psrs) > 1:
+                n_workers = precompute_workers or min(len(missing_psrs), os.cpu_count() or 1)
+                if verbose:
+                    print(f"Precomputing amplitudes in parallel for {len(missing_psrs)} pulsars (workers={n_workers})")
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    futures = [pool.submit(precompute_amplitudes, population, psr) for psr in missing_psrs]
+                    for fut in futures:
+                        fut.result()
+            else:
+                if verbose:
+                    print(f"Precomputing amplitudes for {len(missing_psrs)} pulsars")
+                for psr in missing_psrs:
+                    precompute_amplitudes(population, psr)
+
     # phi0 rotation: same for all pulsars (source property)
     cos_phi0 = np.cos(phi0_arr)
     sin_phi0 = np.sin(phi0_arr)
 
+    per_pulsar_top = {}
+    contributor_candidates = set()
+
     for psr in psrs:
         psr_name = psr.name
+        computed_here = False
         if psr_name not in population.amp_A:
             precompute_amplitudes(population, psr)
+            computed_here = True
 
         A_arr = population.amp_A[psr_name]
         B_arr = population.amp_B[psr_name]
+
+        if track_contributors:
+            idx_top, score_top = _topk_indices_from_amplitudes(
+                A_arr,
+                B_arr,
+                k=top_k_per_pulsar,
+                chunk_size=contributor_chunk_size,
+            )
+            contributor_candidates.update(idx_top.tolist())
+            per_pulsar_top[psr_name] = {
+                'indices': idx_top.tolist(),
+                'amp2': score_top.tolist(),
+            }
 
         # phi0 rotation
         S = A_arr * cos_phi0 - B_arr * sin_phi0   # sin(2π f t_rel) coeff
@@ -196,6 +296,51 @@ def inject_population_nufft(psrs, population, N_freq=None, pure_signal=True,
             psr._residuals = r_new
         else:
             psr._residuals = psr.residuals + r_new
+
+        if computed_here and not cache_precomputed_amplitudes:
+            population.amp_A.pop(psr_name, None)
+            population.amp_B.pop(psr_name, None)
+
+    if track_contributors:
+        global_top = {'indices': [], 'score': []}
+        if contributor_candidates:
+            candidate_idx = np.asarray(sorted(contributor_candidates), dtype=np.int64)
+            global_score = np.zeros(candidate_idx.size, dtype=np.float64)
+
+            for psr in psrs:
+                psr_name = psr.name
+                A_c = population.amp_A[psr_name][candidate_idx]
+                B_c = population.amp_B[psr_name][candidate_idx]
+                global_score += A_c * A_c + B_c * B_c
+
+            k_glob = min(max(int(top_k_global), 0), candidate_idx.size)
+            if k_glob > 0:
+                keep = np.argpartition(global_score, global_score.size - k_glob)[-k_glob:]
+                order = np.argsort(global_score[keep])[::-1]
+                keep_ord = keep[order]
+                global_top = {
+                    'indices': candidate_idx[keep_ord].tolist(),
+                    'score': global_score[keep_ord].tolist(),
+                }
+
+        summary = {
+            'score_definition': 'A^2 + B^2 per pulsar; global score is sum over pulsars',
+            'n_binaries_total': int(len(population.f)),
+            'n_candidates_global': int(len(contributor_candidates)),
+            'per_pulsar_top_k': int(top_k_per_pulsar),
+            'global_top_k': int(top_k_global),
+            'per_pulsar': per_pulsar_top,
+            'global': global_top,
+        }
+
+        if contributor_summary is not None:
+            contributor_summary.clear()
+            contributor_summary.update(summary)
+        else:
+            try:
+                population.contributor_summary = summary
+            except Exception:
+                pass
 
     return psrs
 

@@ -1,6 +1,8 @@
 import gc
+import os
 import numpy as np
 import time
+import tracemalloc
 import config
 from config import generate_population
 from signal_injection import inject_population_nufft
@@ -17,7 +19,20 @@ from enterprise.signals import gp_priors, signal_base, utils
 
 
 # calculates the SNR for a given population
-def compute_population_snr(population, psrs_clean, raw_noise_params, Tspan, verbose=False, timer=True, profile=True):
+def compute_population_snr(
+    population,
+    psrs_clean,
+    raw_noise_params,
+    Tspan,
+    verbose=False,
+    timer=True,
+    profile=True,
+    inject_eps=1e-6,
+    precompute_before_injection=False,
+    precompute_parallel=False,
+    precompute_chunk_size=10_000_000,
+    precompute_workers=None,
+):
     """
     Compute SNR for a given population of binaries (accounting for interference).
     
@@ -27,15 +42,43 @@ def compute_population_snr(population, psrs_clean, raw_noise_params, Tspan, verb
     Parameters:
         profile: if True, return timing breakdown along with SNR as (snr, timing_dict)
                  if False, return just SNR
+        inject_eps: finufft tolerance passed to inject_population_nufft.
+                    Larger values (e.g. 1e-5 or 1e-4) are faster with small
+                    accuracy tradeoff.
+        precompute_before_injection: if True, precompute missing amp_A/B for
+                    all pulsars before injection.
+        precompute_parallel: if precompute_before_injection, parallelize
+                    precompute across pulsars.
     
     Returns:
         snr (float) or (snr, timing_dict) if profile=True
     """
     if verbose:
         print("restoring zero residuals...")
+
+    if precompute_before_injection:
+        missing = [psr for psr in psrs_clean if psr.name not in population.amp_A]
+        if missing:
+            if verbose:
+                print(f"Precomputing amplitudes for {len(missing)} pulsars...")
+            if precompute_parallel and len(missing) > 1:
+                n_workers = precompute_workers or min(len(missing), os.cpu_count() or 1)
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    futures = [
+                        pool.submit(precompute_amplitudes, population, psr, precompute_chunk_size)
+                        for psr in missing
+                    ]
+                    for fut in futures:
+                        fut.result()
+            else:
+                for psr in missing:
+                    precompute_amplitudes(population, psr, precompute_chunk_size)
+
     if timer:
         t_start = time.perf_counter()
     _restore_zero_residuals(psrs_clean)
+
+    gc.collect()  # free injection temporaries before PTA build
 
     if timer:
         t_restore = time.perf_counter()
@@ -47,7 +90,13 @@ def compute_population_snr(population, psrs_clean, raw_noise_params, Tspan, verb
         population,
         pure_signal = True,
         verbose     = False,
+        eps         = inject_eps,
+        precompute_if_missing=precompute_before_injection,
+        precompute_parallel=precompute_parallel,
+        cache_precomputed_amplitudes=precompute_before_injection,
     )
+    gc.collect()  # free injection temporaries after injection
+
     if timer:
         t_inject = time.perf_counter()
         print(f"Time taken to inject population: {t_inject - t_restore:.2f} seconds")
@@ -63,6 +112,8 @@ def compute_population_snr(population, psrs_clean, raw_noise_params, Tspan, verb
         noise_params_15yr = raw_noise_params,
         Tspan             = Tspan,
     )
+    gc.collect()  # free PTA build temporaries before OS
+
     if timer:
         t_build = time.perf_counter()
         print(f"Time taken to build PTA: {t_build - t_inject:.2f} seconds")
@@ -77,6 +128,7 @@ def compute_population_snr(population, psrs_clean, raw_noise_params, Tspan, verb
         print(f"Time taken to compute OS and SNR: {t_end - t_build:.2f} seconds")
         print(f"Total time taken: {t_end - t_start:.2f} seconds")
     
+    gc.collect()  # free temporaries before returning
     return snr
  
  
@@ -92,6 +144,15 @@ def _log_memory(label: str) -> None:
         print(f"[MEM]   {label}: {mb:.1f} MB")
     except ImportError:
         pass
+
+
+def _get_rss_mb() -> float | None:
+    try:
+        import psutil, os
+        proc = psutil.Process(os.getpid())
+        return proc.memory_info().rss / 1024**2
+    except ImportError:
+        return None
  
  
 def _clear_enterprise_cache(pta) -> None:
@@ -698,6 +759,8 @@ def _build_result_distance_scaling(
     population, SNR_final, 
     warning=None, broken=False,
     timing_list=None,
+    timing_profile=None,
+    memory_profile=None,
     detailed_output_SNR=False,
 ):
     meta = {
@@ -706,6 +769,10 @@ def _build_result_distance_scaling(
     }
     if timing_list is not None:
         meta['timing'] = timing_list
+    if timing_profile is not None:
+        meta['timing_profile'] = timing_profile
+    if memory_profile is not None:
+        meta['memory_profile'] = memory_profile
  
     result = {
         'population'   : population,
@@ -714,6 +781,7 @@ def _build_result_distance_scaling(
         'search_metadata': meta,
     }
     return result
+
 
 def generate_consistent_population_distance_scaling(
     config_template,
@@ -725,6 +793,10 @@ def generate_consistent_population_distance_scaling(
     timer=True,
     verbose=True,
     test=False,
+    toggle_memory_profiling=False,
+    keep_amplitudes_in_result=False,
+    inject_eps=1e-6,
+    precompute_parallel=False,
 ):
     """
     Given an existing population, compute its SNR and scale distances to achieve target_SNR. 
@@ -742,6 +814,23 @@ def generate_consistent_population_distance_scaling(
     - result dict with the same high-level shape used by generate_snr_consistent_population
     """
  
+    profile_clock = timer or toggle_memory_profiling
+    t_start = time.perf_counter() if profile_clock else None
+
+    timing_profile = {}
+    memory_profile = {
+        'rss_mb': {},
+        'traced_peak_mb': None,
+        'traced_current_mb': None,
+    }
+
+    if toggle_memory_profiling:
+        tracemalloc.start()
+        rss0 = _get_rss_mb()
+        if rss0 is not None:
+            memory_profile['rss_mb']['start'] = float(rss0)
+
+
     if verbose:
         print(f"\nGenerating SNR-consistent population...")
         print(f"Target SNR: {target_SNR}")
@@ -749,11 +838,19 @@ def generate_consistent_population_distance_scaling(
     if target_SNR <= 0:
         raise ValueError(f"target_SNR must be > 0, got {target_SNR}")
 
+    t_pop0 = time.perf_counter() if profile_clock else None
     population = generate_population(config_template, smbhb_module, T_obs_seconds=Tspan)
+    if profile_clock and t_pop0 is not None:
+        timing_profile['generate_population_s'] = time.perf_counter() - t_pop0
+    if toggle_memory_profiling:
+        rss = _get_rss_mb()
+        if rss is not None:
+            memory_profile['rss_mb']['after_generate_population'] = float(rss)
 
 
 
     # Compute current SNR of the population
+    t_trial0 = time.perf_counter() if profile_clock else None
     snr_trial = compute_population_snr(
         population,
         psrs_clean,
@@ -761,7 +858,16 @@ def generate_consistent_population_distance_scaling(
         Tspan,
         timer=timer,
         verbose=verbose,
+        inject_eps=inject_eps,
+        precompute_before_injection=False,
+        precompute_parallel=precompute_parallel,
     )
+    if profile_clock and t_trial0 is not None:
+        timing_profile['initial_snr_compute_s'] = time.perf_counter() - t_trial0
+    if toggle_memory_profiling:
+        rss = _get_rss_mb()
+        if rss is not None:
+            memory_profile['rss_mb']['after_initial_snr'] = float(rss)
     if verbose:
         print(f"Initial SNR: {snr_trial:.4f}, Target SNR: {target_SNR:.4f}")
 
@@ -778,17 +884,19 @@ def generate_consistent_population_distance_scaling(
 
     # Scale distances and amplitudes accordingly
     population.D_comov *= distance_scaling_factor
-    population.h0 /= distance_scaling_factor  # h0 ∝ 1/D, so scale inversely
-    population.amp_A = {
-        psr: amp / distance_scaling_factor for psr, amp in population.amp_A.items()
-    }
-    population.amp_B = {
-        psr: amp / distance_scaling_factor for psr, amp in population.amp_B.items()
-    }
-
-    snr_final = float(target_SNR)
+    population.h0 /= distance_scaling_factor  # h0 ∝ 1/D, so scale inversely    
+    # Amplitude dictionaries are very large and usually not needed for post-run
+    # analysis. Dropping them from stored results greatly reduces peak memory.
+    
     if test:
+        population.amp_A = {
+        psr: amp / distance_scaling_factor for psr, amp in population.amp_A.items()
+        }
+        population.amp_B = {
+            psr: amp / distance_scaling_factor for psr, amp in population.amp_B.items()
+        }
         # Recompute SNR after scaling to verify it matches target
+        t_test0 = time.perf_counter() if profile_clock else None
         snr_final = compute_population_snr(
             population,
             psrs_clean,
@@ -796,14 +904,54 @@ def generate_consistent_population_distance_scaling(
             Tspan,
             timer=timer,
             verbose=verbose,
+            inject_eps=inject_eps,
+            precompute_before_injection=False,
         )
+        if profile_clock and t_test0 is not None:
+            timing_profile['post_scale_snr_compute_s'] = time.perf_counter() - t_test0
+        if toggle_memory_profiling:
+            rss = _get_rss_mb()
+            if rss is not None:
+                memory_profile['rss_mb']['after_post_scale_snr'] = float(rss)
         if verbose:
             print(f"Final SNR after scaling: {snr_final:.4f}")
+            
+    if not keep_amplitudes_in_result:
+        population.amp_A = {}
+        population.amp_B = {}
+        if toggle_memory_profiling:
+            rss = _get_rss_mb()
+            if rss is not None:
+                memory_profile['rss_mb']['after_drop_amplitudes'] = float(rss)
+
+    snr_final = float(target_SNR)
+
+    if profile_clock and t_start is not None:
+        timing_profile['total_s'] = time.perf_counter() - t_start
+
+    if toggle_memory_profiling:
+        current, peak = tracemalloc.get_traced_memory()
+        memory_profile['traced_current_mb'] = float(current / 1024**2)
+        memory_profile['traced_peak_mb'] = float(peak / 1024**2)
+        rss = _get_rss_mb()
+        if rss is not None:
+            memory_profile['rss_mb']['end'] = float(rss)
+        tracemalloc.stop()
+
+        if verbose:
+            print("Memory profile (RSS MB):")
+            for label, mb in memory_profile['rss_mb'].items():
+                print(f"  {label}: {mb:.1f} MB")
+            print(f"  traced_peak_mb: {memory_profile['traced_peak_mb']:.1f} MB")
+
+    
 
     n_binaries = len(population)
     return _build_result_distance_scaling(
         population=population,
-        SNR_final=snr_final
+        SNR_final=snr_final,
+        timing_profile=timing_profile if profile_clock else None,
+        memory_profile=memory_profile if toggle_memory_profiling else None,
     )
 
 
@@ -819,6 +967,10 @@ def generate_snr_consistent_populations_distance_scaling(
     save_populations  = True,
     profile           = False,
     test              = False,
+    toggle_memory_profiling = False,
+    keep_amplitudes_in_result = False,
+    inject_eps        = 1e-6,
+    precompute_parallel = False,
 ):
     """
     Generate N_sims SMBHB populations each consistent with SNR_range.
@@ -861,6 +1013,10 @@ def generate_snr_consistent_populations_distance_scaling(
             verbose                     = verbose,
             timer                       = profile,
             test                        = test,
+            toggle_memory_profiling     = toggle_memory_profiling,
+            keep_amplitudes_in_result   = keep_amplitudes_in_result,
+            inject_eps                  = inject_eps,
+            precompute_parallel         = precompute_parallel,
         )
 
         while result is None: # iterate until we get a valid population (in case of non-positive initial SNR or other issues)
@@ -876,6 +1032,10 @@ def generate_snr_consistent_populations_distance_scaling(
             verbose                     = verbose,
             timer                       = profile,
             test                        = test,
+            toggle_memory_profiling     = toggle_memory_profiling,
+            keep_amplitudes_in_result   = keep_amplitudes_in_result,
+            inject_eps                  = inject_eps,
+            precompute_parallel         = precompute_parallel,
         )
  
         if result is not None:
@@ -931,6 +1091,11 @@ def generate_snr_consistent_populations_distance_scaling(
             'N_sims'         : N_sims,
             'config_template': config_template,
             'target_snr'     : float(target_SNR),
+            'profile'        : bool(profile),
+            'memory_profiling': bool(toggle_memory_profiling),
+            'keep_amplitudes_in_result': bool(keep_amplitudes_in_result),
+            'inject_eps'     : float(inject_eps),
+            'precompute_parallel': bool(precompute_parallel),
         },
         'metadata': {
             'success_count': success_count,
