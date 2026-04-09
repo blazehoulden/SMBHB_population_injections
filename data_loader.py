@@ -102,7 +102,7 @@ def load_pulsars(verbose=True):
             if verbose:
                 print(f"[DEBUG] enterprise failed on {par}: {e}")
             try:
-                psr = Pulsar(par_path, tim_path, use_pint=True, ephem="DE440",
+                psr = Pulsar(par_path, tim_path, ephem="DE440", backend="tempo2",
                             clk_corr=False, maxobs=None)
             except Exception as e2:
                 if verbose:

@@ -155,8 +155,9 @@ def main():
     print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan_seconds/(365.25*86400):.1f} years")
     if toggle_memory_profiling:
         log_memory("After getting clean pulsars and Tspan")
-
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
+
+    print("Pulsar types:", {psr.name: psr.backend for psr in psrs_clean})
 
     # testing code 
     # from debug.test_noise_residuals import run_all_tests

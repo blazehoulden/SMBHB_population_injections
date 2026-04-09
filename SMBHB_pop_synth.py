@@ -17,6 +17,8 @@ import numba as nb
 from numba import njit, prange
 from scipy.integrate import quad
 from scipy.interpolate import interp1d
+from astropy.coordinates import SkyCoord
+import astropy.units as u
  
 # ============================================================================
 # PHYSICAL CONSTANTS
@@ -687,8 +689,22 @@ def precompute_amplitudes(pop: PopulationArrays, psr, chunk_size=10_000_000):
     """
     N        = len(pop)
     psr_name = psr.name
-    psr_ra   = psr._raj
-    psr_dec  = psr._decj
+
+    pars = psr.pars()
+
+    if 'RAJ' not in pars or 'DECJ' not in pars:
+        elong = psr['ELONG'].val  # radians
+        elat  = psr['ELAT'].val   # radians
+
+        coord = SkyCoord(lon=elong*u.rad, lat=elat*u.rad, frame='geocentricmeanecliptic')
+        equatorial = coord.icrs
+
+        psr_ra  = equatorial.ra.rad
+        psr_dec = equatorial.dec.rad
+
+    else:
+        psr_ra   = psr._raj
+        psr_dec  = psr._decj
 
     A_full = np.empty(N, dtype=np.float64)
     B_full = np.empty(N, dtype=np.float64)
