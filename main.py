@@ -5,7 +5,7 @@ Run with: python main.py
 """
 import os
 
-from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling
+from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling, suppress_enterprise_warnings
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import argparse
 import config
@@ -140,24 +140,24 @@ def main():
     if toggle_memory_profiling:
         log_memory("Start")
     
-    # ========== LOAD PULSARS ==========
-    print("\n📡 Loading pulsars...")
+    # add time toggle for loading pulsars
+    # ========== LOAD PULSARS ========== Takes ~ 1 second per pulsar
+    print("\n📡 Loading pulsars...") 
     psrs_unfiltered = load_pulsars(verbose=True)
     if toggle_memory_profiling:
         log_memory("After loading pulsars")
     
     print("\n🔍 Filtering pulsars...")
-    psrs_filtered, raw_noise_params = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
-    if toggle_memory_profiling:
-        log_memory("After filtering pulsars")
+    with suppress_enterprise_warnings():
+        psrs_clean, raw_noise_params, Tspan_seconds = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
+        if toggle_memory_profiling:
+            log_memory("After filtering pulsars")
     
-    psrs_clean, Tspan_seconds = get_clean_pulsars_and_tspan(psrs_filtered)
-    print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan_seconds/(365.25*86400):.1f} years")
-    if toggle_memory_profiling:
-        log_memory("After getting clean pulsars and Tspan")
+    # psrs_clean, Tspan_seconds = get_clean_pulsars_and_tspan(psrs_filtered)
+    # print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan_seconds/(365.25*86400):.1f} years")
+    # if toggle_memory_profiling:
+    #     log_memory("After getting clean pulsars and Tspan")
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
-
-    print("Pulsar types:", {psr.name: psr.backend for psr in psrs_clean})
 
     # testing code 
     # from debug.test_noise_residuals import run_all_tests
@@ -314,13 +314,16 @@ def main():
             N_initial_guess = int(args.initial_guess)
         
         SNR_low, SNR_high = args.snr_range
-        
+
+        original_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+
         consistent_results = generate_snr_consistent_populations_distance_scaling(
             config_template=selected_config,
             smbhb_module=smbhb_module,
             psrs_clean=psrs_clean,
             raw_noise_params=raw_noise_params,
             Tspan=Tspan_seconds,
+            original_stoas=original_stoas,
             target_SNR= SNR_high,
             N_sims=args.simulations,
             verbose=True,

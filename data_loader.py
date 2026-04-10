@@ -8,7 +8,7 @@ from enterprise.pulsar import Pulsar
 import sys
 from collections import defaultdict
 from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
-
+import libstempo as T
 
 def tim_has_toas(tim_path):
     """Quick check if .tim file contains valid TOA data."""
@@ -27,15 +27,15 @@ def tim_has_toas(tim_path):
         return False
     except Exception:
         return False
-
-
+    
+SKIP_PULSARS = {}
 def load_pulsars(verbose=True):
-    """Load NANOGrav pulsars with caching."""
+    """Load NANOGrav pulsars as libstempo tempopulsar objects."""
     if verbose:
         print("="*70)
-        print("LOADING NANOGRAV PULSARS")
+        print("LOADING NANOGRAV PULSARS (libstempo)")
         print("="*70)
-    psrs = None
+
     # Try cache
     if USE_PULSAR_CACHE and os.path.exists(NANOGRAV_PULSAR_CACHE):
         if verbose:
@@ -49,76 +49,55 @@ def load_pulsars(verbose=True):
         except Exception as e:
             if verbose:
                 print(f"⚠ Cache load failed: {e}")
-            psrs = None
-
-    # Load from files
-    if verbose:
-        print(f"Loading pulsars from {PAR_DIR}...")
-    # 🔍 DEBUG: check contents of PAR_DIR
-    if verbose:
-        print(f"[DEBUG] PAR_DIR exists: {os.path.exists(PAR_DIR)}")
-        if os.path.exists(PAR_DIR):
-            print(f"[DEBUG] PAR_DIR contains: {os.listdir(PAR_DIR)}")
 
     parfiles = sorted([f for f in os.listdir(PAR_DIR) if f.endswith(".par")])
 
-    # 🔍 DEBUG: show parfiles found
     if verbose:
-        print(f"[DEBUG] Found {len(parfiles)} .par files: {parfiles}")
+        print(f"[DEBUG] Found {len(parfiles)} .par files")
 
     psrs = []
     failed_pulsars = []
 
     for par in parfiles:
+        # Skip known problematic pulsars
+        psr_name = par.split('_')[0]
+        if psr_name in SKIP_PULSARS:
+            if verbose:
+                print(f"⚠ Skipping {par} (known hang)")
+            continue
+
         tim = par.replace(".par", ".tim")
         par_path = os.path.join(PAR_DIR, par)
         tim_path = os.path.join(TIM_DIR, tim)
 
-        # 🔍 DEBUG: pairing check
-        if verbose:
-            print(f"[DEBUG] pairing: {par} → {tim}")
-            print(f"        par_exists={os.path.exists(par_path)}, tim_exists={os.path.exists(tim_path)}")
-
-        # 🔍 DEBUG: display tim header if exists
-        if verbose and os.path.exists(tim_path):
-            print(f"[DEBUG] Checking {tim_path}")
-            print(f"        size={os.path.getsize(tim_path)} bytes")
-            with open(tim_path, 'r') as fh:
-                for i, ln in enumerate(fh):
-                    if i > 3:
-                        break
-                    print("        > ", ln.strip())
-
-        # TIM validation
         if not os.path.exists(tim_path) or not tim_has_toas(tim_path):
             if verbose:
-                print(f"[DEBUG] tim_has_toas() returned False for {tim_path}")
+                print(f"⚠ No valid tim for {par}")
             failed_pulsars.append(par)
             continue
 
         try:
-            psr = Pulsar(par_path, tim_path)
-        except Exception as e:
-            if verbose:
-                print(f"[DEBUG] enterprise failed on {par}: {e}")
-            try:
-                psr = Pulsar(par_path, tim_path, ephem="DE440", backend="tempo2",
-                            clk_corr=False, maxobs=None)
-            except Exception as e2:
+            psr = T.tempopulsar(
+                parfile=par_path,
+                timfile=tim_path,
+                maxobs=60000,
+                dofit=False,   # skip internal fit to avoid hangs
+            )
+            if psr.nobs == 0:
                 if verbose:
-                    print(f"[DEBUG] fallback also failed on {par}: {e2}")
+                    print(f"⚠ Zero TOAs for {par}")
                 failed_pulsars.append(par)
                 continue
 
-        if len(np.asarray(psr.toas, dtype=float)) == 0:
+            psrs.append(psr)
             if verbose:
-                print(f"[DEBUG] Pulsar {par} has zero TOAs after load")
+                print(f"✓ Loaded {psr.name} ({psr.nobs} TOAs)")
+
+        except Exception as e:
+            if verbose:
+                print(f"✗ Failed {par}: {e}")
             failed_pulsars.append(par)
             continue
-
-        psrs.append(psr)
-        if verbose:
-            print(f"✓ Loaded {par}")
 
     # Save cache
     if USE_PULSAR_CACHE and len(psrs) > 0:
@@ -133,7 +112,7 @@ def load_pulsars(verbose=True):
 
     if verbose:
         print(f"\n✓ Loaded {len(psrs)} pulsars")
-        print(f"❌ Failed on {len(failed_pulsars)} pars: {failed_pulsars}")
+        print(f"✗ Failed: {len(failed_pulsars)} — {failed_pulsars}")
 
     return psrs
 
@@ -149,15 +128,27 @@ def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
     psrs_after_15yr = [psr for psr in psrs if psr.name in pulsars_in_15yr]
     
     psrs_filtered = []
+    total_tmin = None
+    total_tmax = None
     for psr in psrs_after_15yr:
-        baseline_years = (psr.toas.max() - psr.toas.min()) / (365.25 * 86400)
+        # fix for libstempo pulsars
+        tmin = min(psr.toas())
+        tmax = max(psr.toas())
+        # baseline_years = (psr.toas.max() - psr.toas.min()) / (365.25 * 86400)
+        baseline_years = (tmax - tmin) / (365.25)
+
         if baseline_years >= min_baseline_years:
             psrs_filtered.append(psr)
-    
+        if total_tmin is None or tmin < total_tmin:
+            total_tmin = tmin
+        if total_tmax is None or tmax > total_tmax:
+            total_tmax = tmax
+    Tspan = total_tmax - total_tmin # days
+    Tspan_seconds = Tspan * 86400 # seconds
     if verbose:
         print(f"\nFiltered: {len(psrs)} → {len(psrs_filtered)} pulsars")
     
-    return psrs_filtered, params
+    return psrs_filtered, params, Tspan_seconds
 
 
 
@@ -169,8 +160,8 @@ def get_clean_pulsars_and_tspan(psrs_filtered):
     Original residuals are saved for restoration between injections.
     """
     # Calculate Tspan
-    tmin = min(p.toas.min() for p in psrs_filtered)
-    tmax = max(p.toas.max() for p in psrs_filtered)
+    tmin = min(min(p.toas()) for p in psrs_filtered)
+    tmax = max(max(p.toas()) for p in psrs_filtered)
     Tspan = tmax - tmin
     
     # Save original residuals ONCE for each pulsar
