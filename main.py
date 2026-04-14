@@ -149,6 +149,7 @@ def main():
     
     print("\n🔍 Filtering pulsars...")
     with suppress_enterprise_warnings():
+
         psrs_clean, raw_noise_params, Tspan_seconds = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
         if toggle_memory_profiling:
             log_memory("After filtering pulsars")
@@ -326,10 +327,11 @@ def main():
             original_stoas=original_stoas,
             target_SNR= SNR_high,
             N_sims=args.simulations,
+            post_residuals_avg=True,
             verbose=True,
             save_populations=True,
             profile=True,
-            test=False,
+            test=True,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,

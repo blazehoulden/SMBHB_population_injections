@@ -143,7 +143,7 @@ def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
             total_tmin = tmin
         if total_tmax is None or tmax > total_tmax:
             total_tmax = tmax
-    Tspan = total_tmax - total_tmin # days
+    Tspan = float(total_tmax - total_tmin) # days
     Tspan_seconds = Tspan * 86400 # seconds
     if verbose:
         print(f"\nFiltered: {len(psrs)} → {len(psrs_filtered)} pulsars")

@@ -18,6 +18,7 @@ import enterprise_extensions.frequentist.optimal_statistic as opt_stat
 from enterprise_extensions import models
 from enterprise.signals import gp_priors, signal_base, utils
 from enterprise.pulsar import Pulsar as EnterprisePulsar
+import warnings
 
 
 # calculates the SNR for a given population
@@ -27,6 +28,7 @@ def compute_population_snr(
     raw_noise_params,
     Tspan,
     current_stoas,         # post-noise stoas to reset to before GW injection
+    post_residuals_avg=False,
     verbose=False,
     timer=True,
     profile=True,
@@ -50,37 +52,38 @@ def compute_population_snr(
         print(f"Restore: {t_restore - t_start:.2f} s")
 
     # 2. Precompute amplitudes if requested
-    if precompute_before_injection:
-        missing = [psr for psr in psrs_clean if psr.name not in population.amp_A]
-        if missing:
-            if verbose:
-                print(f"Precomputing amplitudes for {len(missing)} pulsars...")
-            if precompute_parallel and len(missing) > 1:
-                n_workers = precompute_workers or min(len(missing), os.cpu_count() or 1)
-                with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                    futures = [
-                        pool.submit(precompute_amplitudes, population, psr, precompute_chunk_size)
-                        for psr in missing
-                    ]
-                    for fut in futures:
-                        fut.result()
-            else:
-                for psr in missing:
-                    precompute_amplitudes(population, psr, precompute_chunk_size)
+    if population is not None:
+        if precompute_before_injection:
+            missing = [psr for psr in psrs_clean if psr.name not in population.amp_A]
+            if missing:
+                if verbose:
+                    print(f"Precomputing amplitudes for {len(missing)} pulsars...")
+                if precompute_parallel and len(missing) > 1:
+                    n_workers = precompute_workers or min(len(missing), os.cpu_count() or 1)
+                    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                        futures = [
+                            pool.submit(precompute_amplitudes, population, psr, precompute_chunk_size)
+                            for psr in missing
+                        ]
+                        for fut in futures:
+                            fut.result()
+                else:
+                    for psr in missing:
+                        precompute_amplitudes(population, psr, precompute_chunk_size)
 
-    gc.collect()
+        gc.collect()
 
     # 3. Inject GW signal into stoas
-    if verbose:
-        print("Injecting population...")
-    inject_population_nufft(
-        psrs_clean,
-        population,
-        verbose=verbose,
-        eps=inject_eps,
-        cache_precomputed_amplitudes=precompute_before_injection,
-    )
-    gc.collect()
+        if verbose:
+            print("Injecting population...")
+        inject_population_nufft(
+            psrs_clean,
+            population,
+            verbose=verbose,
+            eps=inject_eps,
+            cache_precomputed_amplitudes=precompute_before_injection,
+        )
+        gc.collect()
 
     if timer:
         t_inject = time.perf_counter()
@@ -89,7 +92,7 @@ def compute_population_snr(
     # 4. Snapshot into enterprise AFTER injection
     if verbose:
         print("Snapshotting into enterprise Pulsar objects...")
-    with suppress_enterprise_warnings():
+    with suppress_fd_stderr():
         # Parallel enterprise snapshot
         enterprise_psrs = [
         EnterprisePulsar(psr, ephem='DE440', backend='tempo2')
@@ -121,11 +124,19 @@ def compute_population_snr(
 
     if timer:
         t_end = time.perf_counter()
-        print(f"OS: {t_end - t_build:.2f} s")
+        print(f"OS time: {t_end - t_build:.2f} s")
         print(f"Total: {t_end - t_start:.2f} s")
 
     gc.collect()
-    return snr
+
+    if post_residuals_avg:
+        rms_residual = 0.0
+        for psr in enterprise_psrs:
+            rms_residual += np.sqrt(np.mean(psr.residuals**2))
+        rms_residual /= len(enterprise_psrs)
+        return snr, rms_residual
+    else: 
+        return snr
  
  
 # ============================================================================
@@ -166,8 +177,6 @@ def reset_pulsars(psrs, original_stoas):
     for psr in psrs:
         psr.stoas[:] = original_stoas[psr.name]
  
-import warnings
-import os
 import sys
 from contextlib import contextmanager
 
@@ -176,6 +185,8 @@ def suppress_enterprise_warnings():
     """Suppress tempo2/enterprise stderr noise during pulsar loading."""
     # Redirect stderr to devnull
     devnull = open(os.devnull, 'w')
+    warnings.filterwarnings("ignore", message=".*ELL1H.*")
+
     old_stderr = sys.stderr
     sys.stderr = devnull
     # Also suppress Python warnings
@@ -186,6 +197,18 @@ def suppress_enterprise_warnings():
         finally:
             sys.stderr = old_stderr
             devnull.close()
+
+@contextmanager
+def suppress_fd_stderr():
+    stderr_fd = sys.stderr.fileno()
+    with open(os.devnull, 'w') as devnull:
+        old_stderr_fd = os.dup(stderr_fd)
+        os.dup2(devnull.fileno(), stderr_fd)
+        try:
+            yield
+        finally:
+            os.dup2(old_stderr_fd, stderr_fd)
+            os.close(old_stderr_fd)
  
 from concurrent.futures import ThreadPoolExecutor
 
@@ -817,6 +840,8 @@ def generate_consistent_population_distance_scaling(
     Tspan,
     target_SNR,
     original_stoas,              # stoas BEFORE any noise or GW — raw loaded state
+    snr_noise_baseline=0.0,     # if None, will be computed internally from psrs_clean and raw_noise_params
+    post_residuals_avg=False,  # whether to compute and return average residuals after injection (for sanity check of scaling)
     timer=True,
     verbose=True,
     test=False,
@@ -857,7 +882,6 @@ def generate_consistent_population_distance_scaling(
         if rss0 is not None:
             memory_profile['rss_mb']['start'] = float(rss0)
 
-
     if verbose:
         print(f"\nGenerating SNR-consistent population...")
         print(f"Target SNR: {target_SNR}")
@@ -878,18 +902,33 @@ def generate_consistent_population_distance_scaling(
 
     # Compute current SNR of the population
     t_trial0 = time.perf_counter() if profile_clock else None
-    snr_trial = compute_population_snr(
-        population,
-        psrs_clean,
-        raw_noise_params,
-        Tspan,
-        current_stoas=original_stoas,
-        timer=timer,
-        verbose=verbose,
-        inject_eps=inject_eps,
-        precompute_before_injection=False,
-        precompute_parallel=precompute_parallel,
-    )
+    if post_residuals_avg:
+        snr_trial, avg_residual_post = compute_population_snr(
+            population,
+            psrs_clean,
+            raw_noise_params,
+            Tspan,
+            current_stoas=original_stoas,
+            post_residuals_avg=post_residuals_avg,
+            timer=timer,
+            verbose=verbose,
+            inject_eps=inject_eps,
+            precompute_before_injection=False,
+            precompute_parallel=precompute_parallel,
+        )
+    else:    
+        snr_trial = compute_population_snr(
+            population,
+            psrs_clean,
+            raw_noise_params,
+            Tspan,
+            current_stoas=original_stoas,
+            timer=timer,
+            verbose=verbose,
+            inject_eps=inject_eps,
+            precompute_before_injection=False,
+            precompute_parallel=precompute_parallel,
+        )
     if profile_clock and t_trial0 is not None:
         timing_profile['initial_snr_compute_s'] = time.perf_counter() - t_trial0
     if toggle_memory_profiling:
@@ -902,10 +941,12 @@ def generate_consistent_population_distance_scaling(
     if snr_trial <= 0:
         print(f"  ✗ Initial SNR {snr_trial:.4f} is non-positive, cannot scale distances to achieve target SNR.")
         return None
-
     
-    # Calculate scaling factor for distances based on the ratio of trial SNR to target SNR
-    snr_scaling_factor = snr_trial / target_SNR
+    snr_signal_only = snr_trial - snr_noise_baseline
+    if snr_signal_only <= 0:
+        print(f"  ✗ Signal-only SNR {snr_signal_only:.4f} is non-positive, cannot scale distances to achieve target SNR.")
+        return None
+    snr_scaling_factor = snr_signal_only / target_SNR
     distance_scaling_factor = snr_scaling_factor ** (1./2.)
     if verbose:
         print(f"Scaling distances by factor {distance_scaling_factor:.4f} to achieve target SNR...")
@@ -915,7 +956,7 @@ def generate_consistent_population_distance_scaling(
     population.h0 /= distance_scaling_factor  # h0 ∝ 1/D, so scale inversely    
     # Amplitude dictionaries are very large and usually not needed for post-run
     # analysis. Dropping them from stored results greatly reduces peak memory.
-    
+    snr_final = None  # will be set after scaling and recomputing SNR
     if test:
         population.amp_A = {
         psr: amp / distance_scaling_factor for psr, amp in population.amp_A.items()
@@ -930,6 +971,7 @@ def generate_consistent_population_distance_scaling(
             psrs_clean,
             raw_noise_params,
             Tspan,
+            current_stoas=original_stoas,
             timer=timer,
             verbose=verbose,
             inject_eps=inject_eps,
@@ -951,8 +993,9 @@ def generate_consistent_population_distance_scaling(
             rss = _get_rss_mb()
             if rss is not None:
                 memory_profile['rss_mb']['after_drop_amplitudes'] = float(rss)
-
-    snr_final = float(target_SNR)
+    
+    if snr_final is None:
+        snr_final = float(target_SNR)
 
     if profile_clock and t_start is not None:
         timing_profile['total_s'] = time.perf_counter() - t_start
@@ -992,6 +1035,7 @@ def generate_snr_consistent_populations_distance_scaling(
     target_SNR,
     resimulate_noise=True,       # toggle: new noise draw per simulation
     original_stoas=None,          # needed if resimulate_noise=False to reset to clean state
+    post_residuals_avg=False,  # whether to compute and return average residuals after injection (for sanity check of scaling)
     N_sims            = 20,
     verbose           = True,
     save_populations  = True,
@@ -1044,7 +1088,23 @@ def generate_snr_consistent_populations_distance_scaling(
         else:
             # Use fixed noise — original_stoas should already be post-noise state
             current_stoas = original_stoas
- 
+
+        # Compute noise baseline ONCE on this noise realisation, before any GW injection
+        snr_noise_baseline = compute_population_snr(
+            population=None,          # no GW signal
+            psrs_clean=psrs_clean,
+            raw_noise_params=raw_noise_params,
+            Tspan=Tspan,
+            current_stoas=current_stoas,   # post-noise stoas
+            timer=profile,
+            verbose=verbose,
+            inject_eps=inject_eps,
+            precompute_before_injection=False,
+            precompute_parallel=precompute_parallel,
+        )
+        if verbose:
+            print(f"Noise-only SNR baseline: {snr_noise_baseline:.4f}")
+            
         t_sim = time.time()
         result = None
         ii = 0
@@ -1060,6 +1120,8 @@ def generate_snr_consistent_populations_distance_scaling(
             Tspan                       = Tspan,
             target_SNR                  = target_SNR,
             original_stoas              = current_stoas,
+            snr_noise_baseline          = snr_noise_baseline,
+            post_residuals_avg          = post_residuals_avg,
             verbose                     = verbose,
             timer                       = profile,
             test                        = test,
