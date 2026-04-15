@@ -832,6 +832,7 @@ def generate_consistent_population_distance_scaling(
     Tspan,
     target_SNR,
     original_stoas,              # stoas BEFORE any noise or GW — raw loaded state
+    SNR_range=None,
     snr_noise_baseline=0.0,     # if None, will be computed internally from psrs_clean and raw_noise_params
     timer=True,
     verbose=True,
@@ -922,6 +923,19 @@ def generate_consistent_population_distance_scaling(
     # --- Initial SNR computation and first scale (always runs) ---
     snr_current = snr_trial  # already computed above
     snr_final = None
+    if SNR_range is not None:
+        SNR_min, SNR_max = SNR_range
+        if not (SNR_min <= snr_current <= SNR_max):
+            print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
+                  f"[{SNR_min}, {SNR_max}] — rescaling.")
+        else:
+            print(f"  ✓ Initial SNR is within the provided SNR_range.")
+            return _build_result_distance_scaling(
+                population=population,
+                SNR_final=snr_current,
+                timing_profile=timing_profile if profile_clock else None,
+                memory_profile=memory_profile if toggle_memory_profiling else None,
+            )
 
     def _apply_scale(population, distance_scaling_factor):
         population.D_comov *= distance_scaling_factor
@@ -960,6 +974,20 @@ def generate_consistent_population_distance_scaling(
         )
         snr_final = snr_current
 
+        if SNR_range is not None:
+            SNR_min, SNR_max = SNR_range
+            if not (SNR_min <= snr_current <= SNR_max):
+                print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
+                    f"[{SNR_min}, {SNR_max}] — rescaling.")
+            else:
+                print(f"  ✓ Initial SNR is within the provided SNR_range.")
+                return _build_result_distance_scaling(
+                    population=population,
+                    SNR_final=snr_final,
+                    timing_profile=timing_profile if profile_clock else None,
+                    memory_profile=memory_profile if toggle_memory_profiling else None,
+                )
+            
         if profile_clock:
             timing_profile[f'iteration_{i+1}_snr_compute_s'] = time.perf_counter() - t_iter0
         if toggle_memory_profiling:
@@ -1023,6 +1051,7 @@ def generate_snr_consistent_populations_distance_scaling(
     raw_noise_params,
     Tspan,
     target_SNR,
+    SNR_range=None,
     resimulate_noise=True,
     original_stoas=None,
     N_sims            = 20,
@@ -1047,42 +1076,6 @@ def generate_snr_consistent_populations_distance_scaling(
         print(f"Target SNR:          {target_SNR}")
         print(f"Simulations:         {N_sims}")
         print(f"{'='*70}\n")
-
-    # =========================================================================
-    # ONE-TIME CALIBRATION: measure timing model absorption factor α
-    # Uses a fresh noise realisation just for calibration — does not affect
-    # the sim loop noise realisations.
-    # Costs: 1 noise simulation + 2 OS computations, done once only.
-    # =========================================================================
-    if verbose:
-        print("Calibrating timing model absorption factor α...")
-
-    # Fresh noise draw for calibration only
-    for psr in psrs_clean:
-        psr.stoas[:] = original_stoas[psr.name]
-    for psr in psrs_clean:
-        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
-    calib_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
-
-    # Noise baseline for calibration realisation
-    snr_noise_baseline_calib = compute_population_snr(
-        population=None,
-        psrs_clean=psrs_clean,
-        raw_noise_params=raw_noise_params,
-        Tspan=Tspan,
-        current_stoas=calib_stoas,
-        timer=profile,
-        verbose=verbose,
-        inject_eps=inject_eps,
-        precompute_before_injection=False,
-        precompute_parallel=precompute_parallel,
-    )
-    if verbose:
-        print(f"Calibration noise baseline: {snr_noise_baseline_calib:.4f}")
-
-    # Generate a calibration population and measure α
-    population_calib = generate_population(config_template, smbhb_module, T_obs_seconds=Tspan)
-
 
     # =========================================================================
     # SIMULATION LOOP — each sim gets a fresh independent noise realisation
@@ -1138,6 +1131,7 @@ def generate_snr_consistent_populations_distance_scaling(
                 raw_noise_params          = raw_noise_params,
                 Tspan                     = Tspan,
                 target_SNR                = target_SNR,
+                SNR_range                 = SNR_range,
                 original_stoas            = current_stoas,
                 snr_noise_baseline        = snr_noise_baseline,
                 verbose                   = verbose,

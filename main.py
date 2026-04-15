@@ -24,6 +24,7 @@ from memory_profile import log_memory
 from consistent_pop_synth import compute_population_snr
 # from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
 from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
+from CGW_SNR import compute_CGW_snr_binary_population
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, save_results_dual, print_population_diagnostics, print_scaling_summary, compact_consistent_results_for_storage
 # from pulsar_noise_using_enterprise import get_noise_matrix
@@ -49,7 +50,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--snr-range", nargs=2, type=float, default=[3.5, 4.0],
+        "--snr-range", nargs=2, type=float, default=[3.5, 4.25],
         help="SNR range for ensemble search (low high)"
     )
 
@@ -337,7 +338,9 @@ def main():
         else:
             N_initial_guess = int(args.initial_guess)
         
+        SNR_range = args.snr_range
         SNR_low, SNR_high = args.snr_range
+        SNR_target = args.target_snr
 
         original_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
 
@@ -348,12 +351,13 @@ def main():
             raw_noise_params=raw_noise_params,
             Tspan=Tspan_seconds,
             original_stoas=original_stoas,
-            target_SNR= SNR_high,
+            target_SNR= SNR_target,
+            SNR_range=SNR_range,
             N_sims=args.simulations,
             verbose=True,
             save_populations=True,
             profile=True,
-            n_iterations=3,
+            n_iterations=5,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -375,6 +379,13 @@ def main():
             save_compact_npz=False,
         )
         
+    
+    # if config.CGW_SNR_ANALYSIS:
+    #     print("\n" + "="*70)
+    #     print("CONTINUOUS WAVE SNR ANALYSIS")
+    #     print("="*70)
+        
+    #     consist
         
 
 
