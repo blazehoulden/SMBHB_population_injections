@@ -4,6 +4,7 @@ Main execution script for SMBHB population analysis.
 Run with: python main.py
 """
 import os
+import sys
 
 from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling, suppress_enterprise_warnings
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -128,6 +129,28 @@ def setup_save_directory(args):
     
     return save_dir, run_name
 
+import io
+
+class TeeLogger:
+    """Writes to both stdout and a log file simultaneously."""
+    def __init__(self, filepath, mode='w'):
+        self.terminal = sys.stdout
+        self.log = open(filepath, mode, buffering=1)  # line-buffered
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+        sys.stdout = self.terminal
+
+logger = TeeLogger("run_log.txt")
+sys.stdout = logger
 
 def main():
     """Main analysis workflow."""
@@ -327,11 +350,10 @@ def main():
             original_stoas=original_stoas,
             target_SNR= SNR_high,
             N_sims=args.simulations,
-            post_residuals_avg=True,
             verbose=True,
             save_populations=True,
             profile=True,
-            test=True,
+            n_iterations=3,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -613,6 +635,7 @@ def main():
         print("P_gw[:3]:        ", P_gw[:3])
         print("P_gw*df[:3]:     ", (P_gw*df)[:3])
         print("phi_0_real[::2] / (P_gw*df)[:3] =", phi_0_real[::2][:3] / (P_gw*df)[:3])
+logger.close()
 
 
 

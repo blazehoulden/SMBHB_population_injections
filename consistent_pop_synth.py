@@ -28,7 +28,6 @@ def compute_population_snr(
     raw_noise_params,
     Tspan,
     current_stoas,         # post-noise stoas to reset to before GW injection
-    post_residuals_avg=False,
     verbose=False,
     timer=True,
     profile=True,
@@ -129,14 +128,7 @@ def compute_population_snr(
 
     gc.collect()
 
-    if post_residuals_avg:
-        rms_residual = 0.0
-        for psr in enterprise_psrs:
-            rms_residual += np.sqrt(np.mean(psr.residuals**2))
-        rms_residual /= len(enterprise_psrs)
-        return snr, rms_residual
-    else: 
-        return snr
+    return snr
  
  
 # ============================================================================
@@ -841,10 +833,9 @@ def generate_consistent_population_distance_scaling(
     target_SNR,
     original_stoas,              # stoas BEFORE any noise or GW — raw loaded state
     snr_noise_baseline=0.0,     # if None, will be computed internally from psrs_clean and raw_noise_params
-    post_residuals_avg=False,  # whether to compute and return average residuals after injection (for sanity check of scaling)
     timer=True,
     verbose=True,
-    test=False,
+    n_iterations=0,
     toggle_memory_profiling=False,
     keep_amplitudes_in_result=False,
     inject_eps=1e-6,
@@ -902,22 +893,7 @@ def generate_consistent_population_distance_scaling(
 
     # Compute current SNR of the population
     t_trial0 = time.perf_counter() if profile_clock else None
-    if post_residuals_avg:
-        snr_trial, avg_residual_post = compute_population_snr(
-            population,
-            psrs_clean,
-            raw_noise_params,
-            Tspan,
-            current_stoas=original_stoas,
-            post_residuals_avg=post_residuals_avg,
-            timer=timer,
-            verbose=verbose,
-            inject_eps=inject_eps,
-            precompute_before_injection=False,
-            precompute_parallel=precompute_parallel,
-        )
-    else:    
-        snr_trial = compute_population_snr(
+    snr_trial = compute_population_snr(
             population,
             psrs_clean,
             raw_noise_params,
@@ -929,6 +905,7 @@ def generate_consistent_population_distance_scaling(
             precompute_before_injection=False,
             precompute_parallel=precompute_parallel,
         )
+
     if profile_clock and t_trial0 is not None:
         timing_profile['initial_snr_compute_s'] = time.perf_counter() - t_trial0
     if toggle_memory_profiling:
@@ -942,31 +919,34 @@ def generate_consistent_population_distance_scaling(
         print(f"  ✗ Initial SNR {snr_trial:.4f} is non-positive, cannot scale distances to achieve target SNR.")
         return None
     
-    snr_signal_only = snr_trial - snr_noise_baseline
-    if snr_signal_only <= 0:
-        print(f"  ✗ Signal-only SNR {snr_signal_only:.4f} is non-positive, cannot scale distances to achieve target SNR.")
-        return None
-    snr_scaling_factor = snr_signal_only / target_SNR
-    distance_scaling_factor = snr_scaling_factor ** (1./2.)
+    # --- Initial SNR computation and first scale (always runs) ---
+    snr_current = snr_trial  # already computed above
+    snr_final = None
+
+    def _apply_scale(population, distance_scaling_factor):
+        population.D_comov *= distance_scaling_factor
+        population.h0 /= distance_scaling_factor
+        population.amp_A = {psr: amp / distance_scaling_factor for psr, amp in population.amp_A.items()}
+        population.amp_B = {psr: amp / distance_scaling_factor for psr, amp in population.amp_B.items()}
+
+    def _compute_scale_factor(snr_current, target_SNR, snr_noise_baseline):
+        snr_signal_only = snr_current - snr_noise_baseline
+        snr_signal_target = target_SNR - snr_noise_baseline
+        if snr_signal_only <= 0:
+            raise ValueError(f"Signal-only SNR {snr_signal_only:.4f} is non-positive.")
+        return (snr_signal_only / snr_signal_target) ** 0.5
+
+    # First scale (always applied, using the initial SNR)
+    distance_scaling_factor = _compute_scale_factor(snr_trial, target_SNR, snr_noise_baseline)
     if verbose:
         print(f"Scaling distances by factor {distance_scaling_factor:.4f} to achieve target SNR...")
+    _apply_scale(population, distance_scaling_factor)
 
-    # Scale distances and amplitudes accordingly
-    population.D_comov *= distance_scaling_factor
-    population.h0 /= distance_scaling_factor  # h0 ∝ 1/D, so scale inversely    
-    # Amplitude dictionaries are very large and usually not needed for post-run
-    # analysis. Dropping them from stored results greatly reduces peak memory.
-    snr_final = None  # will be set after scaling and recomputing SNR
-    if test:
-        population.amp_A = {
-        psr: amp / distance_scaling_factor for psr, amp in population.amp_A.items()
-        }
-        population.amp_B = {
-            psr: amp / distance_scaling_factor for psr, amp in population.amp_B.items()
-        }
-        # Recompute SNR after scaling to verify it matches target
-        t_test0 = time.perf_counter() if profile_clock else None
-        snr_final = compute_population_snr(
+    # Iterative verification / re-scaling
+    for i in range(n_iterations):
+        t_iter0 = time.perf_counter() if profile_clock else None
+
+        snr_current = compute_population_snr(
             population,
             psrs_clean,
             raw_noise_params,
@@ -976,15 +956,25 @@ def generate_consistent_population_distance_scaling(
             verbose=verbose,
             inject_eps=inject_eps,
             precompute_before_injection=False,
+            precompute_parallel=precompute_parallel,
         )
-        if profile_clock and t_test0 is not None:
-            timing_profile['post_scale_snr_compute_s'] = time.perf_counter() - t_test0
+        snr_final = snr_current
+
+        if profile_clock:
+            timing_profile[f'iteration_{i+1}_snr_compute_s'] = time.perf_counter() - t_iter0
         if toggle_memory_profiling:
             rss = _get_rss_mb()
             if rss is not None:
-                memory_profile['rss_mb']['after_post_scale_snr'] = float(rss)
+                memory_profile['rss_mb'][f'after_iteration_{i+1}_snr'] = float(rss)
         if verbose:
-            print(f"Final SNR after scaling: {snr_final:.4f}")
+            print(f"[Iteration {i+1}/{n_iterations}] SNR after scaling: {snr_current:.4f} (target: {target_SNR:.4f})")
+
+        # Re-scale on all iterations except the last (last is verify-only)
+        if i < n_iterations - 1:
+            distance_scaling_factor = _compute_scale_factor(snr_current, target_SNR, snr_noise_baseline)
+            if verbose:
+                print(f"  Re-scaling distances by factor {distance_scaling_factor:.4f}...")
+            _apply_scale(population, distance_scaling_factor)
             
     if not keep_amplitudes_in_result:
         population.amp_A = {}
@@ -1033,31 +1023,23 @@ def generate_snr_consistent_populations_distance_scaling(
     raw_noise_params,
     Tspan,
     target_SNR,
-    resimulate_noise=True,       # toggle: new noise draw per simulation
-    original_stoas=None,          # needed if resimulate_noise=False to reset to clean state
-    post_residuals_avg=False,  # whether to compute and return average residuals after injection (for sanity check of scaling)
+    resimulate_noise=True,
+    original_stoas=None,
     N_sims            = 20,
     verbose           = True,
     save_populations  = True,
     profile           = False,
-    test              = False,
+    n_iterations      = 0,
     toggle_memory_profiling = False,
     keep_amplitudes_in_result = False,
     inject_eps        = 1e-6,
     precompute_parallel = False,
 ):
-    """
-    Generate N_sims SMBHB populations each consistent with SNR_range.
- 
-    Args and return format identical to the previous version.
-    """
     start_time = time.time()
 
     if target_SNR <= 0:
-        raise ValueError(
-            f"target_SNR must be positive, got {target_SNR}"
-        )
- 
+        raise ValueError(f"target_SNR must be positive, got {target_SNR}")
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"GENERATING SNR-CONSISTENT POPULATIONS")
@@ -1065,37 +1047,74 @@ def generate_snr_consistent_populations_distance_scaling(
         print(f"Target SNR:          {target_SNR}")
         print(f"Simulations:         {N_sims}")
         print(f"{'='*70}\n")
- 
+
+    # =========================================================================
+    # ONE-TIME CALIBRATION: measure timing model absorption factor α
+    # Uses a fresh noise realisation just for calibration — does not affect
+    # the sim loop noise realisations.
+    # Costs: 1 noise simulation + 2 OS computations, done once only.
+    # =========================================================================
+    if verbose:
+        print("Calibrating timing model absorption factor α...")
+
+    # Fresh noise draw for calibration only
+    for psr in psrs_clean:
+        psr.stoas[:] = original_stoas[psr.name]
+    for psr in psrs_clean:
+        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
+    calib_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+
+    # Noise baseline for calibration realisation
+    snr_noise_baseline_calib = compute_population_snr(
+        population=None,
+        psrs_clean=psrs_clean,
+        raw_noise_params=raw_noise_params,
+        Tspan=Tspan,
+        current_stoas=calib_stoas,
+        timer=profile,
+        verbose=verbose,
+        inject_eps=inject_eps,
+        precompute_before_injection=False,
+        precompute_parallel=precompute_parallel,
+    )
+    if verbose:
+        print(f"Calibration noise baseline: {snr_noise_baseline_calib:.4f}")
+
+    # Generate a calibration population and measure α
+    population_calib = generate_population(config_template, smbhb_module, T_obs_seconds=Tspan)
+
+
+    # =========================================================================
+    # SIMULATION LOOP — each sim gets a fresh independent noise realisation
+    # =========================================================================
     populations       = []
     n_bininaries_list = []
-    SNR_final_list = []
+    SNR_final_list    = []
     success_count     = 0
- 
+
     for sim_idx in range(N_sims):
         if verbose:
             print(f"\n{'─'*70}")
             print(f"SIMULATION {sim_idx + 1}/{N_sims}")
             print(f"{'─'*70}")
+
         if resimulate_noise:
-            # Reset to raw loaded stoas (no noise, no GW)
+            # Reset to raw stoas then draw fresh noise for this simulation
             for psr in psrs_clean:
                 psr.stoas[:] = original_stoas[psr.name]
-            # Fresh noise draw
             for psr in psrs_clean:
                 simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
-            # Save this noise realisation as the clean state for THIS snr evaluation
             current_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
         else:
-            # Use fixed noise — original_stoas should already be post-noise state
             current_stoas = original_stoas
 
-        # Compute noise baseline ONCE on this noise realisation, before any GW injection
+        # Noise baseline for this simulation's noise realisation
         snr_noise_baseline = compute_population_snr(
-            population=None,          # no GW signal
+            population=None,
             psrs_clean=psrs_clean,
             raw_noise_params=raw_noise_params,
             Tspan=Tspan,
-            current_stoas=current_stoas,   # post-noise stoas
+            current_stoas=current_stoas,
             timer=profile,
             verbose=verbose,
             inject_eps=inject_eps,
@@ -1104,39 +1123,38 @@ def generate_snr_consistent_populations_distance_scaling(
         )
         if verbose:
             print(f"Noise-only SNR baseline: {snr_noise_baseline:.4f}")
-            
+
         t_sim = time.time()
         result = None
         ii = 0
-        while result is None: # iterate until we get a valid population (in case of non-positive initial SNR or other issues)
+        while result is None:
             if verbose and ii > 0:
                 print(f"✗ Simulation {sim_idx+1}, trial {ii} FAILED, retrying...")
             ii += 1
             result = generate_consistent_population_distance_scaling(
-            config_template             = config_template,
-            smbhb_module                = smbhb_module,
-            psrs_clean                  = psrs_clean,
-            raw_noise_params            = raw_noise_params,
-            Tspan                       = Tspan,
-            target_SNR                  = target_SNR,
-            original_stoas              = current_stoas,
-            snr_noise_baseline          = snr_noise_baseline,
-            post_residuals_avg          = post_residuals_avg,
-            verbose                     = verbose,
-            timer                       = profile,
-            test                        = test,
-            toggle_memory_profiling     = toggle_memory_profiling,
-            keep_amplitudes_in_result   = keep_amplitudes_in_result,
-            inject_eps                  = inject_eps,
-            precompute_parallel         = precompute_parallel,
-        )
- 
+                config_template           = config_template,
+                smbhb_module              = smbhb_module,
+                psrs_clean                = psrs_clean,
+                raw_noise_params          = raw_noise_params,
+                Tspan                     = Tspan,
+                target_SNR                = target_SNR,
+                original_stoas            = current_stoas,
+                snr_noise_baseline        = snr_noise_baseline,
+                verbose                   = verbose,
+                timer                     = profile,
+                n_iterations              = n_iterations,
+                toggle_memory_profiling   = toggle_memory_profiling,
+                keep_amplitudes_in_result = keep_amplitudes_in_result,
+                inject_eps                = inject_eps,
+                precompute_parallel       = precompute_parallel,
+            )
+
         if result is not None:
             success_count += 1
             n_bininaries_list.append(result['n_bininaries'])
             SNR_final_list.append(result['SNR_final'])
             result['sim_index'] = sim_idx
- 
+
             if save_populations:
                 populations.append(result)
             else:
@@ -1144,21 +1162,19 @@ def generate_snr_consistent_populations_distance_scaling(
                     'n_bininaries': result['n_bininaries'],
                     'SNR_final'   : result['SNR_final'],
                 })
- 
-            if verbose:
-                print(f"✓ Simulation {sim_idx+1} done "
-                      f"({time.time()-t_sim:.1f} s)")
-        else:
 
             if verbose:
+                print(f"✓ Simulation {sim_idx+1} done ({time.time()-t_sim:.1f} s)")
+        else:
+            if verbose:
                 print(f"✗ Simulation {sim_idx+1} FAILED")
- 
+
     # =========================================================================
-    # Compile summary statistics
+    # Summary statistics
     # =========================================================================
     N_arr   = np.array(n_bininaries_list) if n_bininaries_list else np.array([])
-    SNR_arr = np.array(SNR_final_list) if SNR_final_list else np.array([])
- 
+    SNR_arr = np.array(SNR_final_list)    if SNR_final_list    else np.array([])
+
     def _stats(arr):
         if len(arr) == 0:
             return dict(mean=None, median=None, std=None, min=None, max=None)
@@ -1169,54 +1185,47 @@ def generate_snr_consistent_populations_distance_scaling(
             min    = float(np.min(arr)),
             max    = float(np.max(arr)),
         )
- 
+
     total_time = time.time() - start_time
- 
+
     results = {
         'populations': populations,
         'summary_statistics': {
-            'n_bininaries': {**_stats(N_arr),
-                             'all_values': n_bininaries_list},
-            'SNR_final': {**_stats(SNR_arr),
-                          'all_values': SNR_final_list},
+            'n_bininaries': {**_stats(N_arr), 'all_values': n_bininaries_list},
+            'SNR_final':    {**_stats(SNR_arr), 'all_values': SNR_final_list},
         },
         'config': {
-            'N_sims'         : N_sims,
-            'config_template': config_template,
-            'target_snr'     : float(target_SNR),
-            'profile'        : bool(profile),
-            'memory_profiling': bool(toggle_memory_profiling),
+            'N_sims'                   : N_sims,
+            'config_template'          : config_template,
+            'target_snr'               : float(target_SNR),
+            'profile'                  : bool(profile),
+            'memory_profiling'         : bool(toggle_memory_profiling),
             'keep_amplitudes_in_result': bool(keep_amplitudes_in_result),
-            'inject_eps'     : float(inject_eps),
-            'precompute_parallel': bool(precompute_parallel),
+            'inject_eps'               : float(inject_eps),
+            'precompute_parallel'      : bool(precompute_parallel),
         },
         'metadata': {
-            'success_count': success_count,
-            'success_rate' : success_count / N_sims,
-            'total_time'   : total_time,
+            'success_count'   : success_count,
+            'success_rate'    : success_count / N_sims,
+            'total_time'      : total_time,
             'save_populations': save_populations,
         },
     }
- 
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"ENSEMBLE SUMMARY")
         print(f"{'='*70}")
-        print(f"Success rate: {results['metadata']['success_rate']:.1%} "
-              f"({success_count}/{N_sims})")
+        print(f"Success rate: {results['metadata']['success_rate']:.1%} ({success_count}/{N_sims})")
         if success_count > 0:
             s = results['summary_statistics']
             print(f"\nBinaries per population:")
-            print(f"  Mean ± std : {s['n_bininaries']['mean']:.0f} "
-                  f"± {s['n_bininaries']['std']:.0f}")
-            print(f"  Range      : [{s['n_bininaries']['min']:.0f}, "
-                  f"{s['n_bininaries']['max']:.0f}]")
+            print(f"  Mean ± std : {s['n_bininaries']['mean']:.0f} ± {s['n_bininaries']['std']:.0f}")
+            print(f"  Range      : [{s['n_bininaries']['min']:.0f}, {s['n_bininaries']['max']:.0f}]")
             print(f"\nSNR achieved:")
-            print(f"  Mean ± std : {s['SNR_final']['mean']:.4f} "
-                  f"± {s['SNR_final']['std']:.4f}")
-            print(f"  Range      : [{s['SNR_final']['min']:.4f}, "
-                  f"{s['SNR_final']['max']:.4f}]")
+            print(f"  Mean ± std : {s['SNR_final']['mean']:.4f} ± {s['SNR_final']['std']:.4f}")
+            print(f"  Range      : [{s['SNR_final']['min']:.4f}, {s['SNR_final']['max']:.4f}]")
         print(f"\nTotal time: {total_time:.1f} s ({total_time/60:.1f} min)")
         print(f"{'='*70}\n")
- 
+
     return results

@@ -1031,6 +1031,8 @@ def get_base_name(psrname):
             return psrname[:-len(suffix)]
     return psrname
 
+import matplotlib.pyplot as plt
+
 def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=False):
     psrname = psr.name
     basename = get_base_name(psrname)  # use this for noise dict lookups
@@ -1090,8 +1092,6 @@ def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=
             LT.add_equad(psr, equad, flagid='f', flags=sys)
             LT.add_jitter(psr, ecorr, flagid='f', flags=sys)
     
-    # if add_GWB:
-
     if plot:
         print(f"[{psrname}] plotting final residuals with all noise...", flush=True)
         # plot_residuals_raw(psr, title="Final Residuals with All Noise")
