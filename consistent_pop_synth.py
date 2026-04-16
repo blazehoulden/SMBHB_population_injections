@@ -28,6 +28,7 @@ def compute_population_snr(
     raw_noise_params,
     Tspan,
     current_stoas,         # post-noise stoas to reset to before GW injection
+    return_psrs_pta=True,
     verbose=False,
     timer=True,
     profile=True,
@@ -128,7 +129,10 @@ def compute_population_snr(
 
     gc.collect()
 
-    return snr
+    if return_psrs_pta:
+        return snr, pta, enterprise_psrs
+    else:
+        return snr
  
  
 # ============================================================================
@@ -798,6 +802,8 @@ def _build_result(
 
 def _build_result_distance_scaling(
     population, SNR_final, 
+    pta = None,
+    psrs = None,
     warning=None, broken=False,
     timing_list=None,
     timing_profile=None,
@@ -817,6 +823,8 @@ def _build_result_distance_scaling(
  
     result = {
         'population'   : population,
+        'pta'          : pta,
+        'psrs'         : psrs,
         'n_bininaries' : len(population),
         'SNR_final' : float(SNR_final),
         'search_metadata': meta,
@@ -831,9 +839,9 @@ def generate_consistent_population_distance_scaling(
     raw_noise_params,
     Tspan,
     target_SNR,
-    original_stoas,              # stoas BEFORE any noise or GW — raw loaded state
+    original_stoas,
     SNR_range=None,
-    snr_noise_baseline=0.0,     # if None, will be computed internally from psrs_clean and raw_noise_params
+    snr_noise_baseline=0.0,
     timer=True,
     verbose=True,
     n_iterations=0,
@@ -842,22 +850,6 @@ def generate_consistent_population_distance_scaling(
     inject_eps=1e-6,
     precompute_parallel=False,
 ):
-    """
-    Given an existing population, compute its SNR and scale distances to achieve target_SNR. 
-    Utilises the fact that SNR ∝ h0^2 ∝ 1/D^2, so scaling distances by a factor scales SNR inversely by the same factor.
-    
-    Arguments:
-    - config_template: template configuration for generating the population
-    - smbhb_module: the SMBHB module to use for population generation
-    - psrs_clean: list of pulsar objects with clean residuals (no signal injected)
-    - raw_noise_params: dict of raw noise parameters for the pulsars
-    - Tspan: observation time span in seconds
-    - target_SNR: desired SNR to achieve after scaling distances
-
-    Returns:
-    - result dict with the same high-level shape used by generate_snr_consistent_population
-    """
- 
     profile_clock = timer or toggle_memory_profiling
     t_start = time.perf_counter() if profile_clock else None
 
@@ -877,7 +869,7 @@ def generate_consistent_population_distance_scaling(
     if verbose:
         print(f"\nGenerating SNR-consistent population...")
         print(f"Target SNR: {target_SNR}")
- 
+
     if target_SNR <= 0:
         raise ValueError(f"target_SNR must be > 0, got {target_SNR}")
 
@@ -890,23 +882,20 @@ def generate_consistent_population_distance_scaling(
         if rss is not None:
             memory_profile['rss_mb']['after_generate_population'] = float(rss)
 
-
-
-    # Compute current SNR of the population
     t_trial0 = time.perf_counter() if profile_clock else None
-    snr_trial = compute_population_snr(
-            population,
-            psrs_clean,
-            raw_noise_params,
-            Tspan,
-            current_stoas=original_stoas,
-            timer=timer,
-            verbose=verbose,
-            inject_eps=inject_eps,
-            precompute_before_injection=False,
-            precompute_parallel=precompute_parallel,
-        )
-
+    snr_trial, pta, enterprise_psrs = compute_population_snr(
+        population,
+        psrs_clean,
+        raw_noise_params,
+        Tspan,
+        current_stoas=original_stoas,
+        return_psrs_pta=True,
+        timer=timer,
+        verbose=verbose,
+        inject_eps=inject_eps,
+        precompute_before_injection=False,
+        precompute_parallel=precompute_parallel,
+    )
     if profile_clock and t_trial0 is not None:
         timing_profile['initial_snr_compute_s'] = time.perf_counter() - t_trial0
     if toggle_memory_profiling:
@@ -917,55 +906,104 @@ def generate_consistent_population_distance_scaling(
         print(f"Initial SNR: {snr_trial:.4f}, Target SNR: {target_SNR:.4f}")
 
     if snr_trial <= 0:
-        print(f"  ✗ Initial SNR {snr_trial:.4f} is non-positive, cannot scale distances to achieve target SNR.")
+        print(f"  ✗ Initial SNR {snr_trial:.4f} is non-positive, cannot scale distances.")
         return None
-    
-    # --- Initial SNR computation and first scale (always runs) ---
-    snr_current = snr_trial  # already computed above
+
+    snr_current = snr_trial
     snr_final = None
+
     if SNR_range is not None:
         SNR_min, SNR_max = SNR_range
-        if not (SNR_min <= snr_current <= SNR_max):
-            print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
-                  f"[{SNR_min}, {SNR_max}] — rescaling.")
-        else:
-            print(f"  ✓ Initial SNR is within the provided SNR_range.")
+        if SNR_min <= snr_current <= SNR_max:
+            print(f"  ✓ Initial SNR is within the provided SNR_range: {snr_current:.4f} ∈ [{SNR_min}, {SNR_max}]")
             return _build_result_distance_scaling(
                 population=population,
                 SNR_final=snr_current,
+                pta=pta,
+                psrs=enterprise_psrs,
                 timing_profile=timing_profile if profile_clock else None,
                 memory_profile=memory_profile if toggle_memory_profiling else None,
             )
+        else:
+            print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
+                  f"[{SNR_min}, {SNR_max}] — rescaling.")
 
-    def _apply_scale(population, distance_scaling_factor):
-        population.D_comov *= distance_scaling_factor
-        population.h0 /= distance_scaling_factor
-        population.amp_A = {psr: amp / distance_scaling_factor for psr, amp in population.amp_A.items()}
-        population.amp_B = {psr: amp / distance_scaling_factor for psr, amp in population.amp_B.items()}
+    def _apply_scale(population, factor):
+        population.D_comov *= factor
+        population.h0      /= factor
+        population.amp_A = {p: a / factor for p, a in population.amp_A.items()}
+        population.amp_B = {p: b / factor for p, b in population.amp_B.items()}
 
-    def _compute_scale_factor(snr_current, target_SNR, snr_noise_baseline):
-        snr_signal_only = snr_current - snr_noise_baseline
-        snr_signal_target = target_SNR - snr_noise_baseline
+    def _analytic_scale(snr_current, target_SNR, snr_noise_baseline):
+        snr_signal_only   = snr_current - snr_noise_baseline
+        snr_signal_target = target_SNR  - snr_noise_baseline
         if snr_signal_only <= 0:
             raise ValueError(f"Signal-only SNR {snr_signal_only:.4f} is non-positive.")
         return (snr_signal_only / snr_signal_target) ** 0.5
 
-    # First scale (always applied, using the initial SNR)
-    distance_scaling_factor = _compute_scale_factor(snr_trial, target_SNR, snr_noise_baseline)
-    if verbose:
-        print(f"Scaling distances by factor {distance_scaling_factor:.4f} to achieve target SNR...")
-    _apply_scale(population, distance_scaling_factor)
+    def _empirical_scale(history, target_SNR, snr_noise_baseline):
+        """
+        Fit log(SNR_signal) vs log(cumulative_scale) to a power law using OLS,
+        then invert to find the cumulative scale that hits target_SNR_signal.
+        Falls back to the most-recent analytic estimate if <2 distinct points.
 
-    # Iterative verification / re-scaling
+        The model is:
+            log(SNR_sig) = alpha + beta * log(cum_scale)
+        Inverting:
+            cum_scale_target = exp( (log(SNR_sig_target) - alpha) / beta )
+        The *incremental* factor needed is cum_scale_target / current_cum_scale.
+        """
+        xs = np.log(np.array([h['cumulative_scale'] for h in history]))
+        ys = np.log(np.maximum(np.array([h['snr'] for h in history]) - snr_noise_baseline, 1e-12))
+
+        if len(set(xs)) < 2:          # not enough distinct points yet
+            return None
+
+        # OLS: fit beta and alpha
+        x_mean, y_mean = xs.mean(), ys.mean()
+        beta  = np.dot(xs - x_mean, ys - y_mean) / np.dot(xs - x_mean, xs - x_mean)
+        alpha = y_mean - beta * x_mean
+
+        snr_signal_target = max(target_SNR - snr_noise_baseline, 1e-12)
+        log_cum_target    = (np.log(snr_signal_target) - alpha) / beta
+        cum_scale_target  = np.exp(log_cum_target)
+
+        # incremental factor = where we want to be / where we are now
+        current_cum_scale = history[-1]['cumulative_scale']
+        incremental       = cum_scale_target / current_cum_scale
+
+        if verbose:
+            print(f"  [empirical] power-law fit: β={beta:.3f}  α={alpha:.3f}  "
+                  f"→ cum_scale_target={cum_scale_target:.4f}  "
+                  f"incremental factor={incremental:.4f}")
+        return incremental
+
+    # ------------------------------------------------------------------ #
+    # History: one entry per SNR measurement, keyed by cumulative scale   #
+    # ------------------------------------------------------------------ #
+    # cumulative_scale tracks the total D multiplier relative to the
+    # original population.  starts at 1.0 (no scaling applied yet).
+    cumulative_scale = 1.0
+    snr_history = [{'iteration': 0, 'cumulative_scale': cumulative_scale, 'snr': snr_trial}]
+
+    # --- First scale (always analytic — only one data point so far) ---
+    factor = _analytic_scale(snr_trial, target_SNR, snr_noise_baseline)
+    if verbose:
+        print(f"Scaling distances by factor {factor:.4f} to achieve target SNR...")
+    _apply_scale(population, factor)
+    cumulative_scale *= factor
+
+    # --- Iterative verification / re-scaling ---
     for i in range(n_iterations):
         t_iter0 = time.perf_counter() if profile_clock else None
 
-        snr_current = compute_population_snr(
+        snr_current, pta, enterprise_psrs = compute_population_snr(
             population,
             psrs_clean,
             raw_noise_params,
             Tspan,
             current_stoas=original_stoas,
+            return_psrs_pta=True,
             timer=timer,
             verbose=verbose,
             inject_eps=inject_eps,
@@ -973,37 +1011,50 @@ def generate_consistent_population_distance_scaling(
             precompute_parallel=precompute_parallel,
         )
         snr_final = snr_current
+        snr_history.append({'iteration': i + 1, 'cumulative_scale': cumulative_scale, 'snr': snr_current})
 
-        if SNR_range is not None:
-            SNR_min, SNR_max = SNR_range
-            if not (SNR_min <= snr_current <= SNR_max):
-                print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
-                    f"[{SNR_min}, {SNR_max}] — rescaling.")
-            else:
-                print(f"  ✓ Initial SNR is within the provided SNR_range.")
-                return _build_result_distance_scaling(
-                    population=population,
-                    SNR_final=snr_final,
-                    timing_profile=timing_profile if profile_clock else None,
-                    memory_profile=memory_profile if toggle_memory_profiling else None,
-                )
-            
         if profile_clock:
             timing_profile[f'iteration_{i+1}_snr_compute_s'] = time.perf_counter() - t_iter0
         if toggle_memory_profiling:
             rss = _get_rss_mb()
             if rss is not None:
                 memory_profile['rss_mb'][f'after_iteration_{i+1}_snr'] = float(rss)
-        if verbose:
-            print(f"[Iteration {i+1}/{n_iterations}] SNR after scaling: {snr_current:.4f} (target: {target_SNR:.4f})")
 
-        # Re-scale on all iterations except the last (last is verify-only)
-        if i < n_iterations - 1:
-            distance_scaling_factor = _compute_scale_factor(snr_current, target_SNR, snr_noise_baseline)
+        if SNR_range is not None:
+            SNR_min, SNR_max = SNR_range
+            if SNR_min <= snr_current <= SNR_max:
+                print(f"  ✓ SNR is within the provided SNR_range: {snr_current:.4f} ∈ [{SNR_min}, {SNR_max}]")
+                break
+            else:
+                print(f"  SNR {snr_current:.4f} outside of provided SNR_range "
+                      f"[{SNR_min}, {SNR_max}] — rescaling.")
+
+        if verbose:
+            print(f"[Iteration {i+1}/{n_iterations}] SNR after scaling: {snr_current:.4f} "
+                  f"(target: {target_SNR:.4f})")
+            print(f"  SNR history: " +
+                  ", ".join(f"it{h['iteration']}→{h['snr']:.4f}@{h['cumulative_scale']:.4f}x"
+                            for h in snr_history))
+
+        # Last iteration is verify-only
+        if i == n_iterations - 1:
+            break
+
+        # Try empirical fit first; fall back to analytic
+        factor = _empirical_scale(snr_history, target_SNR, snr_noise_baseline)
+        if factor is None:
+            factor = _analytic_scale(snr_current, target_SNR, snr_noise_baseline)
             if verbose:
-                print(f"  Re-scaling distances by factor {distance_scaling_factor:.4f}...")
-            _apply_scale(population, distance_scaling_factor)
-            
+                print(f"  [analytic fallback] scaling factor={factor:.4f}")
+
+        # Sanity-clamp: don't let a single step move more than 10× in either direction
+        factor = float(np.clip(factor, 0.1, 10.0))
+        if verbose:
+            print(f"  Re-scaling distances by factor {factor:.4f}  "
+                  f"(cumulative after: {cumulative_scale * factor:.4f}×)")
+        _apply_scale(population, factor)
+        cumulative_scale *= factor
+
     if not keep_amplitudes_in_result:
         population.amp_A = {}
         population.amp_B = {}
@@ -1011,9 +1062,9 @@ def generate_consistent_population_distance_scaling(
             rss = _get_rss_mb()
             if rss is not None:
                 memory_profile['rss_mb']['after_drop_amplitudes'] = float(rss)
-    
+
     if snr_final is None:
-        snr_final = float(target_SNR)
+        snr_final = float(snr_current)
 
     if profile_clock and t_start is not None:
         timing_profile['total_s'] = time.perf_counter() - t_start
@@ -1021,7 +1072,7 @@ def generate_consistent_population_distance_scaling(
     if toggle_memory_profiling:
         current, peak = tracemalloc.get_traced_memory()
         memory_profile['traced_current_mb'] = float(current / 1024**2)
-        memory_profile['traced_peak_mb'] = float(peak / 1024**2)
+        memory_profile['traced_peak_mb']    = float(peak / 1024**2)
         rss = _get_rss_mb()
         if rss is not None:
             memory_profile['rss_mb']['end'] = float(rss)
@@ -1033,12 +1084,16 @@ def generate_consistent_population_distance_scaling(
                 print(f"  {label}: {mb:.1f} MB")
             print(f"  traced_peak_mb: {memory_profile['traced_peak_mb']:.1f} MB")
 
-    
+    if verbose:
+        print(f"\nFinal SNR history:")
+        for h in snr_history:
+            print(f"  it{h['iteration']:2d}: cumulative_scale={h['cumulative_scale']:.4f}×  SNR={h['snr']:.4f}")
 
-    n_binaries = len(population)
     return _build_result_distance_scaling(
         population=population,
         SNR_final=snr_final,
+        pta=pta,
+        psrs=enterprise_psrs,
         timing_profile=timing_profile if profile_clock else None,
         memory_profile=memory_profile if toggle_memory_profiling else None,
     )
@@ -1108,6 +1163,7 @@ def generate_snr_consistent_populations_distance_scaling(
             raw_noise_params=raw_noise_params,
             Tspan=Tspan,
             current_stoas=current_stoas,
+            return_psrs_pta=False,
             timer=profile,
             verbose=verbose,
             inject_eps=inject_eps,
