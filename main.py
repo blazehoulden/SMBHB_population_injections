@@ -24,7 +24,7 @@ from memory_profile import log_memory
 from consistent_pop_synth import compute_population_snr
 # from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
 from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
-from CGW_SNR import compute_cgw_snr_population
+from CGW_SNR import compute_cgw_snr_optimal_population, compute_population_gwb_psd_from_psrs, get_per_pulsar_covariance_from_population
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, save_results_dual, print_population_diagnostics, print_scaling_summary, compact_consistent_results_for_storage
 # from pulsar_noise_using_enterprise import get_noise_matrix
@@ -392,39 +392,70 @@ def main():
         N_TOP_SOURCES = 25   # loudest sources to report per population
 
         all_population_cgw_snrs = []
+        T_obs    = 15.0 * 365.25 * 24 * 3600   # 15 years in seconds
+        # Cadence: match your PTA cadence (~2 weeks for NANOGrav)
+        # but coarser is fine for GWB PSD — you just need f_max >> f_GW of your highest binary
+        cadence  = 14 * 24 * 3600              # 2 weeks in seconds
 
-        for pop_idx, result in enumerate(consistent_results["populations"]):
+        time_arr = np.arange(0, Tspan_seconds, cadence)  # uniform grid, seconds ***** this needs to be fixed up I believe *****
+        for pop_idx, result in enumerate(
+            consistent_results["populations"]
+        ):
+            print(f"\n--- Population {pop_idx + 1} ---")
             population = result["population"]
             pta = result["pta"]
             psrs = result["psrs"]
 
-            # --- Step 1: fast pre-filter by characteristic strain h_c ~ h0 / (2π f) ---
-            h_c = population.h0 / (2.0 * np.pi * population.f)
-            pre_filter_indices = np.argsort(h_c)[::-1][:N_PRE_FILTER]
-            pre_filtered = population[pre_filter_indices]
-
-            # --- Step 2: compute enterprise SNR for pre-filtered candidates ---
-            pre_filter_snrs = compute_cgw_snr_population(
-            pta=pta,
-            psrs=psrs,
-            noise_params=parsed_noise_params,
-            population=pre_filtered,
-        )
-            pre_filter_snrs = np.asarray(pre_filter_snrs)
-
-            # --- Step 3: keep the top N_TOP_SOURCES by SNR ---
-            top_indices = np.argsort(pre_filter_snrs)[::-1][:N_TOP_SOURCES]
-            top_snrs    = pre_filter_snrs[top_indices]
-            top_binaries = pre_filtered[top_indices]
-
-            print(f"\nPopulation {pop_idx + 1} — top {N_TOP_SOURCES} CGW candidates:")
-            for rank, i in enumerate(range(len(top_snrs)), start=1):
-                print(
-                    f"  {rank:2d}. f={top_binaries.f[i]:.2e} Hz  "
-                    f"h0={top_binaries.h0[i]:.2e}  SNR={top_snrs[i]:.3f}"
+            # GWB PSD from this specific population realisation
+            # (changes with distance scaling, so recomputed per population)
+            freqs_gwb, S_GWB = compute_population_gwb_psd_from_psrs(
+                    binaries  = population,
+                    psrs      = psrs,   # enterprise objects directly
+                    time_arr  = time_arr,
                 )
 
-            all_population_cgw_snrs.append(top_snrs.tolist())
+            # Covariance matrices — built once per population,
+            # reused for every CGW candidate within it
+            cov_matrices, chol_factors = get_per_pulsar_covariance_from_population(
+                psrs         = psrs,
+                pta          = pta,
+                noise_params = parsed_noise_params,
+                S_GWB        = S_GWB,
+                freqs_gwb    = freqs_gwb,
+            )
+
+            # Pre-filter by characteristic strain proxy h0 / (2 pi f)
+            pre_filtered = sorted(
+                population,
+                key=lambda b: b.h0 / (2.0 * np.pi * b.f),
+                reverse=True,
+            )[:N_PRE_FILTER]
+
+            pre_filter_snrs = compute_cgw_snr_optimal_population(
+                psrs          = psrs,
+                chol_factors  = chol_factors,
+                population    = pre_filtered,
+                verbose_top_n = 0,
+            )
+
+            top_sources = sorted(
+                zip(pre_filtered, pre_filter_snrs),
+                key=lambda x: x[1],
+                reverse=True,
+            )[:N_TOP_SOURCES]
+
+            top_binaries, top_snrs = zip(*top_sources) if top_sources else ([], [])
+
+            print(f"Top {N_TOP_SOURCES} CGW candidates:")
+            for rank, (b, snr) in enumerate(zip(top_binaries, top_snrs), start=1):
+                print(
+                    f"  {rank:2d}. f={b.f:.2e} Hz  "
+                    f"Mc={b.Mc:.2e} Msun  "
+                    f"h0={b.h0:.2e}  "
+                    f"SNR={snr:.3f}"
+                )
+
+            all_population_cgw_snrs.append(list(top_snrs))
 
 
     # ========== NG R&G COMPARISON ==========

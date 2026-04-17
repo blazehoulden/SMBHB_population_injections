@@ -941,41 +941,62 @@ def generate_consistent_population_distance_scaling(
             raise ValueError(f"Signal-only SNR {snr_signal_only:.4f} is non-positive.")
         return (snr_signal_only / snr_signal_target) ** 0.5
 
-    def _empirical_scale(history, target_SNR, snr_noise_baseline):
+    def _empirical_scale(history, target_SNR, snr_noise_baseline, cumulative_scale, verbose=False):
         """
-        Fit log(SNR_signal) vs log(cumulative_scale) to a power law using OLS,
-        then invert to find the cumulative scale that hits target_SNR_signal.
-        Falls back to the most-recent analytic estimate if <2 distinct points.
-
-        The model is:
-            log(SNR_sig) = alpha + beta * log(cum_scale)
-        Inverting:
-            cum_scale_target = exp( (log(SNR_sig_target) - alpha) / beta )
-        The *incremental* factor needed is cum_scale_target / current_cum_scale.
+        Strategy:
+        1. If we have points bracketing the target (one above, one below),
+        use bisection in log-scale — guaranteed monotonic convergence.
+        2. Otherwise fall back to OLS power-law extrapolation.
+        3. Final fallback: analytic single-point estimate.
         """
-        xs = np.log(np.array([h['cumulative_scale'] for h in history]))
-        ys = np.log(np.maximum(np.array([h['snr'] for h in history]) - snr_noise_baseline, 1e-12))
+        xs  = np.array([h['cumulative_scale'] for h in history])
+        snrs = np.array([h['snr'] for h in history])
+        snr_sig_target = max(target_SNR - snr_noise_baseline, 1e-12)
 
-        if len(set(xs)) < 2:          # not enough distinct points yet
+        # --- Check for a bracket ---
+        above = [(x, s) for x, s in zip(xs, snrs) if s >= target_SNR]
+        below = [(x, s) for x, s in zip(xs, snrs) if s <  target_SNR]
+
+        if above and below:
+            # We have a bracket — bisect in log(cumulative_scale) space
+            # Best above point: highest scale among those with SNR >= target (least overshoot)
+            # Best below point: highest scale among those with SNR < target (closest undershot)
+            best_above = max(above, key=lambda p: p[0])   # largest scale still above
+            best_below = max(below, key=lambda p: p[0])   # largest scale still below
+
+            log_mid = 0.5 * (np.log(best_above[0]) + np.log(best_below[0]))
+            cum_scale_target = np.exp(log_mid)
+            incremental = cum_scale_target / cumulative_scale
+
+            if verbose:
+                print(f"  [bisection] bracket: "
+                    f"below=({best_below[0]:.4f}×, SNR={best_below[1]:.4f})  "
+                    f"above=({best_above[0]:.4f}×, SNR={best_above[1]:.4f})  "
+                    f"→ mid={cum_scale_target:.4f}×  incremental={incremental:.4f}")
+            return incremental
+
+        # --- No bracket yet: OLS power-law extrapolation ---
+        ys = np.log(np.maximum(snrs - snr_noise_baseline, 1e-12))
+        log_xs = np.log(xs)
+
+        if len(set(log_xs)) < 2:
+            return None   # caller falls back to analytic
+
+        x_mean, y_mean = log_xs.mean(), ys.mean()
+        denom = np.dot(log_xs - x_mean, log_xs - x_mean)
+        if denom == 0:
             return None
 
-        # OLS: fit beta and alpha
-        x_mean, y_mean = xs.mean(), ys.mean()
-        beta  = np.dot(xs - x_mean, ys - y_mean) / np.dot(xs - x_mean, xs - x_mean)
+        beta  = np.dot(log_xs - x_mean, ys - y_mean) / denom
         alpha = y_mean - beta * x_mean
 
-        snr_signal_target = max(target_SNR - snr_noise_baseline, 1e-12)
-        log_cum_target    = (np.log(snr_signal_target) - alpha) / beta
-        cum_scale_target  = np.exp(log_cum_target)
-
-        # incremental factor = where we want to be / where we are now
-        current_cum_scale = history[-1]['cumulative_scale']
-        incremental       = cum_scale_target / current_cum_scale
+        log_cum_target   = (np.log(snr_sig_target) - alpha) / beta
+        cum_scale_target = np.exp(log_cum_target)
+        incremental      = cum_scale_target / cumulative_scale
 
         if verbose:
-            print(f"  [empirical] power-law fit: β={beta:.3f}  α={alpha:.3f}  "
-                  f"→ cum_scale_target={cum_scale_target:.4f}  "
-                  f"incremental factor={incremental:.4f}")
+            print(f"  [OLS] β={beta:.3f}  α={alpha:.3f}  "
+                f"→ cum_scale_target={cum_scale_target:.4f}×  incremental={incremental:.4f}")
         return incremental
 
     # ------------------------------------------------------------------ #
@@ -1041,7 +1062,7 @@ def generate_consistent_population_distance_scaling(
             break
 
         # Try empirical fit first; fall back to analytic
-        factor = _empirical_scale(snr_history, target_SNR, snr_noise_baseline)
+        factor = _empirical_scale(snr_history, target_SNR, snr_noise_baseline, cumulative_scale)
         if factor is None:
             factor = _analytic_scale(snr_current, target_SNR, snr_noise_baseline)
             if verbose:
