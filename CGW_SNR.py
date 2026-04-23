@@ -23,61 +23,40 @@ def compute_cgw_signal_enterprise(psr, binary):
     return s_a
 
 
-def compute_cgw_optimal_snr(psrs, pta, noise_params, binary):
-    """
-    Compute matched-filter SNR for a single CGW source.
-
-    Parameters
-    ----------
-    psrs         : list of enterprise Pulsar objects (e.g. psrs_clean),
-                   ordered consistently with how the PTA was constructed
-    pta          : enterprise PTA object
-    noise_params : noise parameter dict (e.g. ML noise params from OS run)
-    binary       : binary object with attributes (Mc, f, h0, ra, dec, iota,
-                   psi, phi0, D_comov, z)
-
-    Returns
-    -------
-    snr : float
-    """
+def compute_cgw_snr_optimal_population(psrs, pta, population, noise_params, profile=False):
+    # Compute these ONCE, reuse for every binary
+    if profile:
+        import time
+        start_time = time.time()
     phiinvs = pta.get_phiinv(noise_params, logdet=False)
     TNTs    = pta.get_TNT(noise_params)
     Ts      = pta.get_basis()
     Nvecs   = pta.get_ndiag(noise_params)
-
-    # pta.pulsars is a list of strings (names); zip against the actual objects
     psr_map = {psr.name: psr for psr in psrs}
 
-    rho_sq = 0.0
-    for psr_name, Nvec, TNT, phiinv, T in zip(pta.pulsars, Nvecs, TNTs, phiinvs, Ts):
-        psr = psr_map[psr_name]
-        Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
-        s_a = compute_cgw_signal_enterprise(psr, binary)
-        rho_sq += innerProduct_rr(s_a, s_a, Nvec, T, TNT, Sigma)
-
-    return np.sqrt(rho_sq)
-
-def compute_cgw_snr_optimal_population(
-    psrs:          list,
-    chol_factors:  dict,
-    population:    list,
-    verbose_top_n: int = 0,
-) -> list[float]:
-    """
-    Compute CGW SNR for each binary in population.
-    Cholesky factors must be precomputed once via
-    get_per_pulsar_covariance_from_population.
-    """
-    return [
-        compute_cgw_snr_single(
-            psrs         = psrs,
-            chol_factors = chol_factors,
-            binary       = binary,
-            verbose      = (i < verbose_top_n),
-        )
-        for i, binary in enumerate(population)
+    # Pre-build Sigma matrices once (also binary-independent)
+    Sigmas = [
+        TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
+        for TNT, phiinv in zip(TNTs, phiinvs)
     ]
 
+    if profile:
+        elapsed = time.time() - start_time
+        print(f"Precomputation of phiinvs, TNTs, Ts, Nvecs, Sigmas took {elapsed:.2f} seconds.")
+
+    results = []
+    for binary in population:
+        rho_sq = 0.0
+        for psr_name, Nvec, TNT, Sigma, T in zip(pta.pulsars, Nvecs, TNTs, Sigmas, Ts):
+            psr = psr_map[psr_name]
+            s_a = compute_cgw_signal_enterprise(psr, binary)
+            rho_sq += innerProduct_rr(s_a, s_a, Nvec, T, TNT, Sigma)
+        results.append(np.sqrt(rho_sq))
+
+    if profile:
+        elapsed = time.time() - start_time
+        print(f"Total SNR computation for population took {elapsed:.2f} seconds.")
+    return results
 
 
 def compute_population_gwb_psd(
@@ -337,6 +316,7 @@ def compute_population_gwb_psd_from_psrs(
         'f':           np.array([b.f                     for b in binaries]),
         'Mc':          np.array([b.Mc                    for b in binaries]),
         'D_comov':     np.array([b.D_comov               for b in binaries]),
+        'h0':          np.array([b.h0               for b in binaries]),
         'z':           np.array([b.z                     for b in binaries]),
         'ra':          np.array([b.ra                    for b in binaries]),
         'dec':         np.array([b.dec                   for b in binaries]),

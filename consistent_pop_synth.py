@@ -961,8 +961,8 @@ def generate_consistent_population_distance_scaling(
             # We have a bracket — bisect in log(cumulative_scale) space
             # Best above point: highest scale among those with SNR >= target (least overshoot)
             # Best below point: highest scale among those with SNR < target (closest undershot)
-            best_above = max(above, key=lambda p: p[0])   # largest scale still above
-            best_below = max(below, key=lambda p: p[0])   # largest scale still below
+            best_above = min(above, key=lambda p: abs(p[1] - target_SNR))  # FIXED: closest overshoot
+            best_below = max(below, key=lambda p: p[0])                     # FIXED: highest undershot scale
 
             log_mid = 0.5 * (np.log(best_above[0]) + np.log(best_below[0]))
             cum_scale_target = np.exp(log_mid)

@@ -355,7 +355,7 @@ def main():
             verbose=True,
             save_populations=True,
             profile=True,
-            n_iterations=3,
+            n_iterations=4,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -406,24 +406,6 @@ def main():
             pta = result["pta"]
             psrs = result["psrs"]
 
-            # GWB PSD from this specific population realisation
-            # (changes with distance scaling, so recomputed per population)
-            freqs_gwb, S_GWB = compute_population_gwb_psd_from_psrs(
-                    binaries  = population,
-                    psrs      = psrs,   # enterprise objects directly
-                    time_arr  = time_arr,
-                )
-
-            # Covariance matrices — built once per population,
-            # reused for every CGW candidate within it
-            cov_matrices, chol_factors = get_per_pulsar_covariance_from_population(
-                psrs         = psrs,
-                pta          = pta,
-                noise_params = parsed_noise_params,
-                S_GWB        = S_GWB,
-                freqs_gwb    = freqs_gwb,
-            )
-
             # Pre-filter by characteristic strain proxy h0 / (2 pi f)
             pre_filtered = sorted(
                 population,
@@ -431,11 +413,13 @@ def main():
                 reverse=True,
             )[:N_PRE_FILTER]
 
+            
             pre_filter_snrs = compute_cgw_snr_optimal_population(
                 psrs          = psrs,
-                chol_factors  = chol_factors,
-                population    = pre_filtered,
-                verbose_top_n = 0,
+                pta           = pta,
+                population    = population,
+                noise_params  = raw_noise_params,
+                profile       = True,
             )
 
             top_sources = sorted(
@@ -456,7 +440,15 @@ def main():
                 )
 
             all_population_cgw_snrs.append(list(top_snrs))
-
+        from plot_cgw_snr import plot_cgw_analysis
+        plot_cgw_analysis(
+            top_binaries=top_binaries,
+            top_snrs=top_snrs,
+            psrs=psrs,
+            save_path=f"figures/cgw_analysis_{CONFIG_NAME}.pdf",
+            style="dark_background",
+            annotate_top=5,
+        )
 
     # ========== NG R&G COMPARISON ==========
     if config.RUN_NG_RG_COMPARISON:

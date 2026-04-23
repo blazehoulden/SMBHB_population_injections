@@ -12,7 +12,7 @@ pc = 3.085677581e16   # Parsec [m]
 # Population configuration presets
 POPULATION_CONFIGS = {
     'optimistic': {
-        'n_binaries': 1_000,
+        'n_binaries': 500,
         'mass_distribution': 'power_law',
         'mass_cutoff_0': 1e9,
         'z_max': 2.0,

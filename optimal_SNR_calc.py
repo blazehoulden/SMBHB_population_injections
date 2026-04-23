@@ -1165,26 +1165,30 @@ def measured_strain_all_binaries_all_pulsars(
     bin_freqs: (B, 2*n_neighbours+1)     corresponding frequencies per binary
     delta_f  : (B,)                      bin width (same for all bins, per binary)
     """
-    B = bin_arrays.f.size
+    B = bin_arrays['f'].size
+    # B = bin_arrays.f.size # was previously this, changed 20/04/26 for new code with CGW, unsure if this will work with prev code
     N = pulsar_cache['raj_arr'].size
     K = 2 * n_neighbours + 1          # total bins returned per binary
+    ra = bin_arrays['ra']  # default to 0 if not provided
+    dec = bin_arrays['dec']  # default to 0
+    psi = bin_arrays['psi']  # default to 0
 
     # --- Antenna patterns, strain amplitude, phase (unchanged) ---
     Fp, Fx = antenna_response_vectorised(
         pulsar_cache['raj_arr'], pulsar_cache['decj_arr'],
-        bin_arrays.ra, bin_arrays.dec, bin_arrays.psi,
+        bin_arrays['ra'], bin_arrays['dec'], bin_arrays['psi'],
     )  # (B, N)
 
 
-    h0       = bin_arrays.h0                                # (B,)
+    h0       = bin_arrays['h0']                                # (B,)
 
 
-    cos_iota = np.cos(bin_arrays.iota)
+    cos_iota = np.cos(bin_arrays['iota'])
     A_plus   = h0 * (1.0 + cos_iota**2)   # (B,)
     A_cross  = h0 * (-2.0 * cos_iota)     # (B,)
 
-    phase = (2.0 * np.pi * bin_arrays.f[:, None] * time_arr[None, :]
-             + bin_arrays.phi0[:, None])          # (B, T)
+    phase = (2.0 * np.pi * bin_arrays['f'][:, None] * time_arr[None, :]
+             + bin_arrays['phi0'][:, None])          # (B, T)
 
     hp = A_plus[:, None]  * np.sin(phase)            # (B, T)
     hx = A_cross[:, None] * np.cos(phase)            # (B, T)
