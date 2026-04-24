@@ -72,12 +72,19 @@ import astropy.units as u
 # ──────────────────────────────────────────────────────────────────────────────
 # 1.  STRAIN AMPLITUDE  (unchanged from residuals.py, kept here for completeness)
 # ──────────────────────────────────────────────────────────────────────────────
+SOLAR_MASS = 1.989e30  # kg
 
-def strain_amplitude_vec(Mc_arr, f_arr, D_comov_arr, z_arr):
-    """Vectorised strain amplitude for N binaries.  Returns h0 of shape (N,)."""
-    f_rest   = 0.5 * (1 + z_arr) * f_arr
-    D_si     = D_comov_arr * 1e6 * pc
-    return (2 * (G * Mc_arr)**(5/3) * (2 * np.pi * f_rest)**(2/3)) / (c**4 * D_si)
+def strain_amplitude(Mc, fGW, d_comov, z):
+    """
+    Mc     : chirp mass in SOLAR MASSES
+    fGW    : GW frequency in Hz
+    d_comov: comoving distance in Mpc
+    z      : redshift
+    """
+    Mc_kg      = Mc * SOLAR_MASS          # convert to kg
+    f_rest_orb = 0.5 * fGW * (1 + z)
+    d_comov_si = d_comov * 1e6 * pc       # Mpc -> m
+    return (2 * (G * Mc_kg)**(5/3) * (2 * np.pi * f_rest_orb)**(2/3)) / (c**4 * d_comov_si)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -619,35 +626,42 @@ def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi, norm = True):
 
 def r_k(t, psr, binary):
     """Calculate timing residual from single circular SMBHB (Earth term only) This assumption holds for most cases (see Appendix in https://arxiv.org/pdf/1003.0677)."""
-    f = binary['f']
-    Mc = binary['Mc']
-    D_comov = binary['D_comov']
-    z = binary['z']
-    D_lum = D_comov * (1 + z) # in Mpc
-    ra = binary['ra']
-    dec = binary['dec']
-    psi = binary.get('psi', 0.0)
-    phi0 = binary.get('phi0', 0.0)
-    iota = binary.get('iota', 0.0)
+    # f = binary['f']
+    # Mc = binary['Mc']
+    # D_comov = binary['D_comov']
+    # z = binary['z']
+    # D_lum = D_comov * (1 + z) # in Mpc
+    # ra = binary['ra']
+    # dec = binary['dec']
+    # psi = binary.get('psi', 0.0)
+    # phi0 = binary.get('phi0', 0.0)
+    # iota = binary.get('iota', 0.0)
 
-    pars = psr.pars()
+    f = binary.f
+    ra = binary.ra
+    dec = binary.dec
+    psi = binary.psi
+    phi0 = binary.phi0
+    iota = binary.iota
+    h0 = binary.h0
 
-    if 'RAJ' not in pars or 'DECJ' not in pars:
-        elong = psr['ELONG'].val  # radians
-        elat  = psr['ELAT'].val   # radians
+    # pars = psr.pars()
 
-        coord = SkyCoord(lon=elong*u.rad, lat=elat*u.rad, frame='geocentricmeanecliptic')
-        equatorial = coord.icrs
+    # if 'RAJ' not in pars or 'DECJ' not in pars:
+    #     elong = psr['ELONG'].val  # radians
+    #     elat  = psr['ELAT'].val   # radians
 
-        psr_ra  = equatorial.ra.rad
-        psr_dec = equatorial.dec.rad
+    #     coord = SkyCoord(lon=elong*u.rad, lat=elat*u.rad, frame='geocentricmeanecliptic')
+    #     equatorial = coord.icrs
 
-    else:
-        psr_ra   = psr._raj
-        psr_dec  = psr._decj
+    #     psr_ra  = equatorial.ra.rad
+    #     psr_dec = equatorial.dec.rad
 
-    h0 = strain_amplitude(Mc, f, D_comov, z)
-    Fp, Fx = antenna_response(ra_psr, dec_psr, ra, dec, psi)
+    # else:
+    psr_ra   = psr._raj
+    psr_dec  = psr._decj
+
+    Fp, Fx = antenna_response(psr_ra, psr_dec, ra, dec, psi)
 
     t_ref = t[0]
     t_rel = t - t_ref
@@ -875,40 +889,34 @@ def _gw_residuals_vec(t, psr, population):
     """
     N = len(population)
 
-    f_arr    = np.array([b['f']              for b in population])  # (N,)
-    Mc_arr   = np.array([b['Mc']             for b in population])
-    Dcom_arr = np.array([b['D_comov']        for b in population])
-    z_arr    = np.array([b['z']              for b in population])
-    ra_arr   = np.array([b['ra']             for b in population])
-    dec_arr  = np.array([b['dec']            for b in population])
-    psi_arr  = np.array([b.get('psi',  0.0) for b in population])
-    phi0_arr = np.array([b.get('phi0', 0.0) for b in population])
-    iota_arr = np.array([b.get('iota', 0.0) for b in population])
-
-    # Strain amplitudes (N,)
-    f_rest   = 0.5 * (1 + z_arr) * f_arr
-    Dcom_si  = Dcom_arr * 1e6 * pc
-    h0_arr   = (2 * (G * Mc_arr)**(5/3) * (2*np.pi*f_rest)**(2/3)) / (c**4 * Dcom_si)
+    f_arr    = np.array([b.f              for b in population])  # (N,)
+    z_arr    = np.array([b.z              for b in population])
+    ra_arr   = np.array([b.ra             for b in population])
+    dec_arr  = np.array([b.dec            for b in population])
+    psi_arr  = np.array([b.psi            for b in population])
+    phi0_arr = np.array([b.phi0           for b in population])
+    iota_arr = np.array([b.iota           for b in population])
+    h0_arr   = np.array([b.h0             for b in population])  # optional pre-computed h0
     
-    pars = psr.pars()
+    # pars = psr.pars()
 
-    if 'RAJ' not in pars or 'DECJ' not in pars:
-        elong = psr['ELONG'].val  # radians
-        elat  = psr['ELAT'].val   # radians
+    # if 'RAJ' not in pars or 'DECJ' not in pars:
+    #     elong = psr['ELONG'].val  # radians
+    #     elat  = psr['ELAT'].val   # radians
 
-        coord = SkyCoord(lon=elong*u.rad, lat=elat*u.rad, frame='geocentricmeanecliptic')
-        equatorial = coord.icrs
+    #     coord = SkyCoord(lon=elong*u.rad, lat=elat*u.rad, frame='geocentricmeanecliptic')
+    #     equatorial = coord.icrs
 
-        psr_ra  = equatorial.ra.rad
-        psr_dec = equatorial.dec.rad
+    #     psr_ra  = equatorial.ra.rad
+    #     psr_dec = equatorial.dec.rad
 
-    else:
-        psr_ra   = psr._raj
-        psr_dec  = psr._decj
+    # else:
+    psr_ra   = psr._raj
+    psr_dec  = psr._decj
 
     # Antenna patterns (N,)
     Fp_arr, Fx_arr = _antenna_response_vec(
-        ra_psr, dec_psr, ra_arr, dec_arr, psi_arr
+        psr_ra, psr_dec, ra_arr, dec_arr, psi_arr
     )
 
     # Phase matrix (N_toas, N)
@@ -1018,6 +1026,62 @@ def population_residuals_vectorised(
 
     return total_r
 
+
+# Method for CGW calculation
+def gw_residuals_matrix(t, psr, population):
+    """
+    Returns GW residuals for ALL binaries simultaneously.
+    
+    Shape: (B, n_toa) — one row per binary, NOT summed.
+    
+    This is _gw_residuals_vec but returning before the np.sum,
+    so the vectorised inner product loop can use it directly.
+    
+    Parameters
+    ----------
+    t          : (n_toa,) TOA array in seconds
+    psr        : enterprise Pulsar object
+    population : list of B binary objects
+    
+    Returns
+    -------
+    R : (B, n_toa) ndarray in seconds
+    """
+    B = len(population)
+
+    f_arr    = np.array([b.f       for b in population])   # (B,)
+    ra_arr   = np.array([b.ra      for b in population])
+    dec_arr  = np.array([b.dec     for b in population])
+    psi_arr  = np.array([b.psi     for b in population])
+    phi0_arr = np.array([b.phi0    for b in population])
+    iota_arr = np.array([b.iota    for b in population])
+    h0_arr   = np.array([b.h0      for b in population])
+
+
+    # Pulsar sky position
+    psr_ra  = psr._raj
+    psr_dec = psr._decj
+
+    # Antenna patterns (B,)
+    Fp_arr, Fx_arr = _antenna_response_vec(
+        psr_ra, psr_dec, ra_arr, dec_arr, psi_arr
+    )
+
+    # Phase: (n_toa, B) then transpose to (B, n_toa)
+    t_rel = (t - t[0])[:, None]                        # (n_toa, 1)
+    phase = 2*np.pi * f_arr[None, :] * t_rel \
+            + phi0_arr[None, :]                         # (n_toa, B)
+
+    # Weighted polarisations (n_toa, B)
+    weighted = (
+        Fp_arr * h0_arr * (1 + np.cos(iota_arr)**2) * np.sin(phase)
+      + Fx_arr * h0_arr * (-2 * np.cos(iota_arr))   * np.cos(phase)
+    )                                                   # (n_toa, B)
+
+    # Divide by 2pi*f per binary, transpose to (B, n_toa)
+    R = (weighted / (2*np.pi*f_arr[None, :])).T         # (B, n_toa)
+
+    return R
 
 def make_ideal_nofit(psr):
     """Zero residuals without refitting - avoids singular matrix issues with GLS timing models."""

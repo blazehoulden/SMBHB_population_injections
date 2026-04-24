@@ -118,7 +118,7 @@ def plot_mc_vs_distance(ax, binaries, snrs, cmap, norm, annotate_top=5):
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(r"$\mathcal{M}_c$ [M_$\odot$]")
+    ax.set_xlabel(r"$\mathcal{M}_c$ [M$_\odot$]")
     ax.set_ylabel(r"$D_{\rm comov}$ [Mpc]")
     ax.grid(True, which="both", ls="--", lw=0.4, alpha=0.4)
 
@@ -186,6 +186,15 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
     # equator
     xs, ys = _aitoff_xy(ra_grid, np.zeros_like(ra_grid))
     ax.plot(xs, ys, color="0.5", lw=0.8, zorder=1)
+
+    # ---- draw Aitoff projection boundary ----
+    # Right edge (RA = 0)
+    xs, ys = _aitoff_xy(np.zeros_like(dec_grid), dec_grid)
+    ax.plot(xs, ys, color="0.5", lw=1.0, zorder=2)
+    
+    # Left edge (RA = π, the seam)
+    xs, ys = _aitoff_xy(np.full_like(dec_grid, np.pi), dec_grid)
+    ax.plot(xs, ys, color="0.5", lw=1.0, zorder=2)
 
     # ---- pulsars ----
     for psr in psrs:

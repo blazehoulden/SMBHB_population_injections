@@ -2,7 +2,7 @@ import numpy as np
 from enterprise_extensions.frequentist.Fe_statistic import innerProduct_rr
 from enterprise_extensions.deterministic import cw_delay
 from optimal_SNR_calc import measured_strain_all_binaries_all_pulsars
-
+from signal_injection import population_residuals
 def compute_cgw_signal_enterprise(psr, binary):
     """Compute CGW timing residual signal for a single pulsar using enterprise."""
     s_a = cw_delay(
@@ -23,15 +23,15 @@ def compute_cgw_signal_enterprise(psr, binary):
     return s_a
 
 
-def compute_cgw_snr_optimal_population(psrs, pta, population, noise_params, profile=False):
+def compute_cgw_snr_optimal_population(psrs, pta, population, raw_noise_params, parsed_noise_params, Tspan, profile=False):
     # Compute these ONCE, reuse for every binary
     if profile:
         import time
         start_time = time.time()
-    phiinvs = pta.get_phiinv(noise_params, logdet=False)
-    TNTs    = pta.get_TNT(noise_params)
+    phiinvs = pta.get_phiinv(raw_noise_params, logdet=False)
+    TNTs    = pta.get_TNT(raw_noise_params)
     Ts      = pta.get_basis()
-    Nvecs   = pta.get_ndiag(noise_params)
+    Nvecs   = pta.get_ndiag(raw_noise_params)
     psr_map = {psr.name: psr for psr in psrs}
 
     # Pre-build Sigma matrices once (also binary-independent)
@@ -49,7 +49,9 @@ def compute_cgw_snr_optimal_population(psrs, pta, population, noise_params, prof
         rho_sq = 0.0
         for psr_name, Nvec, TNT, Sigma, T in zip(pta.pulsars, Nvecs, TNTs, Sigmas, Ts):
             psr = psr_map[psr_name]
-            s_a = compute_cgw_signal_enterprise(psr, binary)
+            psr_noise_params = parsed_noise_params[psr_name]
+            s_a = population_residuals(psr.toas, psr, [binary], Tspan, psr_noise_params)
+            # s_a = compute_cgw_signal_enterprise(psr, binary)
             rho_sq += innerProduct_rr(s_a, s_a, Nvec, T, TNT, Sigma)
         results.append(np.sqrt(rho_sq))
 

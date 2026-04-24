@@ -355,7 +355,7 @@ def main():
             verbose=True,
             save_populations=True,
             profile=True,
-            n_iterations=4,
+            n_iterations=1,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -389,7 +389,7 @@ def main():
             )
 
         N_PRE_FILTER  = 1000  # candidates pre-screened by characteristic strain proxy
-        N_TOP_SOURCES = 25   # loudest sources to report per population
+        N_TOP_SOURCES = 50   # loudest sources to report per population
 
         all_population_cgw_snrs = []
         T_obs    = 15.0 * 365.25 * 24 * 3600   # 15 years in seconds
@@ -417,23 +417,38 @@ def main():
             pre_filter_snrs = compute_cgw_snr_optimal_population(
                 psrs          = psrs,
                 pta           = pta,
-                population    = population,
-                noise_params  = raw_noise_params,
+                population    = pre_filtered,
+                raw_noise_params  = raw_noise_params,
+                parsed_noise_params = parsed_noise_params,
+                Tspan         = Tspan_seconds,
                 profile       = True,
             )
 
-            top_sources = sorted(
-                zip(pre_filtered, pre_filter_snrs),
-                key=lambda x: x[1],
+            ranked_sources = sorted(
+                (
+                    {
+                        "proxy_rank": proxy_rank,
+                        "binary": binary,
+                        "snr": snr,
+                    }
+                    for proxy_rank, (binary, snr) in enumerate(zip(pre_filtered, pre_filter_snrs), start=1)
+                ),
+                key=lambda x: x["snr"],
                 reverse=True,
-            )[:N_TOP_SOURCES]
+            )
+            top_sources = ranked_sources[:N_TOP_SOURCES]
 
-            top_binaries, top_snrs = zip(*top_sources) if top_sources else ([], [])
+            top_binaries = [entry["binary"] for entry in top_sources]
+            top_snrs = [entry["snr"] for entry in top_sources]
 
             print(f"Top {N_TOP_SOURCES} CGW candidates:")
-            for rank, (b, snr) in enumerate(zip(top_binaries, top_snrs), start=1):
+            for snr_rank, entry in enumerate(top_sources, start=1):
+                b = entry["binary"]
+                snr = entry["snr"]
+                proxy_rank = entry["proxy_rank"]
                 print(
-                    f"  {rank:2d}. f={b.f:.2e} Hz  "
+                    f"  {snr_rank:2d}. proxy_rank={proxy_rank:4d}  "
+                    f"f={b.f:.2e} Hz  "
                     f"Mc={b.Mc:.2e} Msun  "
                     f"h0={b.h0:.2e}  "
                     f"SNR={snr:.3f}"
