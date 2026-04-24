@@ -408,8 +408,15 @@ def main():
 
             # Pre-filter by characteristic strain proxy h0 / (2 pi f)
             pre_filtered = sorted(
-                population,
-                key=lambda b: b.h0 / (2.0 * np.pi * b.f),
+                (
+                    {
+                        "global_index": idx,
+                        "binary": b,
+                        "proxy": b.h0 / (2.0 * np.pi * b.f),
+                    }
+                    for idx, b in enumerate(population)
+                ),
+                key=lambda item: item["proxy"],
                 reverse=True,
             )[:N_PRE_FILTER]
 
@@ -417,7 +424,7 @@ def main():
             pre_filter_snrs = compute_cgw_snr_optimal_population(
                 psrs          = psrs,
                 pta           = pta,
-                population    = pre_filtered,
+                population    = [item["binary"] for item in pre_filtered],
                 raw_noise_params  = raw_noise_params,
                 parsed_noise_params = parsed_noise_params,
                 Tspan         = Tspan_seconds,
@@ -428,10 +435,12 @@ def main():
                 (
                     {
                         "proxy_rank": proxy_rank,
-                        "binary": binary,
+                        "global_index": item["global_index"],
+                        "proxy_value": item["proxy"],
+                        "binary": item["binary"],
                         "snr": snr,
                     }
-                    for proxy_rank, (binary, snr) in enumerate(zip(pre_filtered, pre_filter_snrs), start=1)
+                    for proxy_rank, (item, snr) in enumerate(zip(pre_filtered, pre_filter_snrs), start=1)
                 ),
                 key=lambda x: x["snr"],
                 reverse=True,
@@ -455,6 +464,44 @@ def main():
                 )
 
             all_population_cgw_snrs.append(list(top_snrs))
+
+            # Persist CGW candidate diagnostics into the same compact save object.
+            if "populations" in compact_results and pop_idx < len(compact_results["populations"]):
+                compact_results["populations"][pop_idx]["cgw_analysis"] = {
+                    "n_pre_filter": int(N_PRE_FILTER),
+                    "n_top_sources": int(N_TOP_SOURCES),
+                    "top_sources": [
+                        {
+                            "snr_rank": int(snr_rank),
+                            "proxy_rank": int(entry["proxy_rank"]),
+                            "global_index": int(entry["global_index"]),
+                            "proxy_value": float(entry["proxy_value"]),
+                            "snr": float(entry["snr"]),
+                            "f": float(entry["binary"].f),
+                            "Mc": float(entry["binary"].Mc),
+                            "h0": float(entry["binary"].h0),
+                            "D_comov": float(entry["binary"].D_comov),
+                            "z": float(entry["binary"].z),
+                            "ra": float(entry["binary"].ra),
+                            "dec": float(entry["binary"].dec),
+                            "psi": float(entry["binary"].psi),
+                            "iota": float(entry["binary"].iota),
+                            "phi0": float(entry["binary"].phi0),
+                        }
+                        for snr_rank, entry in enumerate(top_sources, start=1)
+                    ],
+                }
+
+        compact_results["cgw_analysis"] = {
+            "enabled": True,
+            "n_populations": int(len(all_population_cgw_snrs)),
+            "n_pre_filter": int(N_PRE_FILTER),
+            "n_top_sources": int(N_TOP_SOURCES),
+            "snr_lists_top_only": [[float(v) for v in snrs] for snrs in all_population_cgw_snrs],
+        }
+
+        # Re-save the same consistent-population file with CGW diagnostics included.
+        save_results_dual(compact_results, save_path, save_compact_npz=False)
         from plot_cgw_snr import plot_cgw_analysis
         plot_cgw_analysis(
             top_binaries=top_binaries,
