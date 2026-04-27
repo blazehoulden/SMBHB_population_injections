@@ -188,12 +188,12 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
     ax.plot(xs, ys, color="0.5", lw=0.8, zorder=1)
 
     # ---- draw Aitoff projection boundary ----
-    # Right edge (RA = 0)
+    # Left edge (RA = 0)
     xs, ys = _aitoff_xy(np.zeros_like(dec_grid), dec_grid)
     ax.plot(xs, ys, color="0.5", lw=1.0, zorder=2)
     
-    # Left edge (RA = π, the seam)
-    xs, ys = _aitoff_xy(np.full_like(dec_grid, np.pi), dec_grid)
+    # Right edge (RA = 2π)
+    xs, ys = _aitoff_xy(np.full_like(dec_grid, 2 * np.pi), dec_grid)
     ax.plot(xs, ys, color="0.5", lw=1.0, zorder=2)
 
     # ---- pulsars ----
