@@ -942,53 +942,61 @@ def generate_consistent_population_distance_scaling(
         return (snr_signal_only / snr_signal_target) ** 0.5
 
     def _empirical_scale(history, target_SNR, snr_noise_baseline, cumulative_scale, verbose=False):
-        """
-        Strategy:
-        1. If we have points bracketing the target (one above, one below),
-        use bisection in log-scale — guaranteed monotonic convergence.
-        2. Otherwise fall back to OLS power-law extrapolation.
-        3. Final fallback: analytic single-point estimate.
-        """
-        xs  = np.array([h['cumulative_scale'] for h in history])
+        xs   = np.array([h['cumulative_scale'] for h in history])
         snrs = np.array([h['snr'] for h in history])
         snr_sig_target = max(target_SNR - snr_noise_baseline, 1e-12)
 
-        # --- Check for a bracket ---
         above = [(x, s) for x, s in zip(xs, snrs) if s >= target_SNR]
         below = [(x, s) for x, s in zip(xs, snrs) if s <  target_SNR]
 
         if above and below:
-            # We have a bracket — bisect in log(cumulative_scale) space
-            # Best above point: highest scale among those with SNR >= target (least overshoot)
-            # Best below point: highest scale among those with SNR < target (closest undershot)
-            best_above = min(above, key=lambda p: abs(p[1] - target_SNR))  # FIXED: closest overshoot
-            best_below = max(below, key=lambda p: p[0])                     # FIXED: highest undershot scale
+            # SNR decreases as distance scale increases (h0 ∝ 1/D, SNR ∝ h0).
+            # So: "above" points have SMALLER cumulative_scale, "below" have LARGER.
+            # Pick the tightest bracket: largest scale in "above", smallest scale in "below".
+            best_above = max(above, key=lambda p: p[0])   # closest above (largest scale, least overshoot)
+            best_below = min(below, key=lambda p: p[0])   # closest below (smallest scale, least undershoot)
+
+            # Guard against degenerate bracket (shouldn't happen, but float safety)
+            if abs(best_above[0] - best_below[0]) < 1e-10:
+                if verbose:
+                    print(f"  [bisection] degenerate bracket, falling back to analytic")
+                return None
 
             log_mid = 0.5 * (np.log(best_above[0]) + np.log(best_below[0]))
             cum_scale_target = np.exp(log_mid)
+
+            # If midpoint is effectively where we already are, nudge toward the above point
+            if abs(cum_scale_target - cumulative_scale) / cumulative_scale < 1e-4:
+                cum_scale_target = best_above[0]
+                if verbose:
+                    print(f"  [bisection] midpoint too close to current, jumping to best_above={best_above[0]:.6f}")
+
             incremental = cum_scale_target / cumulative_scale
 
             if verbose:
                 print(f"  [bisection] bracket: "
-                    f"below=({best_below[0]:.4f}×, SNR={best_below[1]:.4f})  "
-                    f"above=({best_above[0]:.4f}×, SNR={best_above[1]:.4f})  "
-                    f"→ mid={cum_scale_target:.4f}×  incremental={incremental:.4f}")
+                    f"below=({best_below[0]:.6f}×, SNR={best_below[1]:.4f})  "
+                    f"above=({best_above[0]:.6f}×, SNR={best_above[1]:.4f})  "
+                    f"→ mid={cum_scale_target:.6f}×  incremental={incremental:.6f}")
             return incremental
 
         # --- No bracket yet: OLS power-law extrapolation ---
         ys = np.log(np.maximum(snrs - snr_noise_baseline, 1e-12))
         log_xs = np.log(xs)
 
-        if len(set(log_xs)) < 2:
-            return None   # caller falls back to analytic
+        if len(set(np.round(log_xs, 10))) < 2:
+            return None
 
         x_mean, y_mean = log_xs.mean(), ys.mean()
         denom = np.dot(log_xs - x_mean, log_xs - x_mean)
-        if denom == 0:
+        if denom < 1e-14:
             return None
 
         beta  = np.dot(log_xs - x_mean, ys - y_mean) / denom
         alpha = y_mean - beta * x_mean
+
+        if beta == 0:
+            return None
 
         log_cum_target   = (np.log(snr_sig_target) - alpha) / beta
         cum_scale_target = np.exp(log_cum_target)
@@ -996,7 +1004,7 @@ def generate_consistent_population_distance_scaling(
 
         if verbose:
             print(f"  [OLS] β={beta:.3f}  α={alpha:.3f}  "
-                f"→ cum_scale_target={cum_scale_target:.4f}×  incremental={incremental:.4f}")
+                f"→ cum_scale_target={cum_scale_target:.6f}×  incremental={incremental:.6f}")
         return incremental
 
     # ------------------------------------------------------------------ #
