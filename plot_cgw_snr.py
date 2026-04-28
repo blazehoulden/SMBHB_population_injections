@@ -230,7 +230,7 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
     from matplotlib.lines import Line2D
     handles = [
         Line2D([0], [0], marker="o",  color="w", markerfacecolor=cmap(0.8),
-               markersize=9, label="CGW binary (size ∝ SNR)"),
+               markersize=9, label="SMBHB"),
         Line2D([0], [0], marker=star_path, color="w", markerfacecolor="#E24B4A",
                markersize=9, label="Pulsar"),
     ]
@@ -283,7 +283,6 @@ def plot_cgw_analysis(
 
     with plt.style.context(style):
         fig = plt.figure(figsize=figsize, constrained_layout=False)
-        fig.suptitle("CGW candidate properties — optimal SNR", fontsize=13, y=0.98)
 
         gs = gridspec.GridSpec(3, 1, figure=fig, hspace=0.35, wspace=0.32,
                                left=0.08, right=0.93, top=0.93, bottom=0.07)
@@ -304,7 +303,8 @@ def plot_cgw_analysis(
         cbar.set_label("Optimal SNR", fontsize=10)
 
         if save_path is not None:
-            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            fig.savefig(save_path.replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
             print(f"Saved to {save_path}")
         else:
             plt.show()

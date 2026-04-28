@@ -7,6 +7,7 @@ import os
 import sys
 
 from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling, suppress_enterprise_warnings
+from debug.test_CGW_sky_loc import sky_sensitivity_weight, test_sky_CGW_SNR_location
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import argparse
 import config
@@ -215,6 +216,9 @@ def main():
         population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
     # print_population_diagnostics(population)
     
+    # Used to make a sky sensitivity map for CGW SNR analysis later, the same for each network of pulsars since it only depends on pulsar sky locations.
+    # _, _ = test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
+    
     # ========== INITIAL INJECTION (OPTIONAL) ==========
     if config.RUN_INITIAL_INJECTION_ANALYSIS:
         print("\n" + "="*70)
@@ -355,7 +359,7 @@ def main():
             verbose=True,
             save_populations=True,
             profile=True,
-            n_iterations=1,
+            n_iterations=4,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -388,31 +392,35 @@ def main():
                 "CGW_SNR_ANALYSIS requires RUN_CONSISTENT_POP_SYNTH to have run first."
             )
 
-        N_PRE_FILTER  = 1000  # candidates pre-screened by characteristic strain proxy
-        N_TOP_SOURCES = 50   # loudest sources to report per population
+        N_PRE_FILTER  = 1000
+        N_TOP_SOURCES = 50
 
         all_population_cgw_snrs = []
-        T_obs    = 15.0 * 365.25 * 24 * 3600   # 15 years in seconds
-        # Cadence: match your PTA cadence (~2 weeks for NANOGrav)
-        # but coarser is fine for GWB PSD — you just need f_max >> f_GW of your highest binary
-        cadence  = 14 * 24 * 3600              # 2 weeks in seconds
+        T_obs    = 15.0 * 365.25 * 24 * 3600
+        cadence  = 14 * 24 * 3600
+        time_arr = np.arange(0, Tspan_seconds, cadence)
 
-        time_arr = np.arange(0, Tspan_seconds, cadence)  # uniform grid, seconds ***** this needs to be fixed up I believe *****
-        for pop_idx, result in enumerate(
-            consistent_results["populations"]
-        ):
+        for pop_idx, result in enumerate(consistent_results["populations"]):
             print(f"\n--- Population {pop_idx + 1} ---")
             population = result["population"]
-            pta = result["pta"]
-            psrs = result["psrs"]
+            pta        = result["pta"]
+            psrs       = result["psrs"]
 
-            # Pre-filter by characteristic strain proxy h0 / (2 pi f)
+            # ------------------------------------------------------------------
+            # Pre-filter: h0/(2πf)  ×  sky_weight
+            # sky_weight ~ 1 at median sky sensitivity, up to ~3 at hotspots.
+            # This lifts hotspot binaries that would otherwise be buried by the
+            # crude h0 proxy and suppresses coldspot binaries that waste SNR
+            # compute budget.
+            # ------------------------------------------------------------------
             pre_filtered = sorted(
                 (
                     {
                         "global_index": idx,
                         "binary": b,
-                        "proxy": b.h0 / (2.0 * np.pi * b.f),
+                        "sky_weight": sky_sensitivity_weight(b.ra, b.dec),
+                        "proxy": (b.h0 / (2.0 * np.pi * b.f))
+                                * sky_sensitivity_weight(b.ra, b.dec),
                     }
                     for idx, b in enumerate(population)
                 ),
@@ -420,27 +428,29 @@ def main():
                 reverse=True,
             )[:N_PRE_FILTER]
 
-            
             pre_filter_snrs = compute_cgw_snr_optimal_population(
-                psrs          = psrs,
-                pta           = pta,
-                population    = [item["binary"] for item in pre_filtered],
-                raw_noise_params  = raw_noise_params,
+                psrs                = psrs,
+                pta                 = pta,
+                population          = [item["binary"] for item in pre_filtered],
+                raw_noise_params    = raw_noise_params,
                 parsed_noise_params = parsed_noise_params,
-                Tspan         = Tspan_seconds,
-                profile       = True,
+                Tspan               = Tspan_seconds,
+                profile             = True,
             )
 
             ranked_sources = sorted(
                 (
                     {
-                        "proxy_rank": proxy_rank,
+                        "proxy_rank":  proxy_rank,
                         "global_index": item["global_index"],
                         "proxy_value": item["proxy"],
-                        "binary": item["binary"],
-                        "snr": snr,
+                        "sky_weight":  item["sky_weight"],
+                        "binary":      item["binary"],
+                        "snr":         snr,
                     }
-                    for proxy_rank, (item, snr) in enumerate(zip(pre_filtered, pre_filter_snrs), start=1)
+                    for proxy_rank, (item, snr) in enumerate(
+                        zip(pre_filtered, pre_filter_snrs), start=1
+                    )
                 ),
                 key=lambda x: x["snr"],
                 reverse=True,
@@ -448,15 +458,17 @@ def main():
             top_sources = ranked_sources[:N_TOP_SOURCES]
 
             top_binaries = [entry["binary"] for entry in top_sources]
-            top_snrs = [entry["snr"] for entry in top_sources]
+            top_snrs     = [entry["snr"]    for entry in top_sources]
 
             print(f"Top {N_TOP_SOURCES} CGW candidates:")
             for snr_rank, entry in enumerate(top_sources, start=1):
-                b = entry["binary"]
-                snr = entry["snr"]
+                b          = entry["binary"]
+                snr        = entry["snr"]
                 proxy_rank = entry["proxy_rank"]
+                sky_w      = entry["sky_weight"]
                 print(
                     f"  {snr_rank:2d}. proxy_rank={proxy_rank:4d}  "
+                    f"sky_w={sky_w:.2f}  "
                     f"f={b.f:.2e} Hz  "
                     f"Mc={b.Mc:.2e} Msun  "
                     f"h0={b.h0:.2e}  "
