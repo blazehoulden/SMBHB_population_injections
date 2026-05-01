@@ -3,6 +3,7 @@ from enterprise_extensions.frequentist.Fe_statistic import innerProduct_rr
 from enterprise_extensions.deterministic import cw_delay
 from optimal_SNR_calc import measured_strain_all_binaries_all_pulsars
 from signal_injection import population_residuals
+from scipy.linalg import cho_factor, cho_solve
 def compute_cgw_signal_enterprise(psr, binary):
     """Compute CGW timing residual signal for a single pulsar using enterprise."""
     s_a = cw_delay(
@@ -58,6 +59,89 @@ def compute_cgw_snr_optimal_population(psrs, pta, population, raw_noise_params, 
     if profile:
         elapsed = time.time() - start_time
         print(f"Total SNR computation for population took {elapsed:.2f} seconds.")
+    return results
+
+
+def compute_cgw_snr_optimal_population_with_gwb(
+    psrs,
+    pta,
+    population,
+    raw_noise_params,
+    parsed_noise_params,
+    Tspan,
+    profile=False,
+    cadence_days: float = 14.0,
+):
+    """
+    Compute per-source optimal CGW SNRs including the SGWB (discrete-population)
+    contribution to the per-pulsar covariance. This method:
+
+    1. Builds a time-array using `cadence_days` and `Tspan`.
+    2. Computes the population GWB timing-residual PSD via
+       `compute_population_gwb_psd_from_psrs`.
+    3. Builds per-pulsar covariance matrices and Cholesky factors using
+       `get_per_pulsar_covariance_from_population`.
+    4. For each binary, computes s_a (timing residual at each pulsar) and
+       evaluates s_a^T C_a^{-1} s_a via Cholesky solves.
+
+    Returns
+    -------
+    results : list[float]
+        optimal SNR for each binary in the provided population (same order).
+    """
+    if profile:
+        import time
+        start_time = time.time()
+
+    # Build time array (seconds) using a default cadence similar to the main
+    cadence = float(cadence_days) * 24.0 * 3600.0
+    time_arr = np.arange(0.0, Tspan, cadence)
+
+    # Compute GWB PSD from the discrete population on this time grid
+    freqs_gwb, S_GWB = compute_population_gwb_psd_from_psrs(population, psrs, time_arr)
+
+    if profile:
+        print(f"Computed population GWB PSD on grid (F={len(freqs_gwb)})")
+
+    # Build per-pulsar covariance matrices and Cholesky factors that include
+    # the SGWB auto-covariance (C_a = N_a + S_RN,a + C_GWB,a)
+    cov_matrices, chol_factors = get_per_pulsar_covariance_from_population(
+        psrs=psrs,
+        pta=pta,
+        noise_params=raw_noise_params,
+        S_GWB=S_GWB,
+        freqs_gwb=freqs_gwb,
+    )
+
+    if profile:
+        print("Built per-pulsar covariances and Cholesky factors including SGWB")
+
+    # Local import to avoid adding top-level dependency if unused elsewhere
+    from scipy.linalg import cho_solve
+
+    results = []
+    for binary in population:
+        rho_sq = 0.0
+        for psr in psrs:
+            # Get the injected signal (timing residual) for this pulsar and binary
+            psr_noise_params = parsed_noise_params.get(psr.name, {})
+            s_a = population_residuals(psr.toas, psr, [binary], Tspan, psr_noise_params)
+
+            # cho_solve expects the cho_factor output from scipy.linalg. Use
+            # the precomputed Cholesky factor for this pulsar.
+            chol = chol_factors.get(psr.name)
+            if chol is None:
+                # Fallback: skip this pulsar (should not normally happen)
+                continue
+            contrib = float(np.real(s_a @ cho_solve(chol, s_a)))
+            rho_sq += max(contrib, 0.0)
+
+        results.append(np.sqrt(rho_sq))
+
+    if profile:
+        elapsed = time.time() - start_time
+        print(f"Total SNR computation (with SGWB) for population took {elapsed:.2f} seconds.")
+
     return results
 
 

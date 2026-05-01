@@ -749,9 +749,9 @@ def plot_binaries_vs_frequency(
     
     plt.xscale('log')
     plt.yscale('log')
-    plt.xlabel('Gravitational Wave Frequency [Hz]', fontsize=12, fontweight='bold')
-    plt.ylabel('Number of binaries', fontsize=12, fontweight='bold')
-    plt.title(f'Binaries by GW frequency ({subset_name})', fontsize=13, fontweight='bold')
+    plt.xlabel(r'$f$ [Hz]', fontsize=12)
+    plt.ylabel('Number of binaries', fontsize=12)
+    # plt.title(f'Binaries by GW frequency ({subset_name})', fontsize=13, fontweight='bold')
     
     # Setup ticks
     ax = plt.gca()

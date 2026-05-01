@@ -237,8 +237,6 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
     ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.6)
 
     ax.set_axis_off()
-    ax.set_title("Sky positions", fontsize=11)
-
 
 # ---------------------------------------------------------------------------
 # Master function

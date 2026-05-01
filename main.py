@@ -392,7 +392,7 @@ def main():
                 "CGW_SNR_ANALYSIS requires RUN_CONSISTENT_POP_SYNTH to have run first."
             )
 
-        N_PRE_FILTER  = 1000
+        N_PRE_FILTER  = 2000
         N_TOP_SOURCES = 50
 
         all_population_cgw_snrs = []
@@ -529,19 +529,22 @@ def main():
         print("\n" + "="*70)
         print("NANOGrav Rohan & Gondor COMPARISON")
         print("="*70)
-        population = consistent_results["populations"]["population"]
-        plot_binaries_vs_frequency(
-            population, subset_name=run_name,
-            candidate_frequencies=[14e-9, 21e-9],
-            candidate_labels=['Gondor 14 nHz', 'Rohan 21 nHz'],
-            candidate_masses=[9.75, 10.05],
-            save_dir=save_dir
-        )
+        for pop_idx, result in enumerate(consistent_results["populations"]):
+            print(f"\n--- Population {pop_idx} ---")
+            population = result["population"]
+            
+            plot_binaries_vs_frequency(
+                population, subset_name=f"{run_name}_pop{pop_idx}",
+                candidate_frequencies=[14e-9, 21e-9],
+                candidate_labels=['Gondor 14 nHz', 'Rohan 21 nHz'],
+                candidate_masses=[9.75, 10.05],
+                # save_dir=save_dir
+            )
 
-    print("\n" + "="*70)
-    print("ANALYSIS COMPLETE")
-    print(f"Results saved to: {save_dir}")
-    print("="*70)
+        print("\n" + "="*70)
+        print("ANALYSIS COMPLETE")
+        print(f"Results saved to: {save_dir}")
+        print("="*70)
 
     if config.OPTIMAL_SNR_POPULATION:
         population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)

@@ -37,6 +37,9 @@ def compute_population_snr(
     precompute_parallel=False,
     precompute_chunk_size=10_000_000,
     precompute_workers=None,
+    include_GW=True,
+    include_RN=True,
+    include_WN=True,
 ):
     if timer:
         t_start = time.perf_counter()
@@ -108,6 +111,9 @@ def compute_population_snr(
         psrs=enterprise_psrs,
         noise_params_15yr=raw_noise_params,
         Tspan=Tspan,
+        include_GW=include_GW,
+        include_RN=include_RN,
+        include_WN=include_WN,
     )
     gc.collect()
 
@@ -127,6 +133,7 @@ def compute_population_snr(
         print(f"OS time: {t_end - t_build:.2f} s")
         print(f"Total: {t_end - t_start:.2f} s")
 
+    del ostat
     gc.collect()
 
     if return_psrs_pta:
@@ -1039,6 +1046,9 @@ def generate_consistent_population_distance_scaling(
             precompute_before_injection=False,
             precompute_parallel=precompute_parallel,
         )
+        if i < n_iterations - 1:  # not the last iteration
+            del pta, enterprise_psrs
+            gc.collect()
         snr_final = snr_current
         snr_history.append({'iteration': i + 1, 'cumulative_scale': cumulative_scale, 'snr': snr_current})
 
