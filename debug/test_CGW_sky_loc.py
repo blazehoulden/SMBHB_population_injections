@@ -240,6 +240,7 @@ def test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params,
     for ra, dec in sky_locations:
         pop = chosen_population(
             n_binaries=1,
+            chirp_mass_msun=10**9,
             right_ascension=float(ra),
             declination=float(dec),
             compute_strain=False,

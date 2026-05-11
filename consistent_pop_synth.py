@@ -40,6 +40,7 @@ def compute_population_snr(
     include_GW=True,
     include_RN=True,
     include_WN=True,
+    nmodes=150,
 ):
     if timer:
         t_start = time.perf_counter()
@@ -114,6 +115,7 @@ def compute_population_snr(
         include_GW=include_GW,
         include_RN=include_RN,
         include_WN=include_WN,
+        nmodes=nmodes
     )
     gc.collect()
 
@@ -1046,9 +1048,7 @@ def generate_consistent_population_distance_scaling(
             precompute_before_injection=False,
             precompute_parallel=precompute_parallel,
         )
-        if i < n_iterations - 1:  # not the last iteration
-            del pta, enterprise_psrs
-            gc.collect()
+
         snr_final = snr_current
         snr_history.append({'iteration': i + 1, 'cumulative_scale': cumulative_scale, 'snr': snr_current})
 
@@ -1067,6 +1067,11 @@ def generate_consistent_population_distance_scaling(
             else:
                 print(f"  SNR {snr_current:.4f} outside of provided SNR_range "
                       f"[{SNR_min}, {SNR_max}] — rescaling.")
+        
+        # if outside the SNR range, continue to next iteration and free up memory
+        if i < n_iterations - 1:  # not the last iteration
+            del pta, enterprise_psrs
+            gc.collect()
 
         if verbose:
             print(f"[Iteration {i+1}/{n_iterations}] SNR after scaling: {snr_current:.4f} "

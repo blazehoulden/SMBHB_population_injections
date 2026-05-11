@@ -41,6 +41,7 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from pathlib import Path as FilePath
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -59,6 +60,39 @@ Mpc_to_m = 3.086e22
 def _snr_colormap():
     """Blue → purple → coral ramp matching SNR intensity."""
     return plt.cm.get_cmap("plasma")
+
+
+def _set_apj_style():
+    """Apply light, serif, publication-friendly rcParams."""
+    mpl.rcParams.update({
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+            "axes.labelsize": 11,
+        "axes.titlesize": 11,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "legend.fontsize": 8.5,
+            "figure.titlesize": 12,
+        "axes.linewidth": 0.8,
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.top": True,
+        "ytick.right": True,
+            # Force readable black text/axes on white background
+            "axes.edgecolor": "black",
+            "axes.labelcolor": "black",
+            "axes.titlecolor": "black",
+            "xtick.color": "black",
+            "ytick.color": "black",
+            "text.color": "black",
+            "legend.edgecolor": "0.2",
+            "legend.facecolor": "white",
+            "legend.fancybox": False,
+    })
 
 
 def _aitoff_xy(ra, dec):
@@ -102,7 +136,7 @@ def plot_mc_vs_distance(ax, binaries, snrs, cmap, norm, annotate_top=5):
         s=sizes[valid],
         c=snra[valid],
         cmap=cmap, norm=norm,
-        edgecolors="white", linewidths=0.5, zorder=3
+        edgecolors="black", linewidths=0.35, zorder=3
     )
 
     top_idx = np.where(valid)[0][np.argsort(snra[valid])[-annotate_top:]]
@@ -113,14 +147,18 @@ def plot_mc_vs_distance(ax, binaries, snrs, cmap, norm, annotate_top=5):
             xytext=(4, 4),
             textcoords="offset points",
             fontsize=7,
-            color="0.3"
+            color="0.15"
         )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(r"$\mathcal{M}_c$ [M$_\odot$]")
-    ax.set_ylabel(r"$D_{\rm comov}$ [Mpc]")
-    ax.grid(True, which="both", ls="--", lw=0.4, alpha=0.4)
+    ax.set_xlabel(r"$\mathcal{M}_c$ [M$_\odot$]", color="black")
+    ax.set_ylabel(r"$D_{\rm comov}$ [Mpc]", color="black")
+    ax.tick_params(which="both", labelsize=9, colors='black')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+        spine.set_linewidth(0.8)
+    ax.grid(True, which="both", ls="--", lw=0.35, alpha=0.28, color="0.75")
 
     return sc
 
@@ -139,7 +177,7 @@ def plot_h0_vs_frequency(ax, binaries, snrs, cmap, norm, annotate_top=5):
         s=sizes[valid],
         c=snra[valid],
         cmap=cmap, norm=norm,
-        edgecolors="white", linewidths=0.5, zorder=3
+        edgecolors="black", linewidths=0.35, zorder=3
     )
 
     top_idx = np.where(valid)[0][np.argsort(snra[valid])[-annotate_top:]]
@@ -148,16 +186,20 @@ def plot_h0_vs_frequency(ax, binaries, snrs, cmap, norm, annotate_top=5):
             f"#{i+1}",
             (h0s[i], freqs[i]),
             xytext=(4, 4),
-            textcoords="offset points",
+             textcoords="offset points",
             fontsize=7,
-            color="0.3"
+            color="0.15"
         )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(r"$h_0 = 2\frac{(G\mathcal{M})^{5/3}}{c^4D_{\rm{comov}}}(\pi f_{\rm GW}(1 + z))^{2/3}$")
-    ax.set_ylabel(r"$f_{\rm GW}$ [Hz]")
-    ax.grid(True, which="both", ls="--", lw=0.4, alpha=0.4)
+    ax.set_xlabel(r"$h_0 = 2\frac{(G\mathcal{M})^{5/3}}{c^4D_{\rm{comov}}}(\pi f_{\rm GW}(1 + z))^{2/3}$", color="black")
+    ax.set_ylabel(r"$f_{\rm GW}$ [Hz]", color="black")
+    ax.tick_params(which="both", labelsize=9, colors='black')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+        spine.set_linewidth(0.8)
+    ax.grid(True, which="both", ls="--", lw=0.35, alpha=0.28, color="0.75")
 
     return sc
 
@@ -177,24 +219,24 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
 
     for dec_val in np.radians([-60, -30, 0, 30, 60]):
         xs, ys = _aitoff_xy(ra_grid, np.full_like(ra_grid, dec_val))
-        ax.plot(xs, ys, color="0.7", lw=0.4, zorder=0)
+        ax.plot(xs, ys, color="0.75", lw=0.45, zorder=0)
 
     for ra_val in np.linspace(0, 2 * np.pi, 13)[:-1]:
         xs, ys = _aitoff_xy(np.full_like(dec_grid, ra_val), dec_grid)
-        ax.plot(xs, ys, color="0.7", lw=0.4, zorder=0)
+        ax.plot(xs, ys, color="0.75", lw=0.45, zorder=0)
 
     # equator
     xs, ys = _aitoff_xy(ra_grid, np.zeros_like(ra_grid))
-    ax.plot(xs, ys, color="0.5", lw=0.8, zorder=1)
+    ax.plot(xs, ys, color="0.5", lw=0.9, zorder=1)
 
     # ---- draw Aitoff projection boundary ----
     # Left edge (RA = 0)
     xs, ys = _aitoff_xy(np.zeros_like(dec_grid), dec_grid)
-    ax.plot(xs, ys, color="0.5", lw=1.0, zorder=2)
+    ax.plot(xs, ys, color="0.5", lw=0.9, zorder=2)
     
     # Right edge (RA = 2π)
     xs, ys = _aitoff_xy(np.full_like(dec_grid, 2 * np.pi), dec_grid)
-    ax.plot(xs, ys, color="0.5", lw=1.0, zorder=2)
+    ax.plot(xs, ys, color="0.5", lw=0.9, zorder=2)
 
     # ---- pulsars ----
     for psr in psrs:
@@ -204,7 +246,7 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
         ax.scatter(
             px, py,
             marker=star_path, s=80,
-            c="#E24B4A", edgecolors="#8B1A1A", linewidths=0.5,
+            c="#FFFFFF", edgecolors="#000000", linewidths=0.5,
             zorder=5, label="_pulsar",
         )
 
@@ -215,7 +257,7 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
         ax.scatter(
             bx, by, s=r,
             c=[[cmap(norm(snr))]],
-            edgecolors="white", linewidths=0.5,
+            edgecolors="black", linewidths=0.3,
             zorder=4,
         )
         if snr >= sorted(snra)[-5]:
@@ -223,18 +265,18 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
                 f"#{i+1}",
                 (bx, by), xytext=(4, 4),
                 textcoords="offset points",
-                fontsize=7, color="0.2", zorder=6,
+                fontsize=7, color="0.15", zorder=6,
             )
 
     # ---- dummy legend handles ----
     from matplotlib.lines import Line2D
     handles = [
         Line2D([0], [0], marker="o",  color="w", markerfacecolor=cmap(0.8),
-               markersize=9, label="SMBHB"),
-        Line2D([0], [0], marker=star_path, color="w", markerfacecolor="#E24B4A",
-               markersize=9, label="Pulsar"),
+               markeredgecolor="black", markersize=9, label="SMBHB"),
+        Line2D([0], [0], marker=star_path, color="w", markerfacecolor="#D9443F",
+               markeredgecolor="#7A1917", markersize=9, label="Pulsar"),
     ]
-    ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.6)
+    ax.legend(handles=handles, loc="lower right", framealpha=0.9, edgecolor="0.7")
 
     ax.set_axis_off()
 
@@ -247,16 +289,15 @@ def plot_cgw_analysis(
     top_snrs,
     psrs,
     save_path=None,
-    figsize=(14, 11),
-    style="dark_background",
+    figsize=(7.0, 9.6),
+    style="default",
     annotate_top=5,
 ):
     """
-    Generate a 2×2 panel figure:
-        top-left  : h0 vs SNR
-        top-right : Mc vs SNR
-        bottom-left : D_L vs SNR
-        bottom-right: Skymap (Aitoff)
+    Generate a single-column, three-panel figure (stacked vertically):
+        top    : h0 vs f_GW
+        middle : Mc vs D_comov
+        bottom : Skymap (Aitoff)
 
     Parameters
     ----------
@@ -271,7 +312,7 @@ def plot_cgw_analysis(
         If None, calls plt.show().
     figsize : tuple
     style : str
-        Any valid matplotlib style, e.g. "dark_background", "seaborn-v0_8-darkgrid".
+        Any valid matplotlib style. Default is "default" (light background).
     annotate_top : int
         How many top-SNR sources to label.
     """
@@ -280,10 +321,11 @@ def plot_cgw_analysis(
     norm = Normalize(vmin=snra.min() * 0.9, vmax=snra.max() * 1.05)
 
     with plt.style.context(style):
+        _set_apj_style()
         fig = plt.figure(figsize=figsize, constrained_layout=False)
 
-        gs = gridspec.GridSpec(3, 1, figure=fig, hspace=0.35, wspace=0.32,
-                               left=0.08, right=0.93, top=0.93, bottom=0.07)
+        gs = gridspec.GridSpec(3, 1, figure=fig, hspace=0.28,
+                       left=0.13, right=0.86, top=0.97, bottom=0.08)
 
         ax_h0_freq   = fig.add_subplot(gs[0, 0])
         ax_mc_dist   = fig.add_subplot(gs[1, 0])
@@ -294,15 +336,30 @@ def plot_cgw_analysis(
         plot_skymap(ax_sky, top_binaries, snra, psrs, cmap, norm)
 
         # shared colourbar on right edge
-        cbar_ax = fig.add_axes([0.95, 0.1, 0.015, 0.8])
+        cbar_ax = fig.add_axes([0.88, 0.15, 0.018, 0.74])
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, cax=cbar_ax)
         cbar.set_label("Optimal SNR", fontsize=10)
+        cbar.ax.tick_params(labelsize=9, colors='black')
+        # Ensure colourbar text/labels are visible on white background
+        try:
+            cbar.ax.yaxis.label.set_color('black')
+        except Exception:
+            pass
+        for tl in cbar.ax.get_yticklabels():
+            tl.set_color('black')
+        # outline
+        try:
+            cbar.outline.set_edgecolor('black')
+        except Exception:
+            pass
 
         if save_path is not None:
             fig.savefig(save_path, dpi=300, bbox_inches="tight")
-            fig.savefig(save_path.replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
+            save_stem = FilePath(save_path)
+            png_path = save_stem.with_suffix(".png")
+            fig.savefig(png_path, dpi=300, bbox_inches="tight")
             print(f"Saved to {save_path}")
         else:
             plt.show()

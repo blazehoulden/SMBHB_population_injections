@@ -17,6 +17,7 @@ venv/
 # Local data
 data/
 cache/
+figures/
 
 nanograv_pulsars_cache.pkl
 tempo2_runtime.tar.gz

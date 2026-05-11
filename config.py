@@ -12,17 +12,17 @@ pc = 3.085677581e16   # Parsec [m]
 # Population configuration presets
 POPULATION_CONFIGS = {
     'optimistic': {
-        'n_binaries': 500,
-        'mass_distribution': 'power_law',
-        'mass_cutoff_0': 1e9,
-        'z_max': 2.0,
+        'n_binaries': 500_000_000,
+        'mass_distribution': 'exponential_damping',
+        'mass_cutoff_0': 10**(8.0),
+        'z_max': 1.0,
         'description': 'Larger mass, higher spread in distance, small population'
     },
     'realistic': {
-        'n_binaries': 20_000,
+        'n_binaries': 100_000_000,
         'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 1e10,
-        'z_max': 1.2,
+        'mass_cutoff_0': 10**(8.5),
+        'z_max': 1.0,
         'description': 'Medium mass, medium spread in distance, medium population'
     },
     'pessimistic': {
@@ -58,12 +58,12 @@ RUN_SCALING_ANALYSIS = False
 RUN_INDIVIDUAL_BINARY_ANALYSIS = False
 RUN_ENSEMBLE_ANALYSIS = False
 RUN_NG_RG_COMPARISON = False
-RUN_CONSISTENT_POP_SYNTH = False
+RUN_CONSISTENT_POP_SYNTH = True
 OPTIMAL_SNR_POPULATION = False
 SNR_COMPARISON_CHOSEN_POP = False
 PSD_COMPARISON = False
 GEN_POP = False
-CGW_SNR_ANALYSIS = False
+CGW_SNR_ANALYSIS = True
 
 # Memory profiling
 MEMORY_PROFILE_ENABLED = True

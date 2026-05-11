@@ -359,7 +359,7 @@ def main():
             verbose=True,
             save_populations=True,
             profile=True,
-            n_iterations=4,
+            n_iterations=10,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -523,6 +523,9 @@ def main():
             style="dark_background",
             annotate_top=5,
         )
+
+
+
 
     # ========== NG R&G COMPARISON ==========
     if config.RUN_NG_RG_COMPARISON:
