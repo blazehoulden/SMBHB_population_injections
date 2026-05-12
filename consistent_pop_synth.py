@@ -6,7 +6,11 @@ import time
 import tracemalloc
 import config
 from config import generate_population
-from signal_injection import inject_population_nufft, simulate_psr
+try:
+    from signal_injection import inject_population_nufft, simulate_psr
+except Exception:
+    inject_population_nufft = None
+    simulate_psr = None
 from pta_builder import build_pta_and_params
 from data_loader import restore_original_residuals
 from memory_profile import log_memory
@@ -858,6 +862,7 @@ def generate_consistent_population_distance_scaling(
     keep_amplitudes_in_result=False,
     inject_eps=1e-6,
     precompute_parallel=False,
+    require_snr_in_range=True,
 ):
     profile_clock = timer or toggle_memory_profiling
     t_start = time.perf_counter() if profile_clock else None
@@ -1133,6 +1138,16 @@ def generate_consistent_population_distance_scaling(
         for h in snr_history:
             print(f"  it{h['iteration']:2d}: cumulative_scale={h['cumulative_scale']:.4f}×  SNR={h['snr']:.4f}")
 
+    if SNR_range is not None and require_snr_in_range:
+        SNR_min, SNR_max = SNR_range
+        if not (SNR_min <= snr_final <= SNR_max):
+            if verbose:
+                print(
+                    f"  ✗ Final SNR {snr_final:.4f} outside required range "
+                    f"[{SNR_min}, {SNR_max}]"
+                )
+            return None
+
     return _build_result_distance_scaling(
         population=population,
         SNR_final=snr_final,
@@ -1162,6 +1177,8 @@ def generate_snr_consistent_populations_distance_scaling(
     keep_amplitudes_in_result = False,
     inject_eps        = 1e-6,
     precompute_parallel = False,
+    max_retries_per_sim = 25,
+    require_snr_in_range = True,
 ):
     start_time = time.time()
 
@@ -1221,6 +1238,11 @@ def generate_snr_consistent_populations_distance_scaling(
         result = None
         ii = 0
         while result is None:
+            if ii >= max_retries_per_sim:
+                raise RuntimeError(
+                    f"Simulation {sim_idx+1} exceeded max_retries_per_sim="
+                    f"{max_retries_per_sim} while trying to meet SNR criteria"
+                )
             if verbose and ii > 0:
                 print(f"✗ Simulation {sim_idx+1}, trial {ii} FAILED, retrying...")
             ii += 1
@@ -1241,6 +1263,7 @@ def generate_snr_consistent_populations_distance_scaling(
                 keep_amplitudes_in_result = keep_amplitudes_in_result,
                 inject_eps                = inject_eps,
                 precompute_parallel       = precompute_parallel,
+                require_snr_in_range      = require_snr_in_range,
             )
 
         if result is not None:

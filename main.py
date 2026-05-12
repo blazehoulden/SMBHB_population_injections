@@ -17,7 +17,10 @@ from datetime import datetime
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from SMBHB_pop_synth import chosen_population
 from data_loader import load_pulsars, filter_pulsars_15yr, get_clean_pulsars_and_tspan, parse_pulsar_parameters
-from signal_injection import inject_population_nufft
+try:
+    from signal_injection import inject_population_nufft
+except Exception:
+    inject_population_nufft = None
 from pta_builder import build_pta_and_params
 from scaling_analysis import run_scaling_analysis
 from individual_binary import analyze_individual_binaries
@@ -28,6 +31,8 @@ from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binar
 from CGW_SNR import compute_cgw_snr_optimal_population, compute_population_gwb_psd_from_psrs, get_per_pulsar_covariance_from_population
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, save_results_dual, print_population_diagnostics, print_scaling_summary, compact_consistent_results_for_storage
+from io_backends import population_to_zarr
+import subprocess
 # from pulsar_noise_using_enterprise import get_noise_matrix
 from enterprise.signals.gp_bases import createfourierdesignmatrix_red
 
@@ -81,7 +86,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--max-save-mb-per-sim", type=float, default=5.0,
+        "--max-save-mb-per-sim", type=float, default=1.0,
         help="Target max saved size per simulation for consistent-pop outputs"
     )
 
@@ -93,6 +98,41 @@ def parse_args():
     parser.add_argument(
         "--save-loudest", type=int, default=10000,
         help="Number of loudest binaries (highest h0) always kept per simulation"
+    )
+
+    parser.add_argument(
+        "--chunked-injection", action="store_true",
+        help="Use chunked/NUFFT injection pipeline (writes populations to zarr and prints sbatch template)",
+    )
+
+    parser.add_argument(
+        "--n-chunks", type=int, default=100,
+        help="Number of chunks for chunked injection (used when --chunked-injection)",
+    )
+
+    parser.add_argument(
+        "--chunked-output-dir", type=str, default=None,
+        help="Output directory for chunk outputs (default: data/{date}/{run_name}/chunks)",
+    )
+
+    parser.add_argument(
+        "--chunked-test", action="store_true",
+        help="Run a single local chunk (index 0) after writing zarr for quick smoke test",
+    )
+
+    parser.add_argument(
+        "--defer-cgw-to-slurm", action="store_true",
+        help="Skip local CGW stage in main.py and defer CGW analysis to Slurm reduction jobs",
+    )
+
+    parser.add_argument(
+        "--max-retries-per-sim", type=int, default=25,
+        help="Maximum retries per simulation to meet SGWB SNR consistency range",
+    )
+
+    parser.add_argument(
+        "--minimal-pop-storage", action="store_true",
+        help="Store only injection/CGW-required fields in mixed precision to reduce disk usage",
     )
 
     return parser.parse_args()
@@ -330,6 +370,8 @@ def main():
         # save_path = os.path.join(save_dir, 'ensemble_results.json')
         # save_results(ensemble_results, save_path)
         
+    consistent_results = None
+
     # ========== CONSISTENT POPULATION SYNTHESIS ==========
     if config.RUN_CONSISTENT_POP_SYNTH:
         print("\n" + "="*70)
@@ -364,7 +406,23 @@ def main():
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
             inject_eps=1e-6,
+            max_retries_per_sim=args.max_retries_per_sim,
+            require_snr_in_range=True,
         )
+
+        # Hard validation: every simulation must be SGWB-consistent before downstream stages.
+        invalid_sims = []
+        for pop in consistent_results.get("populations", []):
+            snr_val = pop.get("SNR_final", np.nan)
+            if not (SNR_low <= snr_val <= SNR_high):
+                invalid_sims.append((pop.get("sim_index", -1), float(snr_val)))
+
+        if invalid_sims:
+            details = ", ".join([f"sim{idx}: {snr:.4f}" for idx, snr in invalid_sims[:10]])
+            raise RuntimeError(
+                f"SGWB consistency check failed for {len(invalid_sims)} simulation(s). "
+                f"Expected SNR in [{SNR_low}, {SNR_high}]. Examples: {details}"
+            )
 
         file_name = f'consistent_population_{CONFIG_NAME}_targetSNR{SNR_high}_sims{args.simulations}.json'
         save_path = os.path.join(save_dir, file_name)
@@ -381,8 +439,111 @@ def main():
 
         save_results_dual(compact_results, save_path, save_compact_npz=False)
 
+        # If user requested chunked/NUFFT pipeline, write each population to zarr
+        if args.chunked_injection:
+            print("\n➡️  Chunked injection requested — writing populations to zarr for chunked processing.")
+            chunks_base = args.chunked_output_dir or os.path.join(save_dir, 'chunks')
+            os.makedirs(chunks_base, exist_ok=True)
 
-    if config.CGW_SNR_ANALYSIS:
+            if args.minimal_pop_storage:
+                field_dtypes = {
+                    'f': np.float32,
+                    'h0': np.float32,
+                    'ra': np.float16,
+                    'dec': np.float16,
+                    'psi': np.float16,
+                    'iota': np.float16,
+                    'phi0': np.float16,
+                }
+                print("  Storage profile: minimal (f,h0 float32; angles float16)")
+            else:
+                field_dtypes = None
+                print("  Storage profile: full (all fields float32)")
+
+            for pop_idx, result in enumerate(consistent_results.get('populations', [])):
+                pop = result.get('population')
+                if pop is None:
+                    continue
+
+                # Build a lightweight object with expected attributes for io_backends
+                class _SimplePop:
+                    pass
+
+                sp = _SimplePop()
+                n_pop = len(pop)
+                if args.minimal_pop_storage:
+                    needed_fields = ['f', 'h0', 'ra', 'dec', 'psi', 'iota', 'phi0']
+                else:
+                    needed_fields = ['f', 'Mc', 'Mtot', 'D_comov', 'z', 'h0', 'ra', 'dec', 'psi', 'iota', 'phi0']
+
+                extractors = {
+                    'f': lambda b: b.f,
+                    'Mc': lambda b: b.Mc,
+                    'Mtot': lambda b: getattr(b, 'Mtot', np.nan),
+                    'D_comov': lambda b: b.D_comov,
+                    'z': lambda b: b.z,
+                    'h0': lambda b: b.h0,
+                    'ra': lambda b: b.ra,
+                    'dec': lambda b: b.dec,
+                    'psi': lambda b: b.psi,
+                    'iota': lambda b: b.iota,
+                    'phi0': lambda b: b.phi0,
+                }
+
+                for fld in needed_fields:
+                    setattr(
+                        sp,
+                        fld,
+                        np.fromiter((extractors[fld](b) for b in pop), dtype=np.float64, count=n_pop),
+                    )
+
+                zarr_path = os.path.join(chunks_base, f'population_pop{pop_idx}.zarr')
+                print(f"  Writing population {pop_idx} -> {zarr_path} ...")
+                population_to_zarr(
+                    zarr_path,
+                    sp,
+                    dtype=np.float32,
+                    chunk_size=1_000_000,
+                    field_dtypes=field_dtypes,
+                )
+                del sp
+                gc.collect()
+
+            # Save a light metadata file used by Slurm stages for validation/tracking.
+            consistency_summary_path = os.path.join(chunks_base, 'sgwb_consistency_summary.json')
+            consistency_summary = {
+                'target_snr': float(args.target_snr),
+                'snr_range': [float(SNR_low), float(SNR_high)],
+                'n_populations': int(len(consistent_results.get('populations', []))),
+                'populations': [
+                    {
+                        'pop_idx': int(i),
+                        'n_bininaries': int(p.get('n_bininaries', 0)),
+                        'snr_final': float(p.get('SNR_final', np.nan)),
+                    }
+                    for i, p in enumerate(consistent_results.get('populations', []))
+                ],
+            }
+            save_results(consistency_summary, consistency_summary_path)
+            print(f"  SGWB consistency summary saved: {consistency_summary_path}")
+
+            # Print sbatch example
+            print('\nChunked population zarr files written.')
+            print('Submit an array job (example):')
+            print(f"sbatch --array=0-{args.n_chunks-1} submit_slurm_array.sh --population-zarr {os.path.join(chunks_base,'population_pop0.zarr')} --n-chunks {args.n_chunks} --output-dir {chunks_base}")
+
+            if args.chunked_test:
+                # Run a single local chunk on pop0 to smoke-test the pipeline (non-NUFFT mode)
+                z0 = os.path.join(chunks_base, 'population_pop0.zarr')
+                cmd = [sys.executable, 'chunked_inject_driver.py', '--population-zarr', z0, '--chunk-index', '0', '--n-chunks', str(args.n_chunks), '--output-dir', chunks_base]
+                print('\nRunning local smoke test (chunk 0):')
+                print(' '.join(cmd))
+                subprocess.check_call(cmd)
+
+
+    if args.defer_cgw_to_slurm and args.chunked_injection:
+        print("\nSkipping local CGW_SNR_ANALYSIS in main.py (deferred to Slurm reduction jobs).")
+    elif config.CGW_SNR_ANALYSIS:
         print("\n" + "="*70)
         print("CONTINUOUS WAVE SNR ANALYSIS")
         print("="*70)
