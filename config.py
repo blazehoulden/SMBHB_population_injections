@@ -11,6 +11,13 @@ pc = 3.085677581e16   # Parsec [m]
 
 # Population configuration presets
 POPULATION_CONFIGS = {
+    'test': {
+        'n_binaries': 1000,
+        'mass_distribution': 'exponential_damping',
+        'mass_cutoff_0': 10**(12.0),
+        'z_max': 1.0,
+        'description': 'Tiny population for local testing'
+    },
     'optimistic': {
         'n_binaries': 500_000_000,
         'mass_distribution': 'exponential_damping',
@@ -81,12 +88,12 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, compute_strain=False, T_obs_seconds=16.03 * 365.25 * 86400):
+def generate_population(config, smbhb_module, n_binaries = None, compute_strain=False, T_obs_seconds=16.03 * 365.25 * 86400):
     """Generate SMBHB population with given configuration."""
     if compute_strain:
 
         population, strain_data = smbhb_module.generate_smbhb_population(
-            n_binaries=config['n_binaries'],
+            n_binaries=n_binaries if n_binaries is not None else config['n_binaries'],
             z_max=config['z_max'],
             mass_distribution=config['mass_distribution'],
             alpha_0=1.21,
@@ -107,7 +114,7 @@ def generate_population(config, smbhb_module, compute_strain=False, T_obs_second
         return population, strain_data
     elif not compute_strain:
         population = smbhb_module.generate_smbhb_population(
-            n_binaries=config['n_binaries'],
+            n_binaries=n_binaries if n_binaries is not None else config['n_binaries'],
             mass_distribution=config['mass_distribution'],
             alpha_0=1.21,
             alpha_z=0.0,

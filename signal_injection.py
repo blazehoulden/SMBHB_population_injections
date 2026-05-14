@@ -1265,7 +1265,7 @@ def inject_population_nufft(psrs, population,
 
         # nufft1d3: f(x_j) = sum_k c_k * exp(i * s_k * x_j)
         # isign=+1 matches our e^{+i 2π f t} convention
-        x      = np.ascontiguousarray(x,     dtype=np.float64)
+        x       = np.ascontiguousarray(x,     dtype=np.float64)
         s_nufft = np.ascontiguousarray(s_arr, dtype=np.float64)
         c_nufft = np.ascontiguousarray(c,     dtype=np.complex128)
 
@@ -1327,3 +1327,105 @@ def inject_population_nufft(psrs, population,
                 pass
 
     return psrs
+
+
+def change_in_TOAs_days_population_nufft(psrs, population,
+                             verbose=False, eps=1e-6,
+                             cache_precomputed_amplitudes=False):
+    """
+    Calculate injection of SMBHB population via NUFFT type-3 (no frequency quantisation error).
+
+    Uses finufft.nufft1d3:
+        f(x_j) = sum_k c_k * exp(i * s_k * x_j)
+
+    where:
+        x_j = t_j - t[0]          (TOA times, non-uniform, in seconds)
+        s_k = 2π f_k              (source frequencies, non-uniform, in rad/s)
+        c_k = (C_k - i S_k) / 2  (complex amplitude, see derivation below)
+
+    Derivation
+    ----------
+    r(t) = sum_k A_k sin(2π f_k t_rel + φ0_k) + B_k cos(2π f_k t_rel + φ0_k)
+
+    Expanding with phi0:
+        S_k = A_k cos(φ0) - B_k sin(φ0)   [coeff of sin(2π f_k t_rel)]
+        C_k = A_k sin(φ0) + B_k cos(φ0)   [coeff of cos(2π f_k t_rel)]
+
+    Writing in complex form using e^{isx} = cos(sx) + i sin(sx):
+        r = Re[ sum_k (C_k - i S_k) * e^{i 2π f_k t_rel} ]
+
+    For real output we also need the conjugate (negative frequency) term:
+        r = Re[ sum_k (C_k - i S_k) * e^{+i 2π f_k t_rel}
+                    + (C_k + i S_k) * e^{-i 2π f_k t_rel} ] / 2
+
+    Using nufft1d3 with only positive frequencies and dividing by 2:
+        c_k = (C_k - i S_k) / 2
+        r = 2 * Re[ nufft1d3(x, s, c) ]
+
+        No grid, no quantisation — exact to NUFFT tolerance (eps).
+
+                Optional amplitude precompute controls:
+                    - cache_precomputed_amplitudes: if False, amp_A/B generated during
+                        this call are removed after each pulsar to reduce peak memory.
+    """
+    f_arr    = population.f
+    phi0_arr = population.phi0
+
+    # Source frequencies in rad/s — these are the NUFFT "s" points
+    # No gridding, no rounding — exact frequencies
+    s_arr = 2 * np.pi * f_arr   # (N,) rad/s
+
+    # phi0 rotation: same for all pulsars (source property)
+    cos_phi0 = np.cos(phi0_arr)
+    sin_phi0 = np.sin(phi0_arr)
+
+    per_pulsar_top = {}
+    contributor_candidates = set()
+
+    pulsar_time_changes_arr = []
+
+    for psr in psrs:
+        print(f"Processing {psr.name}...", flush=True)
+        psr_name = psr.name
+        computed_here = False
+        if psr_name not in population.amp_A:
+            precompute_amplitudes(population, psr)
+            computed_here = True
+
+        A_arr = population.amp_A[psr_name]
+        B_arr = population.amp_B[psr_name]
+
+        # phi0 rotation
+        S = A_arr * cos_phi0 - B_arr * sin_phi0   # sin(2π f t_rel) coeff
+        C = A_arr * sin_phi0 + B_arr * cos_phi0   # cos(2π f t_rel) coeff
+
+        # Complex amplitudes: c_k = (C_k - i S_k) / 2
+        c = (C - 1j * S) / 2   # (N,)
+
+        # TOA times relative to first TOA — the NUFFT "x" points
+        t_sec = np.asarray(psr.stoas, dtype=np.float64) * 86400.0  # days -> seconds
+        x     = t_sec - t_sec[0]   # relative times in seconds  
+
+        # nufft1d3: f(x_j) = sum_k c_k * exp(i * s_k * x_j)
+        # isign=+1 matches our e^{+i 2π f t} convention
+        x       = np.ascontiguousarray(x,     dtype=np.float64)
+        s_nufft = np.ascontiguousarray(s_arr, dtype=np.float64)
+        c_nufft = np.ascontiguousarray(c,     dtype=np.complex128)
+
+        f_out = finufft.nufft1d3(s_nufft, c_nufft, x, isign=+1, eps=eps)
+
+        # Multiply by 2: we only passed positive frequencies,
+        # negative frequencies contribute equal real part
+        time_change = 2 * np.real(f_out)
+
+        if verbose:
+            print(f"  {psr_name}: RMS = {time_change.std()*1e9:.3f} ns")
+
+        pulsar_time_changes_arr.append([psr_name, time_change/ 86400.0]) # store to add to stoas later
+
+
+        if computed_here and not cache_precomputed_amplitudes:
+            population.amp_A.pop(psr_name, None)
+            population.amp_B.pop(psr_name, None)
+
+    return pulsar_time_changes_arr

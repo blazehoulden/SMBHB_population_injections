@@ -67,6 +67,7 @@ class PopulationArrays:
     psi     : np.ndarray    # polarisation angle [rad]        shape (N,)
     iota    : np.ndarray    # inclination angle [rad]         shape (N,)
     phi0    : np.ndarray    # initial GW phase [rad]          shape (N,)
+    cgw_snr : np.ndarray    # optimal CGW SNR                 shape (N,)
  
     amp_A   : Dict[str, np.ndarray] = field(default_factory=dict)
     amp_B   : Dict[str, np.ndarray] = field(default_factory=dict)
@@ -88,6 +89,7 @@ class PopulationArrays:
             psi     = self.psi[idx],
             iota    = self.iota[idx],
             phi0    = self.phi0[idx],
+            cgw_snr = self.cgw_snr[idx]
         )
         # carry over amplitude arrays if they exist, sliced to match
         for psr_name, A in self.amp_A.items():
@@ -98,7 +100,7 @@ class PopulationArrays:
  
     def memory_gb(self) -> float:
         """Approximate RAM for source arrays (excludes amp_A/B)."""
-        return len(self) * 11 * 8 / 1024**3
+        return len(self) * 12 * 8 / 1024**3
  
     def drop_amplitudes(self, psr_name: Optional[str] = None) -> None:
         """Free per-pulsar amplitude arrays after injection."""
@@ -114,9 +116,9 @@ class PopulationArrays:
         Convert back to list-of-dicts format for compatibility with
         code that still expects the old format.  Avoid for large N.
         """
-        keys = ['f','Mc','Mtot','D_comov','z','h0','ra','dec','psi','iota','phi0']
+        keys = ['f','Mc','Mtot','D_comov','z','h0','ra','dec','psi','iota','phi0','cgw_snr']
         arrays = [self.f, self.Mc, self.Mtot, self.D_comov, self.z, self.h0,
-                  self.ra, self.dec, self.psi, self.iota, self.phi0]
+                  self.ra, self.dec, self.psi, self.iota, self.phi0, self.cgw_snr]
         return [dict(zip(keys, vals)) for vals in zip(*arrays)]
  
  
@@ -142,11 +144,11 @@ def build_comoving_distance_interpolator(z_max: float = 20.0,
  
  
 # Build module-level interpolation grids once
-_CHI_FN   = build_comoving_distance_interpolator(z_max=5.0)
+_CHI_FN   = build_comoving_distance_interpolator(z_max=20.0)
  
 # Fine grid for fast vectorised inversion (chi → z via np.interp)
-_Z_GRID   = np.linspace(0, 5.0, 10_000)
-_CHI_GRID = _CHI_FN(_Z_GRID)          # monotone increasing, shape (10000,)
+_Z_GRID   = np.linspace(0, 20.0, 500_000)
+_CHI_GRID = _CHI_FN(_Z_GRID)          # monotone increasing, shape (500000,)
  
 # Expose for backward compatibility
 COMOVING_DISTANCE_FN         = _CHI_FN
@@ -535,7 +537,7 @@ def generate_smbhb_population(
     # ── assemble PopulationArrays (no Python loop) ───────────────────────────
     pop = PopulationArrays(
         f=f, Mc=Mc, Mtot=Mtot, D_comov=D_comov, z=z, h0=h0,
-        ra=ra, dec=dec, psi=psi, iota=iota, phi0=phi0,
+        ra=ra, dec=dec, psi=psi, iota=iota, phi0=phi0, cgw_snr=np.zeros(n_binaries, dtype=np.float16)
     )
  
     if not compute_strain:
@@ -602,6 +604,7 @@ def chosen_population(
         psi     = np.full(n_binaries, polarization),
         iota    = iota_arr,
         phi0    = np.full(n_binaries, initial_phase),
+        cgw_snr = np.zeros(n_binaries, dtype=np.float16)
     )
  
     if not compute_strain:

@@ -258,117 +258,6 @@ def main():
     
     # Used to make a sky sensitivity map for CGW SNR analysis later, the same for each network of pulsars since it only depends on pulsar sky locations.
     # _, _ = test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
-    
-    # ========== INITIAL INJECTION (OPTIONAL) ==========
-    if config.RUN_INITIAL_INJECTION_ANALYSIS:
-        print("\n" + "="*70)
-        print("INITIAL INJECTION ANALYSIS")
-        print("="*70)
-        
-        psrs_injected = inject_population_nufft(
-            psrs_clean, population, pure_signal=True, verbose=True
-        )
-        
-        pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=raw_noise_params, Tspan=Tspan_seconds
-        )
-        
-        print(f"✓ PTA built with {len(pta.params)} parameters")
-        ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
-        xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_complete)
-
-        snr = OS / OS_sig
-        print(f"\n✓ Initial Injection SNR: {snr:.3f}")
-        
-        # Save with organized naming
-        plot_initial_injection_analysis(
-            psrs_injected, population, snr, xi, rho,
-            save_dir=save_dir, run_name=run_name
-        )
-    
-    # ========== SCALING ANALYSIS ==========
-    if config.RUN_SCALING_ANALYSIS:
-        print("\n" + "="*70)
-        print("SCALING ANALYSIS")
-        print("="*70)
-        
-        results, N_needed = run_scaling_analysis(
-            population, psrs_clean, raw_noise_params, Tspan_seconds, 
-            target_SNR=4.0, n_test_points=5
-        )
-        
-        print_scaling_summary(results, N_needed, target_SNR=4.0)
-        
-        # Save results
-        save_path = os.path.join(save_dir, f'scaling_results.json')
-        save_results_dual({'scaling': results, 'N_needed': N_needed}, save_path)
-        
-        # Save plots
-        plot_scaling_results(
-            results, N_needed, 4.0, 
-            save_dir=save_dir, run_name=run_name
-        )
-    
-    # ========== INDIVIDUAL BINARY ANALYSIS ==========
-    if config.RUN_INDIVIDUAL_BINARY_ANALYSIS:
-        print("\n" + "="*70)
-        print("INDIVIDUAL BINARY ANALYSIS")
-        print("="*70)
-        
-        df = analyze_individual_binaries(
-            population, psrs_clean, raw_noise_params, Tspan_seconds, max_binaries=50
-        )
-        print(df.head())
-        
-        if df is not None:
-            print_binary_statistics(df, top_n=10)
-            print(f"\n✓ Analyzed {len(df)} binaries")
-            print(f"  Loudest SNR: {df.iloc[0]['SNR']:+.3f}")
-            
-            # Save results
-            csv_path = os.path.join(save_dir, 'individual_binary_results.csv')
-            df.to_csv(csv_path, index=False)
-            print(f"💾 Saved: {csv_path}")
-            
-            # Save plots
-            plot_individual_binaries(
-                df, psrs_injected=psrs_clean, top_N=20,
-                save_dir=save_dir, run_name=run_name
-            )
-    
-    # ========== ENSEMBLE ANALYSIS ==========
-    # if config.RUN_ENSEMBLE_ANALYSIS:
-        # print("\n" + "="*70)
-        # print("ENSEMBLE ANALYSIS")
-        # print("="*70)
-        
-        # # auto guess: default = 0.5 * n_binaries
-        # if args.initial_guess == "auto":
-        #     N_initial_guess = int(0.5 * selected_config['n_binaries'])
-        # else:
-        #     N_initial_guess = int(args.initial_guess)
-
-        # SNR_low, SNR_high = args.snr_range
-
-        # ensemble_results = find_N_ensemble(
-        #     selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan_seconds,
-        #     target_SNR=args.target_snr,
-        #     SNR_range=(SNR_low, SNR_high),
-        #     n_realisations=args.realisations,
-        #     N_initial_guess=N_initial_guess,
-        #     N_max_initial=selected_config['n_binaries'] * 3
-        # )
-        
-        # if 'statistics' in ensemble_results:
-        #     stats = ensemble_results['statistics']
-        #     print(f"\nn_binaries statistics:")
-        #     print(f"  Mean: {stats['mean']:.0f}")
-        #     print(f"  Median: {stats['median']:.0f}")
-        #     print(f"  Std: {stats['std']:.0f}")
-
-        # # Save results
-        # save_path = os.path.join(save_dir, 'ensemble_results.json')
-        # save_results(ensemble_results, save_path)
         
     consistent_results = None
 
@@ -401,7 +290,7 @@ def main():
             verbose=True,
             save_populations=True,
             profile=True,
-            n_iterations=10,
+            n_iterations=100,
             toggle_memory_profiling=False,
             keep_amplitudes_in_result=False,
             precompute_parallel=True,
@@ -410,19 +299,6 @@ def main():
             require_snr_in_range=True,
         )
 
-        # Hard validation: every simulation must be SGWB-consistent before downstream stages.
-        invalid_sims = []
-        for pop in consistent_results.get("populations", []):
-            snr_val = pop.get("SNR_final", np.nan)
-            if not (SNR_low <= snr_val <= SNR_high):
-                invalid_sims.append((pop.get("sim_index", -1), float(snr_val)))
-
-        if invalid_sims:
-            details = ", ".join([f"sim{idx}: {snr:.4f}" for idx, snr in invalid_sims[:10]])
-            raise RuntimeError(
-                f"SGWB consistency check failed for {len(invalid_sims)} simulation(s). "
-                f"Expected SNR in [{SNR_low}, {SNR_high}]. Examples: {details}"
-            )
 
         file_name = f'consistent_population_{CONFIG_NAME}_targetSNR{SNR_high}_sims{args.simulations}.json'
         save_path = os.path.join(save_dir, file_name)
@@ -439,111 +315,8 @@ def main():
 
         save_results_dual(compact_results, save_path, save_compact_npz=False)
 
-        # If user requested chunked/NUFFT pipeline, write each population to zarr
-        if args.chunked_injection:
-            print("\n➡️  Chunked injection requested — writing populations to zarr for chunked processing.")
-            chunks_base = args.chunked_output_dir or os.path.join(save_dir, 'chunks')
-            os.makedirs(chunks_base, exist_ok=True)
-
-            if args.minimal_pop_storage:
-                field_dtypes = {
-                    'f': np.float32,
-                    'h0': np.float32,
-                    'ra': np.float16,
-                    'dec': np.float16,
-                    'psi': np.float16,
-                    'iota': np.float16,
-                    'phi0': np.float16,
-                }
-                print("  Storage profile: minimal (f,h0 float32; angles float16)")
-            else:
-                field_dtypes = None
-                print("  Storage profile: full (all fields float32)")
-
-            for pop_idx, result in enumerate(consistent_results.get('populations', [])):
-                pop = result.get('population')
-                if pop is None:
-                    continue
-
-                # Build a lightweight object with expected attributes for io_backends
-                class _SimplePop:
-                    pass
-
-                sp = _SimplePop()
-                n_pop = len(pop)
-                if args.minimal_pop_storage:
-                    needed_fields = ['f', 'h0', 'ra', 'dec', 'psi', 'iota', 'phi0']
-                else:
-                    needed_fields = ['f', 'Mc', 'Mtot', 'D_comov', 'z', 'h0', 'ra', 'dec', 'psi', 'iota', 'phi0']
-
-                extractors = {
-                    'f': lambda b: b.f,
-                    'Mc': lambda b: b.Mc,
-                    'Mtot': lambda b: getattr(b, 'Mtot', np.nan),
-                    'D_comov': lambda b: b.D_comov,
-                    'z': lambda b: b.z,
-                    'h0': lambda b: b.h0,
-                    'ra': lambda b: b.ra,
-                    'dec': lambda b: b.dec,
-                    'psi': lambda b: b.psi,
-                    'iota': lambda b: b.iota,
-                    'phi0': lambda b: b.phi0,
-                }
-
-                for fld in needed_fields:
-                    setattr(
-                        sp,
-                        fld,
-                        np.fromiter((extractors[fld](b) for b in pop), dtype=np.float64, count=n_pop),
-                    )
-
-                zarr_path = os.path.join(chunks_base, f'population_pop{pop_idx}.zarr')
-                print(f"  Writing population {pop_idx} -> {zarr_path} ...")
-                population_to_zarr(
-                    zarr_path,
-                    sp,
-                    dtype=np.float32,
-                    chunk_size=1_000_000,
-                    field_dtypes=field_dtypes,
-                )
-                del sp
-                gc.collect()
-
-            # Save a light metadata file used by Slurm stages for validation/tracking.
-            consistency_summary_path = os.path.join(chunks_base, 'sgwb_consistency_summary.json')
-            consistency_summary = {
-                'target_snr': float(args.target_snr),
-                'snr_range': [float(SNR_low), float(SNR_high)],
-                'n_populations': int(len(consistent_results.get('populations', []))),
-                'populations': [
-                    {
-                        'pop_idx': int(i),
-                        'n_bininaries': int(p.get('n_bininaries', 0)),
-                        'snr_final': float(p.get('SNR_final', np.nan)),
-                    }
-                    for i, p in enumerate(consistent_results.get('populations', []))
-                ],
-            }
-            save_results(consistency_summary, consistency_summary_path)
-            print(f"  SGWB consistency summary saved: {consistency_summary_path}")
-
-            # Print sbatch example
-            print('\nChunked population zarr files written.')
-            print('Submit an array job (example):')
-            print(f"sbatch --array=0-{args.n_chunks-1} submit_slurm_array.sh --population-zarr {os.path.join(chunks_base,'population_pop0.zarr')} --n-chunks {args.n_chunks} --output-dir {chunks_base}")
-
-            if args.chunked_test:
-                # Run a single local chunk on pop0 to smoke-test the pipeline (non-NUFFT mode)
-                z0 = os.path.join(chunks_base, 'population_pop0.zarr')
-                cmd = [sys.executable, 'chunked_inject_driver.py', '--population-zarr', z0, '--chunk-index', '0', '--n-chunks', str(args.n_chunks), '--output-dir', chunks_base]
-                print('\nRunning local smoke test (chunk 0):')
-                print(' '.join(cmd))
-                subprocess.check_call(cmd)
-
-
-    if args.defer_cgw_to_slurm and args.chunked_injection:
-        print("\nSkipping local CGW_SNR_ANALYSIS in main.py (deferred to Slurm reduction jobs).")
-    elif config.CGW_SNR_ANALYSIS:
+        
+    if config.CGW_SNR_ANALYSIS:
         print("\n" + "="*70)
         print("CONTINUOUS WAVE SNR ANALYSIS")
         print("="*70)
@@ -557,9 +330,8 @@ def main():
         N_TOP_SOURCES = 50
 
         all_population_cgw_snrs = []
-        T_obs    = 15.0 * 365.25 * 24 * 3600
         cadence  = 14 * 24 * 3600
-        time_arr = np.arange(0, Tspan_seconds, cadence)
+        time_arr = np.arange(0, Tspan_seconds, cadence) # 14-day cadence just for the time_array used in NUFFT injection and CGW SNR calculation; the actual PTA objects are built with the full Tspan and original TOAs.
 
         for pop_idx, result in enumerate(consistent_results["populations"]):
             print(f"\n--- Population {pop_idx + 1} ---")
@@ -948,6 +720,119 @@ def main():
         print("P_gw[:3]:        ", P_gw[:3])
         print("P_gw*df[:3]:     ", (P_gw*df)[:3])
         print("phi_0_real[::2] / (P_gw*df)[:3] =", phi_0_real[::2][:3] / (P_gw*df)[:3])
+
+
+    # ========== INITIAL INJECTION (OPTIONAL) ==========
+    if config.RUN_INITIAL_INJECTION_ANALYSIS:
+        print("\n" + "="*70)
+        print("INITIAL INJECTION ANALYSIS")
+        print("="*70)
+        
+        psrs_injected = inject_population_nufft(
+            psrs_clean, population, pure_signal=True, verbose=True
+        )
+        
+        pta, model, params_complete = build_pta_and_params(
+            psrs=psrs_injected, noise_params_15yr=raw_noise_params, Tspan=Tspan_seconds
+        )
+        
+        print(f"✓ PTA built with {len(pta.params)} parameters")
+        ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
+        xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_complete)
+
+        snr = OS / OS_sig
+        print(f"\n✓ Initial Injection SNR: {snr:.3f}")
+        
+        # Save with organized naming
+        plot_initial_injection_analysis(
+            psrs_injected, population, snr, xi, rho,
+            save_dir=save_dir, run_name=run_name
+        )
+    
+    # ========== SCALING ANALYSIS ==========
+    if config.RUN_SCALING_ANALYSIS:
+        print("\n" + "="*70)
+        print("SCALING ANALYSIS")
+        print("="*70)
+        
+        results, N_needed = run_scaling_analysis(
+            population, psrs_clean, raw_noise_params, Tspan_seconds, 
+            target_SNR=4.0, n_test_points=5
+        )
+        
+        print_scaling_summary(results, N_needed, target_SNR=4.0)
+        
+        # Save results
+        save_path = os.path.join(save_dir, f'scaling_results.json')
+        save_results_dual({'scaling': results, 'N_needed': N_needed}, save_path)
+        
+        # Save plots
+        plot_scaling_results(
+            results, N_needed, 4.0, 
+            save_dir=save_dir, run_name=run_name
+        )
+    
+    # ========== INDIVIDUAL BINARY ANALYSIS ==========
+    if config.RUN_INDIVIDUAL_BINARY_ANALYSIS:
+        print("\n" + "="*70)
+        print("INDIVIDUAL BINARY ANALYSIS")
+        print("="*70)
+        
+        df = analyze_individual_binaries(
+            population, psrs_clean, raw_noise_params, Tspan_seconds, max_binaries=50
+        )
+        print(df.head())
+        
+        if df is not None:
+            print_binary_statistics(df, top_n=10)
+            print(f"\n✓ Analyzed {len(df)} binaries")
+            print(f"  Loudest SNR: {df.iloc[0]['SNR']:+.3f}")
+            
+            # Save results
+            csv_path = os.path.join(save_dir, 'individual_binary_results.csv')
+            df.to_csv(csv_path, index=False)
+            print(f"💾 Saved: {csv_path}")
+            
+            # Save plots
+            plot_individual_binaries(
+                df, psrs_injected=psrs_clean, top_N=20,
+                save_dir=save_dir, run_name=run_name
+            )
+    
+    # ========== ENSEMBLE ANALYSIS ==========
+    # if config.RUN_ENSEMBLE_ANALYSIS:
+        # print("\n" + "="*70)
+        # print("ENSEMBLE ANALYSIS")
+        # print("="*70)
+        
+        # # auto guess: default = 0.5 * n_binaries
+        # if args.initial_guess == "auto":
+        #     N_initial_guess = int(0.5 * selected_config['n_binaries'])
+        # else:
+        #     N_initial_guess = int(args.initial_guess)
+
+        # SNR_low, SNR_high = args.snr_range
+
+        # ensemble_results = find_N_ensemble(
+        #     selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan_seconds,
+        #     target_SNR=args.target_snr,
+        #     SNR_range=(SNR_low, SNR_high),
+        #     n_realisations=args.realisations,
+        #     N_initial_guess=N_initial_guess,
+        #     N_max_initial=selected_config['n_binaries'] * 3
+        # )
+        
+        # if 'statistics' in ensemble_results:
+        #     stats = ensemble_results['statistics']
+        #     print(f"\nn_binaries statistics:")
+        #     print(f"  Mean: {stats['mean']:.0f}")
+        #     print(f"  Median: {stats['median']:.0f}")
+        #     print(f"  Std: {stats['std']:.0f}")
+
+        # # Save results
+        # save_path = os.path.join(save_dir, 'ensemble_results.json')
+        # save_results(ensemble_results, save_path)
+
 logger.close()
 
 

@@ -226,6 +226,611 @@ def _make_enterprise_psr(psr):
         return EnterprisePulsar(psr, ephem='DE440', backend='tempo2')
     
 # ============================================================================
+# PRIVATE HELPERS
+# ============================================================================
+ 
+def _concat_populations(a: PopulationArrays,
+                         b: PopulationArrays) -> PopulationArrays:
+    """Concatenate two PopulationArrays, merging amp_A/B dicts."""
+    fields = ['f','Mc','Mtot','D_comov','z','h0','ra','dec','psi','iota','phi0']
+    kwargs = {k: np.concatenate([getattr(a, k), getattr(b, k)]) for k in fields}
+    new    = PopulationArrays(**kwargs)
+    # Merge amplitude dicts — keys present in both get concatenated
+    for psr_name in set(list(a.amp_A.keys()) + list(b.amp_A.keys())):
+        A_parts = []
+        B_parts = []
+        if psr_name in a.amp_A:
+            A_parts.append(a.amp_A[psr_name])
+            B_parts.append(a.amp_B[psr_name])
+        if psr_name in b.amp_A:
+            A_parts.append(b.amp_A[psr_name])
+            B_parts.append(b.amp_B[psr_name])
+        new.amp_A[psr_name] = np.concatenate(A_parts)
+        new.amp_B[psr_name] = np.concatenate(B_parts)
+    return new
+ 
+ 
+def _build_result(
+    population, N_final, SNR_final, SNR_range,
+    N_tested_list, SNR_tested_list,
+    iterations=0, expansions=0,
+    warning=None, broken=False,
+    timing_list=None,
+    detailed_output_SNR=False,
+    os_details_cache=None,
+):
+    meta = {
+        'N_tested'   : N_tested_list,
+        'SNR_tested' : SNR_tested_list,
+        'iterations' : iterations,
+        'expansions' : expansions,
+        'used_cache' : True,
+        'warning'    : warning,
+        'broken'     : broken,
+    }
+    if timing_list is not None:
+        meta['timing'] = timing_list
+ 
+    result = {
+        'population'   : population[:N_final],
+        'n_bininaries' : N_final,
+        'SNR_achieved' : float(SNR_final),
+        'SNR_target'   : SNR_range,
+        'search_metadata': meta,
+    }
+    if detailed_output_SNR and os_details_cache:
+        result['os_details']         = os_details_cache.get(N_final)
+        result['os_details_history'] = os_details_cache
+    return result
+
+
+def _build_result_distance_scaling(
+    population, SNR_final, 
+    pta = None,
+    psrs = None,
+    warning=None, broken=False,
+    timing_list=None,
+    timing_profile=None,
+    memory_profile=None,
+    detailed_output_SNR=False,
+):
+    meta = {
+        'warning'    : warning,
+        'broken'     : broken,
+    }
+    if timing_list is not None:
+        meta['timing'] = timing_list
+    if timing_profile is not None:
+        meta['timing_profile'] = timing_profile
+    if memory_profile is not None:
+        meta['memory_profile'] = memory_profile
+ 
+    result = {
+        'population'   : population,
+        'pta'          : pta,
+        'psrs'         : psrs,
+        'n_bininaries' : len(population),
+        'SNR_final' : float(SNR_final),
+        'search_metadata': meta,
+    }
+    return result
+
+
+def generate_consistent_population_distance_scaling(
+    config_template,
+    smbhb_module,
+    psrs_clean,
+    raw_noise_params,
+    Tspan,
+    target_SNR,
+    original_stoas,
+    SNR_range=None,
+    snr_noise_baseline=0.0,
+    timer=True,
+    verbose=True,
+    n_iterations=0,
+    toggle_memory_profiling=False,
+    keep_amplitudes_in_result=False,
+    inject_eps=1e-6,
+    precompute_parallel=False,
+    require_snr_in_range=True,
+):
+    profile_clock = timer or toggle_memory_profiling
+    t_start = time.perf_counter() if profile_clock else None
+
+    timing_profile = {}
+    memory_profile = {
+        'rss_mb': {},
+        'traced_peak_mb': None,
+        'traced_current_mb': None,
+    }
+
+    if toggle_memory_profiling:
+        tracemalloc.start()
+        rss0 = _get_rss_mb()
+        if rss0 is not None:
+            memory_profile['rss_mb']['start'] = float(rss0)
+
+    if verbose:
+        print(f"\nGenerating SNR-consistent population...")
+        print(f"Target SNR: {target_SNR}")
+
+    if target_SNR <= 0:
+        raise ValueError(f"target_SNR must be > 0, got {target_SNR}")
+
+    t_pop0 = time.perf_counter() if profile_clock else None
+    population = generate_population(config_template, smbhb_module, T_obs_seconds=Tspan)
+    if profile_clock and t_pop0 is not None:
+        timing_profile['generate_population_s'] = time.perf_counter() - t_pop0
+    if toggle_memory_profiling:
+        rss = _get_rss_mb()
+        if rss is not None:
+            memory_profile['rss_mb']['after_generate_population'] = float(rss)
+
+    t_trial0 = time.perf_counter() if profile_clock else None
+    snr_trial, pta, enterprise_psrs = compute_population_snr(
+        population,
+        psrs_clean,
+        raw_noise_params,
+        Tspan,
+        current_stoas=original_stoas,
+        return_psrs_pta=True,
+        timer=timer,
+        verbose=verbose,
+        inject_eps=inject_eps,
+        precompute_before_injection=False,
+        precompute_parallel=precompute_parallel,
+    )
+    if profile_clock and t_trial0 is not None:
+        timing_profile['initial_snr_compute_s'] = time.perf_counter() - t_trial0
+    if toggle_memory_profiling:
+        rss = _get_rss_mb()
+        if rss is not None:
+            memory_profile['rss_mb']['after_initial_snr'] = float(rss)
+    if verbose:
+        print(f"Initial SNR: {snr_trial:.4f}, Target SNR: {target_SNR:.4f}")
+
+    if snr_trial <= 0:
+        print(f"  ✗ Initial SNR {snr_trial:.4f} is non-positive, cannot scale distances.")
+        return None
+
+    snr_current = snr_trial
+    snr_final = None
+
+    if SNR_range is not None:
+        SNR_min, SNR_max = SNR_range
+        if SNR_min <= snr_current <= SNR_max:
+            print(f"  ✓ Initial SNR is within the provided SNR_range: {snr_current:.4f} ∈ [{SNR_min}, {SNR_max}]")
+            return _build_result_distance_scaling(
+                population=population,
+                SNR_final=snr_current,
+                pta=pta,
+                psrs=enterprise_psrs,
+                timing_profile=timing_profile if profile_clock else None,
+                memory_profile=memory_profile if toggle_memory_profiling else None,
+            )
+        else:
+            print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
+                  f"[{SNR_min}, {SNR_max}] — rescaling.")
+
+    def _apply_scale(population, factor):
+        """
+        Scale distances by factor: sources move further away → signal gets weaker.
+        D_comov increases, h0 decreases, z remapped on cosmological grid.
+        amp_A and amp_B scale with h0.
+        """
+        from stage2_inject import _comov_redshift_from_scaling
+        new_D_comov, new_z = _comov_redshift_from_scaling(
+            population.D_comov, population.z, factor
+        )
+        population.D_comov = new_D_comov
+        population.z       = new_z
+        population.h0      /= factor
+        population.amp_A   = {p: a / factor for p, a in population.amp_A.items()}
+        population.amp_B   = {p: b / factor for p, b in population.amp_B.items()}
+
+    def _analytic_scale(snr_current, target_SNR, snr_noise_baseline):
+        snr_signal_only   = snr_current - snr_noise_baseline
+        snr_signal_target = target_SNR  - snr_noise_baseline
+        if snr_signal_only <= 0:
+            raise ValueError(f"Signal-only SNR {snr_signal_only:.4f} is non-positive.")
+        return (snr_signal_only / snr_signal_target) ** 0.5
+
+    def _empirical_scale(history, target_SNR, snr_noise_baseline, cumulative_scale, verbose=False):
+        xs   = np.array([h['cumulative_scale'] for h in history])
+        snrs = np.array([h['snr'] for h in history])
+        snr_sig_target = max(target_SNR - snr_noise_baseline, 1e-12)
+
+        above = [(x, s) for x, s in zip(xs, snrs) if s >= target_SNR]
+        below = [(x, s) for x, s in zip(xs, snrs) if s <  target_SNR]
+
+        if above and below:
+            # SNR decreases as distance scale increases (h0 ∝ 1/D, SNR ∝ h0).
+            # So: "above" points have SMALLER cumulative_scale, "below" have LARGER.
+            # Pick the tightest bracket: largest scale in "above", smallest scale in "below".
+            best_above = max(above, key=lambda p: p[0])   # closest above (largest scale, least overshoot)
+            best_below = min(below, key=lambda p: p[0])   # closest below (smallest scale, least undershoot)
+
+            # Guard against degenerate bracket (shouldn't happen, but float safety)
+            if abs(best_above[0] - best_below[0]) < 1e-10:
+                if verbose:
+                    print(f"  [bisection] degenerate bracket, falling back to analytic")
+                return None
+
+            log_mid = 0.5 * (np.log(best_above[0]) + np.log(best_below[0]))
+            cum_scale_target = np.exp(log_mid)
+
+            # If midpoint is effectively where we already are, nudge toward the above point
+            if abs(cum_scale_target - cumulative_scale) / cumulative_scale < 1e-4:
+                cum_scale_target = best_above[0]
+                if verbose:
+                    print(f"  [bisection] midpoint too close to current, jumping to best_above={best_above[0]:.6f}")
+
+            incremental = cum_scale_target / cumulative_scale
+
+            if verbose:
+                print(f"  [bisection] bracket: "
+                    f"below=({best_below[0]:.6f}×, SNR={best_below[1]:.4f})  "
+                    f"above=({best_above[0]:.6f}×, SNR={best_above[1]:.4f})  "
+                    f"→ mid={cum_scale_target:.6f}×  incremental={incremental:.6f}")
+            return incremental
+
+        # --- No bracket yet: OLS power-law extrapolation ---
+        ys = np.log(np.maximum(snrs - snr_noise_baseline, 1e-12))
+        log_xs = np.log(xs)
+
+        if len(set(np.round(log_xs, 10))) < 2:
+            return None
+
+        x_mean, y_mean = log_xs.mean(), ys.mean()
+        denom = np.dot(log_xs - x_mean, log_xs - x_mean)
+        if denom < 1e-14:
+            return None
+
+        beta  = np.dot(log_xs - x_mean, ys - y_mean) / denom
+        alpha = y_mean - beta * x_mean
+
+        if beta == 0:
+            return None
+
+        log_cum_target   = (np.log(snr_sig_target) - alpha) / beta
+        cum_scale_target = np.exp(log_cum_target)
+        incremental      = cum_scale_target / cumulative_scale
+
+        if verbose:
+            print(f"  [OLS] β={beta:.3f}  α={alpha:.3f}  "
+                f"→ cum_scale_target={cum_scale_target:.6f}×  incremental={incremental:.6f}")
+        return incremental
+
+    # ------------------------------------------------------------------ #
+    # History: one entry per SNR measurement, keyed by cumulative scale   #
+    # ------------------------------------------------------------------ #
+    # cumulative_scale tracks the total D multiplier relative to the
+    # original population.  starts at 1.0 (no scaling applied yet).
+    cumulative_scale = 1.0
+    snr_history = [{'iteration': 0, 'cumulative_scale': cumulative_scale, 'snr': snr_trial}]
+
+    # --- First scale (always analytic — only one data point so far) ---
+    factor = _analytic_scale(snr_trial, target_SNR, snr_noise_baseline)
+    if verbose:
+        print(f"Scaling distances by factor {factor:.4f} to achieve target SNR...")
+    _apply_scale(population, factor)
+    cumulative_scale *= factor
+
+    # --- Iterative verification / re-scaling ---
+    for i in range(n_iterations):
+        t_iter0 = time.perf_counter() if profile_clock else None
+
+        snr_current, pta, enterprise_psrs = compute_population_snr(
+            population,
+            psrs_clean,
+            raw_noise_params,
+            Tspan,
+            current_stoas=original_stoas,
+            return_psrs_pta=True,
+            timer=timer,
+            verbose=verbose,
+            inject_eps=inject_eps,
+            precompute_before_injection=False,
+            precompute_parallel=precompute_parallel,
+        )
+
+        snr_final = snr_current
+        snr_history.append({'iteration': i + 1, 'cumulative_scale': cumulative_scale, 'snr': snr_current})
+
+        if profile_clock:
+            timing_profile[f'iteration_{i+1}_snr_compute_s'] = time.perf_counter() - t_iter0
+        if toggle_memory_profiling:
+            rss = _get_rss_mb()
+            if rss is not None:
+                memory_profile['rss_mb'][f'after_iteration_{i+1}_snr'] = float(rss)
+
+        if SNR_range is not None:
+            SNR_min, SNR_max = SNR_range
+            if SNR_min <= snr_current <= SNR_max:
+                print(f"  ✓ SNR is within the provided SNR_range: {snr_current:.4f} ∈ [{SNR_min}, {SNR_max}]")
+                break
+            else:
+                print(f"  SNR {snr_current:.4f} outside of provided SNR_range "
+                      f"[{SNR_min}, {SNR_max}] — rescaling.")
+        
+        # if outside the SNR range, continue to next iteration and free up memory
+        if i < n_iterations - 1:  # not the last iteration
+            del pta, enterprise_psrs
+            gc.collect()
+
+        if verbose:
+            print(f"[Iteration {i+1}/{n_iterations}] SNR after scaling: {snr_current:.4f} "
+                  f"(target: {target_SNR:.4f})")
+            print(f"  SNR history: " +
+                  ", ".join(f"it{h['iteration']}→{h['snr']:.4f}@{h['cumulative_scale']:.4f}x"
+                            for h in snr_history))
+
+        # Last iteration is verify-only
+        if i == n_iterations - 1:
+            break
+
+        # Try empirical fit first; fall back to analytic
+        factor = _empirical_scale(snr_history, target_SNR, snr_noise_baseline, cumulative_scale)
+        if factor is None:
+            factor = _analytic_scale(snr_current, target_SNR, snr_noise_baseline)
+            if verbose:
+                print(f"  [analytic fallback] scaling factor={factor:.4f}")
+
+        # Sanity-clamp: don't let a single step move more than 10× in either direction
+        factor = float(np.clip(factor, 0.1, 10.0))
+        if verbose:
+            print(f"  Re-scaling distances by factor {factor:.4f}  "
+                  f"(cumulative after: {cumulative_scale * factor:.4f}×)")
+        _apply_scale(population, factor)
+        cumulative_scale *= factor
+
+    if not keep_amplitudes_in_result:
+        population.amp_A = {}
+        population.amp_B = {}
+        if toggle_memory_profiling:
+            rss = _get_rss_mb()
+            if rss is not None:
+                memory_profile['rss_mb']['after_drop_amplitudes'] = float(rss)
+
+    if snr_final is None:
+        snr_final = float(snr_current)
+
+    if profile_clock and t_start is not None:
+        timing_profile['total_s'] = time.perf_counter() - t_start
+
+    if toggle_memory_profiling:
+        current, peak = tracemalloc.get_traced_memory()
+        memory_profile['traced_current_mb'] = float(current / 1024**2)
+        memory_profile['traced_peak_mb']    = float(peak / 1024**2)
+        rss = _get_rss_mb()
+        if rss is not None:
+            memory_profile['rss_mb']['end'] = float(rss)
+        tracemalloc.stop()
+
+        if verbose:
+            print("Memory profile (RSS MB):")
+            for label, mb in memory_profile['rss_mb'].items():
+                print(f"  {label}: {mb:.1f} MB")
+            print(f"  traced_peak_mb: {memory_profile['traced_peak_mb']:.1f} MB")
+
+    if verbose:
+        print(f"\nFinal SNR history:")
+        for h in snr_history:
+            print(f"  it{h['iteration']:2d}: cumulative_scale={h['cumulative_scale']:.4f}×  SNR={h['snr']:.4f}")
+
+    if SNR_range is not None and require_snr_in_range:
+        SNR_min, SNR_max = SNR_range
+        if not (SNR_min <= snr_final <= SNR_max):
+            if verbose:
+                print(
+                    f"  ✗ Final SNR {snr_final:.4f} outside required range "
+                    f"[{SNR_min}, {SNR_max}]"
+                )
+            return None
+
+    return _build_result_distance_scaling(
+        population=population,
+        SNR_final=snr_final,
+        pta=pta,
+        psrs=enterprise_psrs,
+        timing_profile=timing_profile if profile_clock else None,
+        memory_profile=memory_profile if toggle_memory_profiling else None,
+    )
+
+
+def generate_snr_consistent_populations_distance_scaling(
+    config_template,
+    smbhb_module,
+    psrs_clean,
+    raw_noise_params,
+    Tspan,
+    target_SNR,
+    SNR_range=None,
+    resimulate_noise=True,
+    original_stoas=None,
+    N_sims            = 20,
+    verbose           = True,
+    save_populations  = True,
+    profile           = False,
+    n_iterations      = 0,
+    toggle_memory_profiling = False,
+    keep_amplitudes_in_result = False,
+    inject_eps        = 1e-6,
+    precompute_parallel = False,
+    max_retries_per_sim = 25,
+    require_snr_in_range = True,
+):
+    start_time = time.time()
+
+    if target_SNR <= 0:
+        raise ValueError(f"target_SNR must be positive, got {target_SNR}")
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"GENERATING SNR-CONSISTENT POPULATIONS")
+        print(f"{'='*70}")
+        print(f"Target SNR:          {target_SNR}")
+        print(f"Simulations:         {N_sims}")
+        print(f"{'='*70}\n")
+
+    # =========================================================================
+    # SIMULATION LOOP — each sim gets a fresh independent noise realisation
+    # =========================================================================
+    populations       = []
+    n_bininaries_list = []
+    SNR_final_list    = []
+    success_count     = 0
+
+    for sim_idx in range(N_sims):
+        if verbose:
+            print(f"\n{'─'*70}")
+            print(f"SIMULATION {sim_idx + 1}/{N_sims}")
+            print(f"{'─'*70}")
+
+        if resimulate_noise:
+            # Reset to raw stoas then draw fresh noise for this simulation
+            for psr in psrs_clean:
+                psr.stoas[:] = original_stoas[psr.name]
+            for psr in psrs_clean:
+                simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
+            current_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+        else:
+            current_stoas = original_stoas
+
+        # Noise baseline for this simulation's noise realisation
+        snr_noise_baseline = compute_population_snr(
+            population=None,
+            psrs_clean=psrs_clean,
+            raw_noise_params=raw_noise_params,
+            Tspan=Tspan,
+            current_stoas=current_stoas,
+            return_psrs_pta=False,
+            timer=profile,
+            verbose=verbose,
+            inject_eps=inject_eps,
+            precompute_before_injection=False,
+            precompute_parallel=precompute_parallel,
+        )
+        if verbose:
+            print(f"Noise-only SNR baseline: {snr_noise_baseline:.4f}")
+
+        t_sim = time.time()
+        result = None
+        ii = 0
+        while result is None:
+            if ii >= max_retries_per_sim:
+                raise RuntimeError(
+                    f"Simulation {sim_idx+1} exceeded max_retries_per_sim="
+                    f"{max_retries_per_sim} while trying to meet SNR criteria"
+                )
+            if verbose and ii > 0:
+                print(f"✗ Simulation {sim_idx+1}, trial {ii} FAILED, retrying...")
+            ii += 1
+            result = generate_consistent_population_distance_scaling(
+                config_template           = config_template,
+                smbhb_module              = smbhb_module,
+                psrs_clean                = psrs_clean,
+                raw_noise_params          = raw_noise_params,
+                Tspan                     = Tspan,
+                target_SNR                = target_SNR,
+                SNR_range                 = SNR_range,
+                original_stoas            = current_stoas,
+                snr_noise_baseline        = snr_noise_baseline,
+                verbose                   = verbose,
+                timer                     = profile,
+                n_iterations              = n_iterations,
+                toggle_memory_profiling   = toggle_memory_profiling,
+                keep_amplitudes_in_result = keep_amplitudes_in_result,
+                inject_eps                = inject_eps,
+                precompute_parallel       = precompute_parallel,
+                require_snr_in_range      = require_snr_in_range,
+            )
+
+        if result is not None:
+            success_count += 1
+            n_bininaries_list.append(result['n_bininaries'])
+            SNR_final_list.append(result['SNR_final'])
+            result['sim_index'] = sim_idx
+
+            if save_populations:
+                populations.append(result)
+            else:
+                populations.append({
+                    'n_bininaries': result['n_bininaries'],
+                    'SNR_final'   : result['SNR_final'],
+                })
+
+            if verbose:
+                print(f"✓ Simulation {sim_idx+1} done ({time.time()-t_sim:.1f} s)")
+        else:
+            if verbose:
+                print(f"✗ Simulation {sim_idx+1} FAILED")
+
+    # =========================================================================
+    # Summary statistics
+    # =========================================================================
+    N_arr   = np.array(n_bininaries_list) if n_bininaries_list else np.array([])
+    SNR_arr = np.array(SNR_final_list)    if SNR_final_list    else np.array([])
+
+    def _stats(arr):
+        if len(arr) == 0:
+            return dict(mean=None, median=None, std=None, min=None, max=None)
+        return dict(
+            mean   = float(np.mean(arr)),
+            median = float(np.median(arr)),
+            std    = float(np.std(arr)),
+            min    = float(np.min(arr)),
+            max    = float(np.max(arr)),
+        )
+
+    total_time = time.time() - start_time
+
+    results = {
+        'populations': populations,
+        'summary_statistics': {
+            'n_bininaries': {**_stats(N_arr), 'all_values': n_bininaries_list},
+            'SNR_final':    {**_stats(SNR_arr), 'all_values': SNR_final_list},
+        },
+        'config': {
+            'N_sims'                   : N_sims,
+            'config_template'          : config_template,
+            'target_snr'               : float(target_SNR),
+            'profile'                  : bool(profile),
+            'memory_profiling'         : bool(toggle_memory_profiling),
+            'keep_amplitudes_in_result': bool(keep_amplitudes_in_result),
+            'inject_eps'               : float(inject_eps),
+            'precompute_parallel'      : bool(precompute_parallel),
+        },
+        'metadata': {
+            'success_count'   : success_count,
+            'success_rate'    : success_count / N_sims,
+            'total_time'      : total_time,
+            'save_populations': save_populations,
+        },
+    }
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"ENSEMBLE SUMMARY")
+        print(f"{'='*70}")
+        print(f"Success rate: {results['metadata']['success_rate']:.1%} ({success_count}/{N_sims})")
+        if success_count > 0:
+            s = results['summary_statistics']
+            print(f"\nBinaries per population:")
+            print(f"  Mean ± std : {s['n_bininaries']['mean']:.0f} ± {s['n_bininaries']['std']:.0f}")
+            print(f"  Range      : [{s['n_bininaries']['min']:.0f}, {s['n_bininaries']['max']:.0f}]")
+            print(f"\nSNR achieved:")
+            print(f"  Mean ± std : {s['SNR_final']['mean']:.4f} ± {s['SNR_final']['std']:.4f}")
+            print(f"  Range      : [{s['SNR_final']['min']:.4f}, {s['SNR_final']['max']:.4f}]")
+        print(f"\nTotal time: {total_time:.1f} s ({total_time/60:.1f} min)")
+        print(f"{'='*70}\n")
+
+    return results
+
+
+#### OLD VERSIONS OF THE ABOVE FUNCTIONS, KEPT FOR REFERENCE BUT NOT USED ANYWHERE ####
+# ============================================================================
 # SINGLE-POPULATION SEARCH
 # ============================================================================
  
@@ -754,595 +1359,3 @@ def generate_snr_consistent_populations(
     return results
  
  
-# ============================================================================
-# PRIVATE HELPERS
-# ============================================================================
- 
-def _concat_populations(a: PopulationArrays,
-                         b: PopulationArrays) -> PopulationArrays:
-    """Concatenate two PopulationArrays, merging amp_A/B dicts."""
-    fields = ['f','Mc','Mtot','D_comov','z','h0','ra','dec','psi','iota','phi0']
-    kwargs = {k: np.concatenate([getattr(a, k), getattr(b, k)]) for k in fields}
-    new    = PopulationArrays(**kwargs)
-    # Merge amplitude dicts — keys present in both get concatenated
-    for psr_name in set(list(a.amp_A.keys()) + list(b.amp_A.keys())):
-        A_parts = []
-        B_parts = []
-        if psr_name in a.amp_A:
-            A_parts.append(a.amp_A[psr_name])
-            B_parts.append(a.amp_B[psr_name])
-        if psr_name in b.amp_A:
-            A_parts.append(b.amp_A[psr_name])
-            B_parts.append(b.amp_B[psr_name])
-        new.amp_A[psr_name] = np.concatenate(A_parts)
-        new.amp_B[psr_name] = np.concatenate(B_parts)
-    return new
- 
- 
-def _build_result(
-    population, N_final, SNR_final, SNR_range,
-    N_tested_list, SNR_tested_list,
-    iterations=0, expansions=0,
-    warning=None, broken=False,
-    timing_list=None,
-    detailed_output_SNR=False,
-    os_details_cache=None,
-):
-    meta = {
-        'N_tested'   : N_tested_list,
-        'SNR_tested' : SNR_tested_list,
-        'iterations' : iterations,
-        'expansions' : expansions,
-        'used_cache' : True,
-        'warning'    : warning,
-        'broken'     : broken,
-    }
-    if timing_list is not None:
-        meta['timing'] = timing_list
- 
-    result = {
-        'population'   : population[:N_final],
-        'n_bininaries' : N_final,
-        'SNR_achieved' : float(SNR_final),
-        'SNR_target'   : SNR_range,
-        'search_metadata': meta,
-    }
-    if detailed_output_SNR and os_details_cache:
-        result['os_details']         = os_details_cache.get(N_final)
-        result['os_details_history'] = os_details_cache
-    return result
-
-
-def _build_result_distance_scaling(
-    population, SNR_final, 
-    pta = None,
-    psrs = None,
-    warning=None, broken=False,
-    timing_list=None,
-    timing_profile=None,
-    memory_profile=None,
-    detailed_output_SNR=False,
-):
-    meta = {
-        'warning'    : warning,
-        'broken'     : broken,
-    }
-    if timing_list is not None:
-        meta['timing'] = timing_list
-    if timing_profile is not None:
-        meta['timing_profile'] = timing_profile
-    if memory_profile is not None:
-        meta['memory_profile'] = memory_profile
- 
-    result = {
-        'population'   : population,
-        'pta'          : pta,
-        'psrs'         : psrs,
-        'n_bininaries' : len(population),
-        'SNR_final' : float(SNR_final),
-        'search_metadata': meta,
-    }
-    return result
-
-
-def generate_consistent_population_distance_scaling(
-    config_template,
-    smbhb_module,
-    psrs_clean,
-    raw_noise_params,
-    Tspan,
-    target_SNR,
-    original_stoas,
-    SNR_range=None,
-    snr_noise_baseline=0.0,
-    timer=True,
-    verbose=True,
-    n_iterations=0,
-    toggle_memory_profiling=False,
-    keep_amplitudes_in_result=False,
-    inject_eps=1e-6,
-    precompute_parallel=False,
-    require_snr_in_range=True,
-):
-    profile_clock = timer or toggle_memory_profiling
-    t_start = time.perf_counter() if profile_clock else None
-
-    timing_profile = {}
-    memory_profile = {
-        'rss_mb': {},
-        'traced_peak_mb': None,
-        'traced_current_mb': None,
-    }
-
-    if toggle_memory_profiling:
-        tracemalloc.start()
-        rss0 = _get_rss_mb()
-        if rss0 is not None:
-            memory_profile['rss_mb']['start'] = float(rss0)
-
-    if verbose:
-        print(f"\nGenerating SNR-consistent population...")
-        print(f"Target SNR: {target_SNR}")
-
-    if target_SNR <= 0:
-        raise ValueError(f"target_SNR must be > 0, got {target_SNR}")
-
-    t_pop0 = time.perf_counter() if profile_clock else None
-    population = generate_population(config_template, smbhb_module, T_obs_seconds=Tspan)
-    if profile_clock and t_pop0 is not None:
-        timing_profile['generate_population_s'] = time.perf_counter() - t_pop0
-    if toggle_memory_profiling:
-        rss = _get_rss_mb()
-        if rss is not None:
-            memory_profile['rss_mb']['after_generate_population'] = float(rss)
-
-    t_trial0 = time.perf_counter() if profile_clock else None
-    snr_trial, pta, enterprise_psrs = compute_population_snr(
-        population,
-        psrs_clean,
-        raw_noise_params,
-        Tspan,
-        current_stoas=original_stoas,
-        return_psrs_pta=True,
-        timer=timer,
-        verbose=verbose,
-        inject_eps=inject_eps,
-        precompute_before_injection=False,
-        precompute_parallel=precompute_parallel,
-    )
-    if profile_clock and t_trial0 is not None:
-        timing_profile['initial_snr_compute_s'] = time.perf_counter() - t_trial0
-    if toggle_memory_profiling:
-        rss = _get_rss_mb()
-        if rss is not None:
-            memory_profile['rss_mb']['after_initial_snr'] = float(rss)
-    if verbose:
-        print(f"Initial SNR: {snr_trial:.4f}, Target SNR: {target_SNR:.4f}")
-
-    if snr_trial <= 0:
-        print(f"  ✗ Initial SNR {snr_trial:.4f} is non-positive, cannot scale distances.")
-        return None
-
-    snr_current = snr_trial
-    snr_final = None
-
-    if SNR_range is not None:
-        SNR_min, SNR_max = SNR_range
-        if SNR_min <= snr_current <= SNR_max:
-            print(f"  ✓ Initial SNR is within the provided SNR_range: {snr_current:.4f} ∈ [{SNR_min}, {SNR_max}]")
-            return _build_result_distance_scaling(
-                population=population,
-                SNR_final=snr_current,
-                pta=pta,
-                psrs=enterprise_psrs,
-                timing_profile=timing_profile if profile_clock else None,
-                memory_profile=memory_profile if toggle_memory_profiling else None,
-            )
-        else:
-            print(f"  Initial SNR {snr_current:.4f} outside of provided SNR_range "
-                  f"[{SNR_min}, {SNR_max}] — rescaling.")
-
-    def _apply_scale(population, factor):
-        population.D_comov *= factor
-        population.h0      /= factor
-        population.amp_A = {p: a / factor for p, a in population.amp_A.items()}
-        population.amp_B = {p: b / factor for p, b in population.amp_B.items()}
-
-    def _analytic_scale(snr_current, target_SNR, snr_noise_baseline):
-        snr_signal_only   = snr_current - snr_noise_baseline
-        snr_signal_target = target_SNR  - snr_noise_baseline
-        if snr_signal_only <= 0:
-            raise ValueError(f"Signal-only SNR {snr_signal_only:.4f} is non-positive.")
-        return (snr_signal_only / snr_signal_target) ** 0.5
-
-    def _empirical_scale(history, target_SNR, snr_noise_baseline, cumulative_scale, verbose=False):
-        xs   = np.array([h['cumulative_scale'] for h in history])
-        snrs = np.array([h['snr'] for h in history])
-        snr_sig_target = max(target_SNR - snr_noise_baseline, 1e-12)
-
-        above = [(x, s) for x, s in zip(xs, snrs) if s >= target_SNR]
-        below = [(x, s) for x, s in zip(xs, snrs) if s <  target_SNR]
-
-        if above and below:
-            # SNR decreases as distance scale increases (h0 ∝ 1/D, SNR ∝ h0).
-            # So: "above" points have SMALLER cumulative_scale, "below" have LARGER.
-            # Pick the tightest bracket: largest scale in "above", smallest scale in "below".
-            best_above = max(above, key=lambda p: p[0])   # closest above (largest scale, least overshoot)
-            best_below = min(below, key=lambda p: p[0])   # closest below (smallest scale, least undershoot)
-
-            # Guard against degenerate bracket (shouldn't happen, but float safety)
-            if abs(best_above[0] - best_below[0]) < 1e-10:
-                if verbose:
-                    print(f"  [bisection] degenerate bracket, falling back to analytic")
-                return None
-
-            log_mid = 0.5 * (np.log(best_above[0]) + np.log(best_below[0]))
-            cum_scale_target = np.exp(log_mid)
-
-            # If midpoint is effectively where we already are, nudge toward the above point
-            if abs(cum_scale_target - cumulative_scale) / cumulative_scale < 1e-4:
-                cum_scale_target = best_above[0]
-                if verbose:
-                    print(f"  [bisection] midpoint too close to current, jumping to best_above={best_above[0]:.6f}")
-
-            incremental = cum_scale_target / cumulative_scale
-
-            if verbose:
-                print(f"  [bisection] bracket: "
-                    f"below=({best_below[0]:.6f}×, SNR={best_below[1]:.4f})  "
-                    f"above=({best_above[0]:.6f}×, SNR={best_above[1]:.4f})  "
-                    f"→ mid={cum_scale_target:.6f}×  incremental={incremental:.6f}")
-            return incremental
-
-        # --- No bracket yet: OLS power-law extrapolation ---
-        ys = np.log(np.maximum(snrs - snr_noise_baseline, 1e-12))
-        log_xs = np.log(xs)
-
-        if len(set(np.round(log_xs, 10))) < 2:
-            return None
-
-        x_mean, y_mean = log_xs.mean(), ys.mean()
-        denom = np.dot(log_xs - x_mean, log_xs - x_mean)
-        if denom < 1e-14:
-            return None
-
-        beta  = np.dot(log_xs - x_mean, ys - y_mean) / denom
-        alpha = y_mean - beta * x_mean
-
-        if beta == 0:
-            return None
-
-        log_cum_target   = (np.log(snr_sig_target) - alpha) / beta
-        cum_scale_target = np.exp(log_cum_target)
-        incremental      = cum_scale_target / cumulative_scale
-
-        if verbose:
-            print(f"  [OLS] β={beta:.3f}  α={alpha:.3f}  "
-                f"→ cum_scale_target={cum_scale_target:.6f}×  incremental={incremental:.6f}")
-        return incremental
-
-    # ------------------------------------------------------------------ #
-    # History: one entry per SNR measurement, keyed by cumulative scale   #
-    # ------------------------------------------------------------------ #
-    # cumulative_scale tracks the total D multiplier relative to the
-    # original population.  starts at 1.0 (no scaling applied yet).
-    cumulative_scale = 1.0
-    snr_history = [{'iteration': 0, 'cumulative_scale': cumulative_scale, 'snr': snr_trial}]
-
-    # --- First scale (always analytic — only one data point so far) ---
-    factor = _analytic_scale(snr_trial, target_SNR, snr_noise_baseline)
-    if verbose:
-        print(f"Scaling distances by factor {factor:.4f} to achieve target SNR...")
-    _apply_scale(population, factor)
-    cumulative_scale *= factor
-
-    # --- Iterative verification / re-scaling ---
-    for i in range(n_iterations):
-        t_iter0 = time.perf_counter() if profile_clock else None
-
-        snr_current, pta, enterprise_psrs = compute_population_snr(
-            population,
-            psrs_clean,
-            raw_noise_params,
-            Tspan,
-            current_stoas=original_stoas,
-            return_psrs_pta=True,
-            timer=timer,
-            verbose=verbose,
-            inject_eps=inject_eps,
-            precompute_before_injection=False,
-            precompute_parallel=precompute_parallel,
-        )
-
-        snr_final = snr_current
-        snr_history.append({'iteration': i + 1, 'cumulative_scale': cumulative_scale, 'snr': snr_current})
-
-        if profile_clock:
-            timing_profile[f'iteration_{i+1}_snr_compute_s'] = time.perf_counter() - t_iter0
-        if toggle_memory_profiling:
-            rss = _get_rss_mb()
-            if rss is not None:
-                memory_profile['rss_mb'][f'after_iteration_{i+1}_snr'] = float(rss)
-
-        if SNR_range is not None:
-            SNR_min, SNR_max = SNR_range
-            if SNR_min <= snr_current <= SNR_max:
-                print(f"  ✓ SNR is within the provided SNR_range: {snr_current:.4f} ∈ [{SNR_min}, {SNR_max}]")
-                break
-            else:
-                print(f"  SNR {snr_current:.4f} outside of provided SNR_range "
-                      f"[{SNR_min}, {SNR_max}] — rescaling.")
-        
-        # if outside the SNR range, continue to next iteration and free up memory
-        if i < n_iterations - 1:  # not the last iteration
-            del pta, enterprise_psrs
-            gc.collect()
-
-        if verbose:
-            print(f"[Iteration {i+1}/{n_iterations}] SNR after scaling: {snr_current:.4f} "
-                  f"(target: {target_SNR:.4f})")
-            print(f"  SNR history: " +
-                  ", ".join(f"it{h['iteration']}→{h['snr']:.4f}@{h['cumulative_scale']:.4f}x"
-                            for h in snr_history))
-
-        # Last iteration is verify-only
-        if i == n_iterations - 1:
-            break
-
-        # Try empirical fit first; fall back to analytic
-        factor = _empirical_scale(snr_history, target_SNR, snr_noise_baseline, cumulative_scale)
-        if factor is None:
-            factor = _analytic_scale(snr_current, target_SNR, snr_noise_baseline)
-            if verbose:
-                print(f"  [analytic fallback] scaling factor={factor:.4f}")
-
-        # Sanity-clamp: don't let a single step move more than 10× in either direction
-        factor = float(np.clip(factor, 0.1, 10.0))
-        if verbose:
-            print(f"  Re-scaling distances by factor {factor:.4f}  "
-                  f"(cumulative after: {cumulative_scale * factor:.4f}×)")
-        _apply_scale(population, factor)
-        cumulative_scale *= factor
-
-    if not keep_amplitudes_in_result:
-        population.amp_A = {}
-        population.amp_B = {}
-        if toggle_memory_profiling:
-            rss = _get_rss_mb()
-            if rss is not None:
-                memory_profile['rss_mb']['after_drop_amplitudes'] = float(rss)
-
-    if snr_final is None:
-        snr_final = float(snr_current)
-
-    if profile_clock and t_start is not None:
-        timing_profile['total_s'] = time.perf_counter() - t_start
-
-    if toggle_memory_profiling:
-        current, peak = tracemalloc.get_traced_memory()
-        memory_profile['traced_current_mb'] = float(current / 1024**2)
-        memory_profile['traced_peak_mb']    = float(peak / 1024**2)
-        rss = _get_rss_mb()
-        if rss is not None:
-            memory_profile['rss_mb']['end'] = float(rss)
-        tracemalloc.stop()
-
-        if verbose:
-            print("Memory profile (RSS MB):")
-            for label, mb in memory_profile['rss_mb'].items():
-                print(f"  {label}: {mb:.1f} MB")
-            print(f"  traced_peak_mb: {memory_profile['traced_peak_mb']:.1f} MB")
-
-    if verbose:
-        print(f"\nFinal SNR history:")
-        for h in snr_history:
-            print(f"  it{h['iteration']:2d}: cumulative_scale={h['cumulative_scale']:.4f}×  SNR={h['snr']:.4f}")
-
-    if SNR_range is not None and require_snr_in_range:
-        SNR_min, SNR_max = SNR_range
-        if not (SNR_min <= snr_final <= SNR_max):
-            if verbose:
-                print(
-                    f"  ✗ Final SNR {snr_final:.4f} outside required range "
-                    f"[{SNR_min}, {SNR_max}]"
-                )
-            return None
-
-    return _build_result_distance_scaling(
-        population=population,
-        SNR_final=snr_final,
-        pta=pta,
-        psrs=enterprise_psrs,
-        timing_profile=timing_profile if profile_clock else None,
-        memory_profile=memory_profile if toggle_memory_profiling else None,
-    )
-
-
-def generate_snr_consistent_populations_distance_scaling(
-    config_template,
-    smbhb_module,
-    psrs_clean,
-    raw_noise_params,
-    Tspan,
-    target_SNR,
-    SNR_range=None,
-    resimulate_noise=True,
-    original_stoas=None,
-    N_sims            = 20,
-    verbose           = True,
-    save_populations  = True,
-    profile           = False,
-    n_iterations      = 0,
-    toggle_memory_profiling = False,
-    keep_amplitudes_in_result = False,
-    inject_eps        = 1e-6,
-    precompute_parallel = False,
-    max_retries_per_sim = 25,
-    require_snr_in_range = True,
-):
-    start_time = time.time()
-
-    if target_SNR <= 0:
-        raise ValueError(f"target_SNR must be positive, got {target_SNR}")
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"GENERATING SNR-CONSISTENT POPULATIONS")
-        print(f"{'='*70}")
-        print(f"Target SNR:          {target_SNR}")
-        print(f"Simulations:         {N_sims}")
-        print(f"{'='*70}\n")
-
-    # =========================================================================
-    # SIMULATION LOOP — each sim gets a fresh independent noise realisation
-    # =========================================================================
-    populations       = []
-    n_bininaries_list = []
-    SNR_final_list    = []
-    success_count     = 0
-
-    for sim_idx in range(N_sims):
-        if verbose:
-            print(f"\n{'─'*70}")
-            print(f"SIMULATION {sim_idx + 1}/{N_sims}")
-            print(f"{'─'*70}")
-
-        if resimulate_noise:
-            # Reset to raw stoas then draw fresh noise for this simulation
-            for psr in psrs_clean:
-                psr.stoas[:] = original_stoas[psr.name]
-            for psr in psrs_clean:
-                simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
-            current_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
-        else:
-            current_stoas = original_stoas
-
-        # Noise baseline for this simulation's noise realisation
-        snr_noise_baseline = compute_population_snr(
-            population=None,
-            psrs_clean=psrs_clean,
-            raw_noise_params=raw_noise_params,
-            Tspan=Tspan,
-            current_stoas=current_stoas,
-            return_psrs_pta=False,
-            timer=profile,
-            verbose=verbose,
-            inject_eps=inject_eps,
-            precompute_before_injection=False,
-            precompute_parallel=precompute_parallel,
-        )
-        if verbose:
-            print(f"Noise-only SNR baseline: {snr_noise_baseline:.4f}")
-
-        t_sim = time.time()
-        result = None
-        ii = 0
-        while result is None:
-            if ii >= max_retries_per_sim:
-                raise RuntimeError(
-                    f"Simulation {sim_idx+1} exceeded max_retries_per_sim="
-                    f"{max_retries_per_sim} while trying to meet SNR criteria"
-                )
-            if verbose and ii > 0:
-                print(f"✗ Simulation {sim_idx+1}, trial {ii} FAILED, retrying...")
-            ii += 1
-            result = generate_consistent_population_distance_scaling(
-                config_template           = config_template,
-                smbhb_module              = smbhb_module,
-                psrs_clean                = psrs_clean,
-                raw_noise_params          = raw_noise_params,
-                Tspan                     = Tspan,
-                target_SNR                = target_SNR,
-                SNR_range                 = SNR_range,
-                original_stoas            = current_stoas,
-                snr_noise_baseline        = snr_noise_baseline,
-                verbose                   = verbose,
-                timer                     = profile,
-                n_iterations              = n_iterations,
-                toggle_memory_profiling   = toggle_memory_profiling,
-                keep_amplitudes_in_result = keep_amplitudes_in_result,
-                inject_eps                = inject_eps,
-                precompute_parallel       = precompute_parallel,
-                require_snr_in_range      = require_snr_in_range,
-            )
-
-        if result is not None:
-            success_count += 1
-            n_bininaries_list.append(result['n_bininaries'])
-            SNR_final_list.append(result['SNR_final'])
-            result['sim_index'] = sim_idx
-
-            if save_populations:
-                populations.append(result)
-            else:
-                populations.append({
-                    'n_bininaries': result['n_bininaries'],
-                    'SNR_final'   : result['SNR_final'],
-                })
-
-            if verbose:
-                print(f"✓ Simulation {sim_idx+1} done ({time.time()-t_sim:.1f} s)")
-        else:
-            if verbose:
-                print(f"✗ Simulation {sim_idx+1} FAILED")
-
-    # =========================================================================
-    # Summary statistics
-    # =========================================================================
-    N_arr   = np.array(n_bininaries_list) if n_bininaries_list else np.array([])
-    SNR_arr = np.array(SNR_final_list)    if SNR_final_list    else np.array([])
-
-    def _stats(arr):
-        if len(arr) == 0:
-            return dict(mean=None, median=None, std=None, min=None, max=None)
-        return dict(
-            mean   = float(np.mean(arr)),
-            median = float(np.median(arr)),
-            std    = float(np.std(arr)),
-            min    = float(np.min(arr)),
-            max    = float(np.max(arr)),
-        )
-
-    total_time = time.time() - start_time
-
-    results = {
-        'populations': populations,
-        'summary_statistics': {
-            'n_bininaries': {**_stats(N_arr), 'all_values': n_bininaries_list},
-            'SNR_final':    {**_stats(SNR_arr), 'all_values': SNR_final_list},
-        },
-        'config': {
-            'N_sims'                   : N_sims,
-            'config_template'          : config_template,
-            'target_snr'               : float(target_SNR),
-            'profile'                  : bool(profile),
-            'memory_profiling'         : bool(toggle_memory_profiling),
-            'keep_amplitudes_in_result': bool(keep_amplitudes_in_result),
-            'inject_eps'               : float(inject_eps),
-            'precompute_parallel'      : bool(precompute_parallel),
-        },
-        'metadata': {
-            'success_count'   : success_count,
-            'success_rate'    : success_count / N_sims,
-            'total_time'      : total_time,
-            'save_populations': save_populations,
-        },
-    }
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"ENSEMBLE SUMMARY")
-        print(f"{'='*70}")
-        print(f"Success rate: {results['metadata']['success_rate']:.1%} ({success_count}/{N_sims})")
-        if success_count > 0:
-            s = results['summary_statistics']
-            print(f"\nBinaries per population:")
-            print(f"  Mean ± std : {s['n_bininaries']['mean']:.0f} ± {s['n_bininaries']['std']:.0f}")
-            print(f"  Range      : [{s['n_bininaries']['min']:.0f}, {s['n_bininaries']['max']:.0f}]")
-            print(f"\nSNR achieved:")
-            print(f"  Mean ± std : {s['SNR_final']['mean']:.4f} ± {s['SNR_final']['std']:.4f}")
-            print(f"  Range      : [{s['SNR_final']['min']:.4f}, {s['SNR_final']['max']:.4f}]")
-        print(f"\nTotal time: {total_time:.1f} s ({total_time/60:.1f} min)")
-        print(f"{'='*70}\n")
-
-    return results
