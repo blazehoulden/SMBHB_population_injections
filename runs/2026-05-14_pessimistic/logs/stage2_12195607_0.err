@@ -1,0 +1,34 @@
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) nvidia/.latest   2) slurm/.latest
+-------------------------------------------------------------------------------
+There are messages associated with the following module(s):
+-------------------------------------------------------------------------------
+
+mamba:
+   - Mamba is a drop-in replacement for conda, offering higher speed and
+   more reliable environment solutions. - Do you really need conda/mamba??
+   Do you know about python virtual environments??? We HIGHLY recommend
+   using virtual envs instead. e.g. python -m venv my-environment - Remember
+   you can change where conda environemnts are created (if you run out of
+   space in your home directory) ``` $ conda config --env --prepend
+   envs_dirs /path/to/my/project/on/fred/.conda/envs $ conda config --env
+   --prepend pkgs_dirs /path/to/my/project/on/fred/.conda/pkgs ``` - To hide
+   this message in the future, load the module with -q ``` $ module -q load
+   conda ```
+
+-------------------------------------------------------------------------------
+
+Traceback (most recent call last):
+  File "/fred/oz005/users/bhoulden/SMBHB_population_injections/stage2_inject.py", line 449, in <module>
+    main()
+  File "/fred/oz005/users/bhoulden/SMBHB_population_injections/stage2_inject.py", line 407, in main
+    cumulative_scale, pta, enterprise_psrs = _scale_and_iterate(
+                                             ^^^^^^^^^^^^^^^^^^^
+  File "/fred/oz005/users/bhoulden/SMBHB_population_injections/stage2_inject.py", line 215, in _scale_and_iterate
+    factor = _analytic_scale(snr, target_snr, noise_only_snr)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/fred/oz005/users/bhoulden/SMBHB_population_injections/stage2_inject.py", line 177, in _analytic_scale
+    raise ValueError(
+ValueError: Signal-only SNR is non-positive (-1.5648). The GW signal may be too weak relative to noise.

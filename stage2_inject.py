@@ -2,36 +2,30 @@
 """
 Stage 2 — Noise simulation, SNR scaling, and CGW analysis.
 
-Called as a Slurm array task; one job per simulation.
-  sim_id = SLURM_ARRAY_TASK_ID  (passed via --task-id)
+Called as a single Slurm job after ALL stage-1 array tasks complete.
+Loops over every sim_id from 0 to n_sims-1 internally.
 
-What this job does
-──────────────────
-1.  Load + filter pulsars (same list every job).
-2.  Load the population shard for this sim_id from ShardedPickleStore.
-3.  Sum the per-pulsar Δstoa files written by stage 1 to get the total GW
-    TOA contribution for this population.
-4.  Simulate noise for each pulsar to produce noise-only stoas.
-5.  Add the GW Δstoas to the noise-only stoas → noise+GW stoas.
-6.  Compute the optimal-statistic SNR using Enterprise + the OS module.
-7.  If SNR is outside [snr_low, snr_high], scale the GW signal by adjusting
-    distances and redshifts, then iterate until convergence (or raise after
-    max_iterations).
-8.  Apply the final distance/redshift/h0 scaling to every binary in the
-    population shard (in place via ShardedPickleStore.update).
-9.  Pre-filter the population by a sky-weighted h0/f proxy, compute CGW SNRs
-    for the top N_PRE_FILTER binaries, and store the results back into the
-    shard via ShardedPickleStore.update(cgw_snr=...).
+What this job does (per simulation)
+────────────────────────────────────
+1.  Locate <output_dir>/sim{sim_id:03d}/.
+2.  Load + filter pulsars.
+3.  Sum the per-pulsar Δstoa files across ALL chunks for this sim to get
+    the total GW TOA contribution from the full population.
+4.  Simulate noise for each pulsar.
+5.  Add combined Δstoas → noise+GW stoas.
+6.  Compute optimal-statistic SNR (Enterprise).
+7.  Scale GW signal iteratively until SNR converges in [snr_low, snr_high].
+8.  Apply scale factor to h0/D_comov/z in every chunk shard for this sim.
+9.  Optionally compute CGW SNRs across all chunks combined.
 
-Inputs (from stage 1)
-─────────────────────
-  <output_dir>/populations/subpop_{sim_id:03d}.pkl.gz
-  <output_dir>/stoas/sim{sim_id:04d}/{psr_name}_delta.npy   (one per pulsar)
+Inputs  (from stage 1, all under <output_dir>/sim{sim_id:03d}/)
+────────────────────────────────────────────────────────────────
+  populations/subpop_{chunk_id:03d}.pkl.gz
+  stoas/sim{chunk_id:04d}/{psr_name}_delta.npy
 
-Outputs (written / updated by this job)
-───────────────────────────────────────
-  <output_dir>/populations/subpop_{sim_id:03d}.pkl.gz  — updated h0/D_comov/z
-                                                          + cgw_snr field
+Outputs (updated in place)
+──────────────────────────
+  populations/subpop_{chunk_id:03d}.pkl.gz   — updated h0/D_comov/z + cgw_snr
 """
 
 import argparse
@@ -40,6 +34,7 @@ import json
 import os
 import sys
 import time
+from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -54,47 +49,40 @@ from stage1_setup import ShardedPickleStore
 from CGW_SNR import compute_cgw_snr_optimal_population
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
 
-# Number of binaries to evaluate CGW SNR for (pre-filtered by sky-weighted proxy)
-N_PRE_FILTER  = 2_000
-N_TOP_SOURCES = 50
-
-# Maximum SNR-scaling iterations before giving up
-MAX_SCALE_ITER = 20
+N_PRE_FILTER_PER_CHUNK  = 2_000
+N_GLOBAL_CGW_CANDIDATES = 2_000
+N_TOP_SOURCES           = 50
+MAX_SCALE_ITER          = 20
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
 
-def _load_toa_deltas(
-    out_dir: str,
-    sim_id: int,
+def _load_and_sum_toa_deltas(
+    sim_out_dir: str,
+    chunk_ids: List[int],
     psr_names: List[str],
 ) -> Dict[str, np.ndarray]:
-    """
-    Load the per-pulsar Δstoa arrays saved by stage 1 for sim_id.
+    """Sum per-pulsar Δstoa arrays across all chunks → one combined delta."""
+    combined: Dict[str, np.ndarray] = {}
 
-    Returns {psr_name: delta_array (days, float64)}.
-    Exits with an error if any pulsar file is missing.
-    """
-    sim_dir = os.path.join(out_dir, "stoas", f"sim{sim_id:04d}")
-    if not os.path.isdir(sim_dir):
-        sys.exit(
-            f"ERROR: stage-1 stoa directory not found: {sim_dir}\n"
-            f"Ensure stage1_setup.py completed for sim_id={sim_id}."
-        )
+    for chunk_id in chunk_ids:
+        sim_dir = os.path.join(sim_out_dir, "stoas", f"sim{chunk_id:04d}")
+        if not os.path.isdir(sim_dir):
+            sys.exit(f"ERROR: stoa dir not found: {sim_dir}")
+        for name in psr_names:
+            fpath = os.path.join(sim_dir, f"{name}_delta.npy")
+            if not os.path.isfile(fpath):
+                sys.exit(f"ERROR: missing delta file: {fpath}")
+            delta = np.load(fpath).astype(np.float64)
+            if name in combined:
+                combined[name] += delta
+            else:
+                combined[name] = delta.copy()
 
-    delta_stoas: Dict[str, np.ndarray] = {}
-    for name in psr_names:
-        fpath = os.path.join(sim_dir, f"{name}_delta.npy")
-        if not os.path.isfile(fpath):
-            sys.exit(
-                f"ERROR: missing delta file for pulsar '{name}': {fpath}"
-            )
-        delta_stoas[name] = np.load(fpath).astype(np.float64)
-
-    print(f"  Loaded Δstoas for {len(delta_stoas)} pulsars from {sim_dir}")
-    return delta_stoas
+    print(f"  Summed Δstoas across {len(chunk_ids)} chunks for {len(combined)} pulsars")
+    return combined
 
 
 def _comov_redshift_from_scaling(
@@ -102,27 +90,36 @@ def _comov_redshift_from_scaling(
     z: np.ndarray,
     scale: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Given a distance scaling factor, find the nearest (D_comov, z) grid point
-    such that h0 ∝ (1+z)^(2/3) / D_comov scales by `scale`.
+    from SMBHB_pop_synth import _Z_GRID, _CHI_GRID
 
-    Vectorised over (N,) input arrays.
-    Returns new_D_comov, new_z (both shape (N,), float32).
-    """
-    from SMBHB_pop_synth import _Z_GRID, _CHI_GRID  # precomputed cosmology grids
+    # Avoid divide-by-zero from _CHI_GRID[0] = 0 at z=0
+    valid      = _CHI_GRID > 0
+    z_grid     = _Z_GRID[valid]
+    chi_grid   = _CHI_GRID[valid]
+    frac_grid  = (1.0 + z_grid) ** (2.0 / 3.0) / chi_grid
 
-    # For each binary the target value of (1+z)^(2/3) / D_comov after scaling
-    targets = (1.0 + z) ** (2.0 / 3.0) / D_comov / scale  # shape (N,)
+    targets = (1.0 + z) ** (2.0 / 3.0) / D_comov / scale
 
-    # Grid of (1+z)^(2/3) / D_comov values — computed once
-    frac_grid = (1.0 + _Z_GRID) ** (2.0 / 3.0) / _CHI_GRID  # shape (G,)
+    # searchsorted requires ascending order
+    if frac_grid[0] > frac_grid[-1]:
+        frac_asc  = frac_grid[::-1]
+        chi_asc   = chi_grid[::-1]
+        z_asc     = z_grid[::-1]
+    else:
+        frac_asc  = frac_grid
+        chi_asc   = chi_grid
+        z_asc     = z_grid
 
-    # Nearest grid point for each binary — shape (N,)
-    idx = np.argmin(np.abs(frac_grid[None, :] - targets[:, None]), axis=1)
+    # Insert each target; nearest neighbour between the bracketing pair
+    raw = np.searchsorted(frac_asc, targets, side="left")
+    raw = np.clip(raw, 1, len(frac_asc) - 1)          # ensure lo = raw-1 is valid
+    lo  = raw - 1
 
-    return _CHI_GRID[idx].astype(np.float32), _Z_GRID[idx].astype(np.float32)
+    # Pick whichever of (lo, raw) is closer
+    pick_raw = np.abs(frac_asc[raw] - targets) <= np.abs(frac_asc[lo] - targets)
+    idx      = np.where(pick_raw, raw, lo)
 
-
+    return chi_asc[idx].astype(np.float32), z_asc[idx].astype(np.float32)
 def _scale_and_iterate(
     psrs_clean,
     delta_stoas: Dict[str, np.ndarray],
@@ -134,6 +131,7 @@ def _scale_and_iterate(
     raw_noise_params: Dict[str, Dict],
     max_iterations: int = MAX_SCALE_ITER,
 ) -> Tuple[float, object, list]:
+
     noise_only_snr = compute_population_snr(
         psrs_clean=psrs_clean,
         population=None,
@@ -147,10 +145,8 @@ def _scale_and_iterate(
     def _empirical_scale(history, cumulative_scale):
         xs   = np.array([h['cumulative_scale'] for h in history])
         snrs = np.array([h['snr'] for h in history])
-
         above = [(x, s) for x, s in zip(xs, snrs) if s >= target_snr]
         below = [(x, s) for x, s in zip(xs, snrs) if s <  target_snr]
-
         if above and below:
             best_above = max(above, key=lambda p: p[0])
             best_below = min(below, key=lambda p: p[0])
@@ -161,40 +157,34 @@ def _scale_and_iterate(
             if abs(cum_target - cumulative_scale) / cumulative_scale < 1e-4:
                 cum_target = best_above[0]
             incremental = cum_target / cumulative_scale
-            print(f"  [bisection] bracket: "
-                  f"below=({best_below[0]:.4f}×, SNR={best_below[1]:.4f})  "
+            print(f"  [bisection] below=({best_below[0]:.4f}×, SNR={best_below[1]:.4f})  "
                   f"above=({best_above[0]:.4f}×, SNR={best_above[1]:.4f})  "
-                  f"→ mid={cum_target:.4f}×  incremental={incremental:.4f}")
+                  f"→ mid={cum_target:.4f}×  incr={incremental:.4f}")
             return incremental
-
-        # No bracket yet — fall back to analytic
         return None
 
     def _analytic_scale(snr_current, snr_target, snr_noise_baseline):
-        snr_signal_current = snr_current - snr_noise_baseline
-        snr_signal_target  = snr_target  - snr_noise_baseline
-        if snr_signal_current <= 0:
-            raise ValueError(
-                f"Signal-only SNR is non-positive ({snr_signal_current:.4f}). "
-                "The GW signal may be too weak relative to noise."
-            )
-        if snr_signal_target <= 0:
-            raise ValueError(
-                f"Target signal SNR is non-positive ({snr_signal_target:.4f}). "
-                "Check target SNR and noise level."
-            )
-        return np.sqrt(snr_signal_current / snr_signal_target)
+        sig_cur = snr_current - snr_noise_baseline
+        sig_tgt = snr_target  - snr_noise_baseline
+        if sig_cur <= 0:
+            raise ValueError(f"Signal-only SNR non-positive ({sig_cur:.4f}).")
+        if sig_tgt <= 0:
+            raise ValueError(f"Target signal SNR non-positive ({sig_tgt:.4f}).")
+        return np.sqrt(sig_cur / sig_tgt)
 
     cumulative_scale = 1.0
-    snr_history = []
-    pta = None
-    enterprise_psrs = None
+    snr_history      = []
+    pta              = None
+    enterprise_psrs  = None
+
+    # Keep the original signal untouched
+    original_delta_stoas = {n: delta_stoas[n].copy() for n in delta_stoas}
 
     for iteration in range(max_iterations):
-        signal_stoas = {
-            name: noise_stoas[name] + delta_stoas[name]
-            for name in noise_stoas
-        }
+        # Always build from the original, scaled by current cumulative_scale
+        scaled_delta = {n: original_delta_stoas[n] / cumulative_scale for n in original_delta_stoas}
+        signal_stoas = {n: noise_stoas[n] + scaled_delta[n] for n in noise_stoas}
+
         snr, pta, enterprise_psrs = compute_population_snr(
             psrs_clean=psrs_clean,
             population=None,
@@ -202,11 +192,14 @@ def _scale_and_iterate(
             Tspan=Tspan_seconds,
             current_stoas=signal_stoas,
         )
-        print(f"  Iteration {iteration + 1:2d}: OS SNR = {snr:.4f}  "
-              f"(target [{snr_low}, {snr_high}])  cumulative_scale={cumulative_scale:.4f}×")
+        print(f"  Iter {iteration+1:2d}: OS SNR={snr:.4f}  "
+            f"target=[{snr_low},{snr_high}]  scale={cumulative_scale:.4f}×")
 
         if snr_low <= snr <= snr_high:
-            print(f"  ✓ Converged at iteration {iteration + 1}")
+            print(f"  ✓ Converged at iteration {iteration+1}")
+            # Update the caller's delta_stoas to the converged scaled version
+            for n in delta_stoas:
+                delta_stoas[n] = scaled_delta[n]
             return cumulative_scale, pta, enterprise_psrs
 
         snr_history.append({'cumulative_scale': cumulative_scale, 'snr': snr})
@@ -214,77 +207,99 @@ def _scale_and_iterate(
         if len(snr_history) == 1:
             factor = _analytic_scale(snr, target_snr, noise_only_snr)
             print(f"  [analytic] factor={factor:.4f}")
+            cumulative_scale *= factor          # scale=1.0 × factor on first step
         else:
             factor = _empirical_scale(snr_history, cumulative_scale)
             if factor is None:
                 factor = _analytic_scale(snr, target_snr, noise_only_snr)
                 print(f"  [analytic fallback] factor={factor:.4f}")
-
-        factor = float(np.clip(factor, 0.1, 10.0))
-        for name in delta_stoas:
-            delta_stoas[name] /= factor
-        cumulative_scale /= factor
+            factor = float(np.clip(factor, 0.1, 10.0))
+            cumulative_scale *= factor
 
     raise RuntimeError(
-        f"SNR scaling failed to converge within {max_iterations} iterations. "
-        f"Last SNR={snr:.4f}, target=[{snr_low}, {snr_high}]."
+        f"SNR scaling failed in {max_iterations} iterations. "
+        f"Last SNR={snr:.4f}, target=[{snr_low},{snr_high}]."
     )
 
 
-def _update_population_scaling(
+def _apply_scaling_to_all_chunks(
     store: ShardedPickleStore,
-    sim_id: int,
+    chunk_ids: List[int],
     cumulative_scale: float,
 ) -> None:
-    """
-    Apply the amplitude scaling to the stored population shard.
+    print(f"\n  Applying scale 1/{cumulative_scale:.6f} to {len(chunk_ids)} chunks...")
+    for chunk_id in chunk_ids:
+        pop = store.read(chunk_id)
 
-    h0  → h0 / cumulative_scale   (larger scale = sources moved further away)
-    D_comov, z updated to nearest cosmological grid point consistent with
-    the new h0 ∝ (1+z)^(2/3) / D_comov.
-    """
-    pop = store.read(sim_id)
+        new_h0 = pop.h0 / cumulative_scale
+        new_D_comov, new_z = _comov_redshift_from_scaling(
+            pop.D_comov, pop.z, 1.0 / cumulative_scale
+        )
 
-    new_h0 = pop.h0 / cumulative_scale
-    new_D_comov, new_z = _comov_redshift_from_scaling(
-        pop.D_comov, pop.z, 1.0 / cumulative_scale
-    )
+        store.update(chunk_id, h0=new_h0, D_comov=new_D_comov, z=new_z)
 
-    store.update(sim_id, h0=new_h0, D_comov=new_D_comov, z=new_z)
-    print(
-        f"  Updated shard: h0 scaled by 1/{cumulative_scale:.4f}, "
-        f"D_comov and z remapped on cosmological grid"
-    )
+        del pop, new_h0, new_D_comov, new_z
+        gc.collect()
+
+        print(f"    chunk {chunk_id:03d}: updated", flush=True)
 
 
 def _compute_cgw_snrs(
-    sim_id: int,
     store: ShardedPickleStore,
+    chunk_ids: List[int],
     pta,
     enterprise_psrs,
     raw_noise_params,
     parsed_noise_params,
     Tspan_seconds: float,
 ) -> None:
-    pop = store.read(sim_id)
-    n_binaries = len(pop)
-    n_filter = min(N_PRE_FILTER, n_binaries)
+    """
+    Two-pass CGW SNR computation across all chunks.
+    Pass 1: pre-filter each chunk to top N_PRE_FILTER_PER_CHUNK by proxy.
+    Pass 2: evaluate CGW SNR on top N_GLOBAL_CGW_CANDIDATES globally.
+    """
+    print(f"\n  CGW: pre-filtering {len(chunk_ids)} chunks "
+          f"(top {N_PRE_FILTER_PER_CHUNK} each)...")
 
-    print(f"\n  CGW analysis: pre-filtering {n_binaries:,} binaries → top {n_filter}...")
-    if n_filter < N_PRE_FILTER:
-        print(f"  (population smaller than N_PRE_FILTER={N_PRE_FILTER}, using all {n_binaries} binaries)")
+    candidate_list = []   # (chunk_id, local_idx, proxy)
 
-    proxies = (pop.h0 / (2.0 * np.pi * pop.f)) * np.array([
-        sky_sensitivity_weight(pop.ra[i], pop.dec[i]) for i in range(n_binaries)
-    ])
+    for chunk_id in chunk_ids:
+        pop    = store.read(chunk_id)
+        n      = len(pop)
+        n_keep = min(N_PRE_FILTER_PER_CHUNK, n)
 
-    if n_filter == n_binaries:
-        top_indices = np.argsort(proxies)[::-1]
-    else:
-        top_indices = np.argpartition(proxies, -n_filter)[-n_filter:]
-        top_indices = top_indices[np.argsort(proxies[top_indices])[::-1]]
+        proxies = (pop.h0 / (2.0 * np.pi * pop.f)) * np.array([
+            sky_sensitivity_weight(pop.ra[i], pop.dec[i]) for i in range(n)
+        ])
 
-    top_binaries = [pop[i] for i in top_indices]
+        if n_keep == n:
+            top_local = np.argsort(proxies)[::-1]
+        else:
+            top_local = np.argpartition(proxies, -n_keep)[-n_keep:]
+            top_local = top_local[np.argsort(proxies[top_local])[::-1]]
+
+        for local_idx in top_local:
+            candidate_list.append((chunk_id, int(local_idx), float(proxies[local_idx])))
+
+        del pop
+        gc.collect()
+
+    candidate_list.sort(key=lambda x: x[2], reverse=True)
+    global_candidates = candidate_list[:N_GLOBAL_CGW_CANDIDATES]
+    print(f"  {len(candidate_list)} candidates merged → top {len(global_candidates)} for CGW SNR")
+
+    # Group by chunk to minimise re-loads
+    by_chunk: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
+    for global_rank, (chunk_id, local_idx, _) in enumerate(global_candidates):
+        by_chunk[chunk_id].append((global_rank, local_idx))
+
+    top_binaries = [None] * len(global_candidates)
+    for chunk_id, entries in by_chunk.items():
+        pop = store.read(chunk_id)
+        for global_rank, local_idx in entries:
+            top_binaries[global_rank] = pop[local_idx]
+        del pop
+        gc.collect()
 
     print(f"  Computing CGW SNR for {len(top_binaries)} candidates...")
     top_snrs = compute_cgw_snr_optimal_population(
@@ -297,41 +312,421 @@ def _compute_cgw_snrs(
         profile=True,
     )
 
-    cgw_snr_full = np.zeros(n_binaries, dtype=np.float32)
-    for local_rank, global_idx in enumerate(top_indices):
-        cgw_snr_full[global_idx] = top_snrs[local_rank]
-    store.update(sim_id, cgw_snr=cgw_snr_full)
+    # Write cgw_snr back to each chunk
+    chunk_snr_maps: Dict[int, Dict[int, float]] = defaultdict(dict)
+    for global_rank, (chunk_id, local_idx, _) in enumerate(global_candidates):
+        chunk_snr_maps[chunk_id][local_idx] = float(top_snrs[global_rank])
 
-    ranked = sorted(zip(top_indices, top_snrs), key=lambda x: x[1], reverse=True)
+    for chunk_id in chunk_ids:
+        pop         = store.read(chunk_id)
+        cgw_snr_arr = np.zeros(len(pop), dtype=np.float32)
+        for local_idx, snr_val in chunk_snr_maps.get(chunk_id, {}).items():
+            cgw_snr_arr[local_idx] = snr_val
+        store.update(chunk_id, cgw_snr=cgw_snr_arr)
+        del pop
+        gc.collect()
+
+    # Print top sources
+    # Compute proxy rank from global_candidates (already sorted by proxy descending)
+    proxy_rank_map = {
+        (chunk_id, local_idx): proxy_rank
+        for proxy_rank, (chunk_id, local_idx, _) in enumerate(global_candidates, start=1)
+    }
+
+    ranked = sorted(zip(global_candidates, top_snrs), key=lambda x: x[1], reverse=True)
     n_show = min(N_TOP_SOURCES, len(ranked))
     print(f"\n  Top {n_show} CGW candidates:")
-    for rank, (global_idx, snr) in enumerate(ranked[:n_show], start=1):
+    for rank, ((chunk_id, local_idx, proxy), snr_val) in enumerate(ranked[:n_show], start=1):
+        proxy_rank = proxy_rank_map[(chunk_id, local_idx)]
+        pop = store.read(chunk_id)
         print(
-            f"    {rank:2d}.  global_idx={global_idx:7d}  "
-            f"f={pop.f[global_idx]:.2e} Hz  "
-            f"Mc={pop.Mc[global_idx]:.2e} Msun  "
-            f"h0={pop.h0[global_idx]:.2e}  "
-            f"ra={np.degrees(pop.ra[global_idx]):.1f}°  "
-            f"dec={np.degrees(pop.dec[global_idx]):.1f}°  "
-            f"CGW_SNR={snr:.4f}"
+            f"    {rank:2d}.  chunk={chunk_id:03d}  local_idx={local_idx:7d}  "
+            f"f={pop.f[local_idx]:.2e} Hz  "
+            f"Mc={pop.Mc[local_idx]:.2e} Msun  "
+            f"h0={pop.h0[local_idx]:.2e}  "
+            f"proxy={proxy:.4e} (rank #{proxy_rank})  "
+            f"CGW_SNR={snr_val:.4f}"
         )
-    print(f"\n  CGW SNR stored for {n_filter} binaries (zeroed elsewhere)")
+        del pop
+
+
+# =============================================================================
+# Per-simulation processing
+# =============================================================================
+def _save_toa_residuals(
+    sim_out_dir: str,
+    psrs_clean,
+    noise_stoas: Dict[str, np.ndarray],
+    combined_delta_stoas: Dict[str, np.ndarray],
+    cumulative_scale: float,
+) -> None:
+    """
+    Save three sets of TOA residuals for this simulation:
+
+      residuals/
+        noise/          {psr_name}.npy   — noise-only stoas
+        population/     {psr_name}.npy   — GW signal contribution only
+                                           (scaled by cumulative_scale)
+        combined/       {psr_name}.npy   — noise + scaled GW signal
+
+    All arrays are float64, units match psr.stoas (seconds).
+    """
+    base = os.path.join(sim_out_dir, "residuals")
+    dirs = {
+        "noise":      os.path.join(base, "noise"),
+        "population": os.path.join(base, "population"),
+        "combined":   os.path.join(base, "combined"),
+    }
+    for d in dirs.values():
+        os.makedirs(d, exist_ok=True)
+
+    print(f"\n💾 Saving TOA residuals to {base}/")
+    for psr in psrs_clean:
+        name = psr.name
+
+        noise_arr = noise_stoas[name]                                    # noise only
+        pop_arr   = combined_delta_stoas[name] / cumulative_scale        # scaled GW signal
+        comb_arr  = noise_arr + pop_arr                                  # combined
+
+        np.save(os.path.join(dirs["noise"],      f"{name}.npy"), noise_arr.astype(np.float64))
+        np.save(os.path.join(dirs["population"], f"{name}.npy"), pop_arr.astype(np.float64))
+        np.save(os.path.join(dirs["combined"],   f"{name}.npy"), comb_arr.astype(np.float64))
+
+    print(f"  ✓ Saved residuals for {len(psrs_clean)} pulsars "
+          f"(noise / population / combined)")
+
+    # Also write a small manifest so the directory is self-describing
+    manifest = {
+        "cumulative_scale":  cumulative_scale,
+        "n_pulsars":         len(psrs_clean),
+        "psr_names":         [psr.name for psr in psrs_clean],
+        "description": {
+            "noise":      "Simulated noise residuals only (no GW signal)",
+            "population": "GW TOA contribution from full population, scaled to target SNR",
+            "combined":   "noise + population (what an observer would measure)",
+        },
+    }
+    with open(os.path.join(base, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh, indent=2)
+
+
+def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_params) -> bool:
+    """
+    Run the full stage-2 pipeline for a single sim_id.
+    Returns True on success, False on failure (so the loop can continue).
+    """
+    t_sim = time.time()
+    sim_out_dir = os.path.join(args.output_dir, f"sim{sim_id:03d}")
+
+    print(f"\n{'='*60}")
+    print(f"Stage 2 — sim_id={sim_id}")
+    print(f"  Dir        : {sim_out_dir}")
+    print(f"  Target SNR : {args.target_snr}  range={args.snr_range}")
+    print(f"  CGW        : {'enabled' if args.cgw else 'disabled'}")
+    print(f"{'='*60}")
+
+    # ── load metadata ─────────────────────────────────────────────────────────
+    config_path = os.path.join(sim_out_dir, "metadata", "config.json")
+    if not os.path.isfile(config_path):
+        print(f"ERROR: config.json not found at {config_path}", file=sys.stderr)
+        return False
+    with open(config_path) as fh:
+        run_config = json.load(fh)
+    Tspan_seconds = run_config["Tspan_seconds"]
+
+    # ── discover chunks ───────────────────────────────────────────────────────
+    pop_dir   = os.path.join(sim_out_dir, "populations")
+    store     = ShardedPickleStore(pop_dir)
+    chunk_ids = store.available()
+
+    if not chunk_ids:
+        print(f"ERROR: no population shards found in {pop_dir}", file=sys.stderr)
+        return False
+    print(f"\n📦 Found {len(chunk_ids)} chunks: {chunk_ids}")
+
+    # ── 1. Sum Δstoas across all chunks ───────────────────────────────────────
+    psr_names = [psr.name for psr in psrs_clean]
+    print(f"\n📂 Summing Δstoas across {len(chunk_ids)} chunks...")
+    combined_delta_stoas = _load_and_sum_toa_deltas(sim_out_dir, chunk_ids, psr_names)
+
+    # ── 2. Simulate noise (fresh draw per sim) ────────────────────────────────
+    print("\n🔊 Simulating pulsar noise...")
+    for i, psr in enumerate(psrs_clean):
+        print(f"  [{i+1}/{len(psrs_clean)}] simulating {psr.name}...", end=" ", flush=True)
+        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
+        print("done", flush=True)
+    noise_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+    print(f"✓ Noise stoas for {len(noise_stoas)} pulsars")
+
+    # ── 3. SNR scaling loop ───────────────────────────────────────────────────
+    print("\n📐 Scaling combined GW signal to target OS SNR...")
+    snr_low, snr_high = args.snr_range
+
+    try:
+        cumulative_scale, pta, enterprise_psrs = _scale_and_iterate(
+            psrs_clean=psrs_clean,
+            delta_stoas=combined_delta_stoas,
+            noise_stoas=noise_stoas,
+            target_snr=args.target_snr,
+            snr_low=snr_low,
+            snr_high=snr_high,
+            Tspan_seconds=Tspan_seconds,
+            raw_noise_params=raw_noise_params,
+        )
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return False
+
+    print(f"✓ Converged — scale factor: {cumulative_scale:.6f}")
+
+    # ── Save TOA residuals ────────────────────────────────────────────────────
+    _save_toa_residuals(
+        sim_out_dir=sim_out_dir,
+        psrs_clean=psrs_clean,
+        noise_stoas=noise_stoas,
+        combined_delta_stoas=combined_delta_stoas,
+        cumulative_scale=cumulative_scale,
+    )
+
+    # Now safe to free the large arrays
+    del combined_delta_stoas, noise_stoas
+    if not args.cgw:
+        del pta, enterprise_psrs
+    gc.collect()
+
+    # ── Apply scale factor to all chunks ──────────────────────────────────────
+    print("\n💾 Updating all shards...")
+    _apply_scaling_to_all_chunks(store, chunk_ids, cumulative_scale)
+
+    # ── 5. CGW SNR analysis ───────────────────────────────────────────────────
+    if args.cgw:
+        print("\n🔭 Computing CGW SNRs...")
+        _compute_cgw_snrs(
+            store=store,
+            chunk_ids=chunk_ids,
+            pta=pta,
+            enterprise_psrs=enterprise_psrs,
+            raw_noise_params=raw_noise_params,
+            parsed_noise_params=parsed_noise_params,
+            Tspan_seconds=Tspan_seconds,
+        )
+        print("✓ CGW complete")
+    else:
+        print("\n(CGW skipped — use --cgw to enable)")
+
+    elapsed = time.time() - t_sim
+    print(f"\n✅ Stage 2 sim_id={sim_id} complete in {elapsed / 60:.1f} min")
+    print(f"   Output: {sim_out_dir}/populations/")
+    return True
+
+
+# =============================================================================
+# Cross-sim summary object
+# =============================================================================
+
+def _build_summary_object(
+    args,
+    n_keep_per_category: int = 200,
+) -> None:
+    """
+    After all sims complete, sweep every shard across every sim and collect
+    the most scientifically interesting binaries into a single .pkl.gz.
+
+    Categories collected (indices unioned so one binary can qualify on many):
+      - highest CGW SNR
+      - nearest / most distant (D_comov)
+      - highest / lowest frequency
+      - heaviest / lightest chirp mass  (Mc)
+      - heaviest / lightest total mass  (Mtot)
+      - highest strain  (h0)
+      - lowest / highest redshift  (z)
+
+    Output: <output_dir>/summary_population.pkl.gz
+    """
+    import gzip, pickle
+
+    out_path = os.path.join(args.output_dir, "summary_population.pkl.gz")
+    print(f"\n{'='*60}")
+    print(f"Building cross-sim summary object → {out_path}")
+    print(f"  n_keep_per_category = {n_keep_per_category}")
+    print(f"{'='*60}")
+
+    # Collect one big list of (field→value) dicts; we'll sort at the end.
+    # To avoid loading everything into RAM we do two passes:
+    #   Pass 1 — find threshold values for each category.
+    #   Pass 2 — collect only the qualifying rows.
+    # For simplicity (and because n_keep_per_category is small relative to
+    # the total) we do a single pass with bounded heaps instead.
+
+    import heapq
+
+    # Each heap stores (sort_key, global_index) — we use a min-heap so the
+    # root is the *worst* element currently tracked; if a new element beats
+    # it we replace the root.
+    # For "highest X" we store (-X, idx); for "lowest X" we store (X, idx).
+    # We also store enough per-binary data to reconstruct the object later.
+
+    # Map of category_name → (heap, is_max)
+    # heap entries: (key, flat_global_idx)
+    # We collect the actual PopulationArrays rows in a separate dict keyed
+    # by flat_global_idx so we don't duplicate storage.
+
+    categories = {
+        "cgw_snr_high":  ([], True,  "cgw_snr"),
+        "D_comov_near":  ([], False, "D_comov"),
+        "D_comov_far":   ([], True,  "D_comov"),
+        "f_low":         ([], False, "f"),
+        "f_high":        ([], True,  "f"),
+        "Mc_low":        ([], False, "Mc"),
+        "Mc_high":       ([], True,  "Mc"),
+        "Mtot_low":      ([], False, "Mtot"),
+        "Mtot_high":     ([], True,  "Mtot"),
+        "h0_high":       ([], True,  "h0"),
+        "z_low":         ([], False, "z"),
+        "z_high":        ([], True,  "z"),
+    }
+
+    # flat_global_idx → single-binary PopulationArrays (pop[i])
+    collected: Dict[int, object] = {}
+    # flat_global_idx → sim_id so we can tag each binary
+    idx_to_sim: Dict[int, int]   = {}
+    global_counter = 0
+
+    def _heap_push(heap, is_max, key, gidx, cap):
+        """Push (key, gidx) onto a bounded min-heap of size `cap`."""
+        entry = (-key if is_max else key, gidx)
+        if len(heap) < cap:
+            heapq.heappush(heap, entry)
+        elif entry < heap[0]:   # better than current worst
+            heapq.heapreplace(heap, entry)
+
+    for sim_id in range(args.n_sims):
+        sim_out_dir = os.path.join(args.output_dir, f"sim{sim_id:03d}")
+        pop_dir     = os.path.join(sim_out_dir, "populations")
+        store       = ShardedPickleStore(pop_dir)
+        chunk_ids   = store.available()
+
+        print(f"  sim {sim_id:03d}: {len(chunk_ids)} chunks", flush=True)
+
+        for chunk_id in chunk_ids:
+            pop = store.read(chunk_id)
+            n   = len(pop)
+
+            # Which fields does this pop actually have?
+            has_cgw = hasattr(pop, "cgw_snr") and pop.cgw_snr is not None
+
+            for local_i in range(n):
+                gidx = global_counter + local_i
+
+                # Evaluate every category
+                vals = {
+                    "cgw_snr": float(pop.cgw_snr[local_i]) if has_cgw else -1.0,
+                    "D_comov": float(pop.D_comov[local_i]),
+                    "f":       float(pop.f[local_i]),
+                    "Mc":      float(pop.Mc[local_i]),
+                    "Mtot":    float(pop.Mtot[local_i]),
+                    "h0":      float(pop.h0[local_i]),
+                    "z":       float(pop.z[local_i]),
+                }
+
+                qualifies = False
+                for cat_name, (heap, is_max, field) in categories.items():
+                    key = vals[field]
+                    entry = (-key if is_max else key, gidx)
+                    if len(heap) < n_keep_per_category:
+                        qualifies = True
+                    elif entry < heap[0]:
+                        qualifies = True
+                    if qualifies:
+                        break  # no need to check further — we'll store this one
+
+                if qualifies:
+                    # Store the binary; push to all relevant heaps
+                    collected[gidx] = pop[local_i]
+                    idx_to_sim[gidx] = sim_id
+                    for cat_name, (heap, is_max, field) in categories.items():
+                        _heap_push(heap, is_max, vals[field], gidx, n_keep_per_category)
+
+            global_counter += n
+            del pop
+            gc.collect()
+
+    # ── Build per-category index sets ─────────────────────────────────────────
+    category_indices: Dict[str, List[int]] = {}
+    for cat_name, (heap, is_max, field) in categories.items():
+        category_indices[cat_name] = sorted({gidx for (_, gidx) in heap})
+
+    all_indices = sorted(collected.keys())
+    print(f"\n  Total unique binaries collected: {len(all_indices):,}")
+    for cat_name, idxs in category_indices.items():
+        print(f"    {cat_name:<20s}: {len(idxs):,}")
+
+    # ── Concatenate into a single PopulationArrays ─────────────────────────────
+    # We concatenate the single-binary objects in global index order so that
+    # category_indices (which use global indices) remain valid as positions
+    # in the final array.
+    gidx_to_pos = {gidx: pos for pos, gidx in enumerate(all_indices)}
+
+    # Use the first binary to discover field names
+    sample = collected[all_indices[0]]
+    fields = [f for f in vars(sample) if isinstance(getattr(sample, f), np.ndarray)]
+
+    # Build concatenated arrays
+    arrays: Dict[str, np.ndarray] = {
+        field: np.concatenate([
+            np.atleast_1d(getattr(collected[gidx], field))
+            for gidx in all_indices
+        ])
+        for field in fields
+    }
+
+    # Tag each binary with its sim_id and original global index
+    arrays["sim_id"]      = np.array([idx_to_sim[gidx]  for gidx in all_indices], dtype=np.int32)
+    arrays["global_idx"]  = np.array(all_indices, dtype=np.int64)
+
+    # Remap category_indices from global-idx space to position space
+    summary_meta = {
+        "category_indices": {
+            cat: [gidx_to_pos[gidx] for gidx in idxs]
+            for cat, idxs in category_indices.items()
+        },
+        "n_sims":               args.n_sims,
+        "n_keep_per_category":  n_keep_per_category,
+        "total_scanned":        global_counter,
+    }
+
+    payload = {"arrays": arrays, "meta": summary_meta}
+
+    with gzip.open(out_path, "wb") as fh:
+        pickle.dump(payload, fh, protocol=4)
+
+    size_mb = os.path.getsize(out_path) / 1e6
+    print(f"\n✅ Summary object written: {out_path}  ({size_mb:.1f} MB)")
+    print(f"   Load with:")
+    print(f"     import gzip, pickle")
+    print(f"     with gzip.open('{out_path}', 'rb') as f:")
+    print(f"         d = pickle.load(f)")
+    print(f"     arrays = d['arrays']   # dict of np.ndarray, all same length")
+    print(f"     meta   = d['meta']     # category_indices, etc.")
+
+
 
 # =============================================================================
 # Argument parsing
 # =============================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Stage 2: noise sim + SNR scaling + CGW analysis")
-    p.add_argument("--output-dir", type=str, required=True)
+    p = argparse.ArgumentParser(description="Stage 2: combined SNR scaling + CGW (single job)")
+    p.add_argument("--output-dir",  type=str,   required=True)
     p.add_argument("--config", "-c", default="optimistic",
                    choices=list(config.POPULATION_CONFIGS.keys()))
-    p.add_argument("--target-snr", type=float, default=4.0)
-    p.add_argument("--snr-range", nargs=2, type=float, default=[3.5, 4.25])
-    p.add_argument("--task-id", type=int, default=None,
-                   help="Override $SLURM_ARRAY_TASK_ID (for local testing)")
-    p.add_argument("--cgw", action="store_true",
-                   help="Enable CGW SNR computation (default: off)")
+    p.add_argument("--target-snr",  type=float, default=4.0)
+    p.add_argument("--snr-range",   nargs=2, type=float, default=[3.5, 4.25])
+    p.add_argument("--n-sims",      type=int,   required=True,
+                   help="Total number of simulations (0 .. n_sims-1)")
+    p.add_argument("--n-chunks",    type=int,   required=True,
+                   help="Number of chunks per simulation (used for logging only)")
+    p.add_argument("--cgw",         action="store_true")
     return p.parse_args()
 
 
@@ -340,109 +735,48 @@ def parse_args():
 # =============================================================================
 
 def main():
-    args    = parse_args()
-    t0      = time.time()
-    out_dir = args.output_dir
-
-    # ── resolve sim_id ────────────────────────────────────────────────────────
-    sim_id = args.task_id
-    if sim_id is None:
-        env_val = os.environ.get("SLURM_ARRAY_TASK_ID")
-        if env_val is None:
-            sys.exit("ERROR: --task-id not set and $SLURM_ARRAY_TASK_ID is not defined.")
-        sim_id = int(env_val)
+    args = parse_args()
+    t0   = time.time()
 
     print(f"\n{'='*60}")
-    print(f"Stage 2 — sim_id={sim_id}  config={args.config}")
-    print(f"  Target SNR: {args.target_snr}  range=[{args.snr_range[0]}, {args.snr_range[1]}]")
-    print(f"  CGW analysis: {'enabled' if args.cgw else 'disabled'}")
-    print(f"{'='*60}")
+    print(f"Stage 2 — single job, processing {args.n_sims} simulation(s)")
+    print(f"  Output dir : {args.output_dir}")
+    print(f"  Config     : {args.config}")
+    print(f"  Target SNR : {args.target_snr}  range={args.snr_range}")
+    print(f"  Chunks/sim : {args.n_chunks}")
+    print(f"  CGW        : {'enabled' if args.cgw else 'disabled'}")
+    print(f"{'='*60}\n")
 
-    # ── load metadata ─────────────────────────────────────────────────────────
-    meta_dir      = os.path.join(out_dir, "metadata")
-    config_path   = os.path.join(meta_dir, "config.json")
-    if not os.path.isfile(config_path):
-        sys.exit(f"ERROR: metadata/config.json not found in {meta_dir}. Run stage 1 first.")
-    with open(config_path) as fh:
-        run_config = json.load(fh)
-    Tspan_seconds = run_config["Tspan_seconds"]
-
-    # ── 1. Load + filter pulsars ──────────────────────────────────────────────
-    print("\n📡 Loading pulsars...")
+    # ── Load pulsars once — shared across all sims ────────────────────────────
+    print("📡 Loading pulsars (once, shared across all sims)...")
     psrs_unfiltered = load_pulsars(verbose=True)
-
-    print("🔍 Filtering pulsars (15-year array)...")
     with suppress_enterprise_warnings():
-        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
-            psrs_unfiltered, verbose=True
-        )
-    psr_names = [psr.name for psr in psrs_clean]
-    print(f"✓ {len(psrs_clean)} pulsars loaded")
+        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
+    print(f"✓ {len(psrs_clean)} pulsars loaded\n")
 
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
 
-    # ── 2. Load the population shard ─────────────────────────────────────────
-    pop_dir = os.path.join(out_dir, "populations")
-    store   = ShardedPickleStore(pop_dir)
+    # ── Loop over all sim_ids ─────────────────────────────────────────────────
+    failed = []
+    for sim_id in range(args.n_sims):
+        success = process_sim(sim_id, args, psrs_clean, raw_noise_params, parsed_noise_params)
+        if not success:
+            failed.append(sim_id)
 
-    print(f"\n💾 Loading population shard subpop_{sim_id:03d}.pkl.gz ...")
-    pop = store.read(sim_id)
-    print(f"✓ {len(pop):,} binaries loaded")
-
-    # ── 3. Load stage-1 TOA deltas ────────────────────────────────────────────
-    print(f"\n📂 Loading stage-1 Δstoa arrays for sim_id={sim_id}...")
-    delta_stoas = _load_toa_deltas(out_dir, sim_id, psr_names)
-
-    # ── 4. Simulate noise → noise-only stoas ─────────────────────────────────
-    print("\n🔊 Simulating pulsar noise...")
-    for psr in psrs_clean:
-        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
-    noise_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
-    print(f"✓ Noise stoas generated for {len(noise_stoas)} pulsars")
-
-    # ── 5. SNR scaling loop ───────────────────────────────────────────────────
-    print("\n📐 Calculating noise SNR, then scaling GW signal to target OS SNR...")
-    snr_low, snr_high = args.snr_range
-
-    cumulative_scale, pta, enterprise_psrs = _scale_and_iterate(
-        psrs_clean=psrs_clean,
-        delta_stoas=delta_stoas,
-        noise_stoas=noise_stoas,
-        target_snr=args.target_snr,
-        snr_low=snr_low,
-        snr_high=snr_high,
-        Tspan_seconds=Tspan_seconds,
-        raw_noise_params=raw_noise_params,
-    )
-    print(f"✓ Final cumulative amplitude scale factor: {cumulative_scale:.6f}")
-
-    # ── 6. Update population shard: h0, D_comov, z ───────────────────────────
-    print("\n💾 Updating population shard with scaled distances...")
-    _update_population_scaling(store, sim_id, cumulative_scale)
-    print("✓ Shard updated")
-
-    del pop
-    gc.collect()
-
-    # ── 7. CGW SNR analysis (optional) ───────────────────────────────────────
-    if args.cgw:
-        print("\n🔭 Computing CGW SNRs...")
-        _compute_cgw_snrs(
-            sim_id=sim_id,
-            store=store,
-            pta=pta,
-            enterprise_psrs=enterprise_psrs,
-            raw_noise_params=raw_noise_params,
-            parsed_noise_params=parsed_noise_params,
-            Tspan_seconds=Tspan_seconds,
-        )
-        print("✓ CGW SNR computation complete")
-    else:
-        print("\n(CGW analysis skipped — use --cgw to enable)")
-
+    # ── Summary ───────────────────────────────────────────────────────────────
     elapsed = time.time() - t0
-    print(f"\n✅ Stage 2 sim_id={sim_id} complete in {elapsed / 60:.1f} min")
-    print(f"   Output: {out_dir}/populations/subpop_{sim_id:03d}.pkl.gz")
+    n_ok    = args.n_sims - len(failed)
+    print(f"\n{'='*60}")
+    print(f"Stage 2 complete — {n_ok}/{args.n_sims} sims succeeded in {elapsed/60:.1f} min")
+    if failed:
+        print(f"  FAILED sim_ids: {failed}", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Build cross-sim summary object ────────────────────────────────────────
+    if not failed or len(failed) < args.n_sims:   # at least one sim succeeded
+        _build_summary_object(args, n_keep_per_category=200)
+
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

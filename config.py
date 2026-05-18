@@ -15,11 +15,11 @@ POPULATION_CONFIGS = {
         'n_binaries': 1000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(12.0),
-        'z_max': 1.0,
+        'z_max': 0.5,
         'description': 'Tiny population for local testing'
     },
-    'optimistic': {
-        'n_binaries': 500_000_000,
+    'pessimistic': {
+        'n_binaries': 1_000_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(8.0),
         'z_max': 1.0,
@@ -32,7 +32,7 @@ POPULATION_CONFIGS = {
         'z_max': 1.0,
         'description': 'Medium mass, medium spread in distance, medium population'
     },
-    'pessimistic': {
+    'optimistic': {
         'n_binaries': 10_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9),

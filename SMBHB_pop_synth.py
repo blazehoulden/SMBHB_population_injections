@@ -140,7 +140,7 @@ def build_comoving_distance_interpolator(z_max: float = 20.0,
         for zi in z_grid
     ])
     interp = interp1d(z_grid, chi_grid, kind='cubic', fill_value='extrapolate')
-    return lambda z: interp(np.atleast_1d(z))
+    return lambda z: interp(np.atleast_1d(z)).squeeze()[()]
  
  
 # Build module-level interpolation grids once

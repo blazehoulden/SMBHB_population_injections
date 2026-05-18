@@ -1,0 +1,306 @@
+==========================================
+Job ID: 10948998
+Job Name: smbhb_optimistic
+Node: dave12
+Start Time: Wed Apr  1 09:38:05 AEDT 2026
+==========================================
+
+Working directory: /fred/oz005/users/bhoulden/SMBHB_population_injections
+
+Loaded modules:
+
+Starting SMBHB analysis...
+==========================================
+
+📁 Save directory: data/2026-04-01/optimistic_run_9
+📝 Run name: optimistic_run_9
+
+[MEM] Start: 236.0 MB
+
+📡 Loading pulsars...
+======================================================================
+LOADING NANOGRAV PULSARS
+======================================================================
+
+📦 Loading from cache: nanograv_pulsars_cache.pkl
+✓ Loaded 76 pulsars from cache
+
+[MEM] After loading pulsars: 4249.5 MB
+
+🔍 Filtering pulsars...
+
+Filtered: 76 → 67 pulsars
+[MEM] After filtering pulsars: 4249.5 MB
+
+✓ Ready: 67 pulsars, Tspan = 16.0 years
+[MEM] After getting clean pulsars and Tspan: 4249.6 MB
+[MEM] After garbage collection: 4249.7 MB
+
+======================================================================
+SMBHB POPULATION ANALYSIS
+======================================================================
+
+Configuration: optimistic
+  Larger mass, higher spread in distance, small population
+  N_binaries: 1000
+
+======================================================================
+CONSISTENT POPULATION SYNTHESIS
+======================================================================
+
+======================================================================
+GENERATING SNR-CONSISTENT POPULATIONS
+======================================================================
+Target SNR:          4.0
+Simulations:         10
+======================================================================
+
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 1/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.11 seconds
+injecting population...
+Time taken to inject population: 0.28 seconds
+pta building...
+Time taken to build PTA: 12.22 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 54.37 seconds
+Total time taken: 66.98 seconds
+Initial SNR: -5.4784, Target SNR: 4.0000
+  ✗ Initial SNR -5.4784 is non-positive, cannot scale distances to achieve target SNR.
+✗ Simulation 1 FAILED, retrying...
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.26 seconds
+pta building...
+Time taken to build PTA: 11.60 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 50.41 seconds
+Total time taken: 62.36 seconds
+Initial SNR: 52.7576, Target SNR: 4.0000
+Scaling distances by factor 3.6317 to achieve target SNR...
+✓ Simulation 1 done (130.7 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 2/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.26 seconds
+pta building...
+Time taken to build PTA: 11.10 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 50.27 seconds
+Total time taken: 61.72 seconds
+Initial SNR: 134.4897, Target SNR: 4.0000
+Scaling distances by factor 5.7985 to achieve target SNR...
+✓ Simulation 2 done (62.3 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 3/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.27 seconds
+pta building...
+Time taken to build PTA: 12.49 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 51.26 seconds
+Total time taken: 64.11 seconds
+Initial SNR: 117.7513, Target SNR: 4.0000
+Scaling distances by factor 5.4257 to achieve target SNR...
+✓ Simulation 3 done (64.4 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 4/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.10 seconds
+injecting population...
+Time taken to inject population: 0.28 seconds
+pta building...
+Time taken to build PTA: 12.12 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 52.29 seconds
+Total time taken: 64.78 seconds
+Initial SNR: 29.6763, Target SNR: 4.0000
+Scaling distances by factor 2.7238 to achieve target SNR...
+✓ Simulation 4 done (64.9 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 5/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.10 seconds
+injecting population...
+Time taken to inject population: 0.28 seconds
+pta building...
+Time taken to build PTA: 12.23 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 49.75 seconds
+Total time taken: 62.36 seconds
+Initial SNR: -16.8564, Target SNR: 4.0000
+  ✗ Initial SNR -16.8564 is non-positive, cannot scale distances to achieve target SNR.
+✗ Simulation 5 FAILED, retrying...
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.27 seconds
+pta building...
+Time taken to build PTA: 12.09 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 48.91 seconds
+Total time taken: 61.37 seconds
+Initial SNR: 21.5156, Target SNR: 4.0000
+Scaling distances by factor 2.3192 to achieve target SNR...
+✓ Simulation 5 done (124.3 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 6/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.11 seconds
+injecting population...
+Time taken to inject population: 0.31 seconds
+pta building...
+Time taken to build PTA: 13.66 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 57.17 seconds
+Total time taken: 71.25 seconds
+Initial SNR: 81.8924, Target SNR: 4.0000
+Scaling distances by factor 4.5247 to achieve target SNR...
+✓ Simulation 6 done (71.5 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 7/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.11 seconds
+injecting population...
+Time taken to inject population: 0.32 seconds
+pta building...
+Time taken to build PTA: 12.72 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 52.81 seconds
+Total time taken: 65.95 seconds
+Initial SNR: 159.6496, Target SNR: 4.0000
+Scaling distances by factor 6.3176 to achieve target SNR...
+✓ Simulation 7 done (66.1 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 8/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.27 seconds
+pta building...
+Time taken to build PTA: 11.68 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 50.00 seconds
+Total time taken: 62.04 seconds
+Initial SNR: 220.0754, Target SNR: 4.0000
+Scaling distances by factor 7.4175 to achieve target SNR...
+✓ Simulation 8 done (62.3 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 9/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.31 seconds
+pta building...
+Time taken to build PTA: 12.22 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 46.80 seconds
+Total time taken: 59.42 seconds
+Initial SNR: 237.3865, Target SNR: 4.0000
+Scaling distances by factor 7.7037 to achieve target SNR...
+✓ Simulation 9 done (59.6 s)
+
+──────────────────────────────────────────────────────────────────────
+SIMULATION 10/10
+──────────────────────────────────────────────────────────────────────
+
+Generating SNR-consistent population...
+Target SNR: 4.0
+restoring zero residuals...
+Time taken to restore zero residuals: 0.09 seconds
+injecting population...
+Time taken to inject population: 0.26 seconds
+pta building...
+Time taken to build PTA: 11.25 seconds
+computing optimal statistic...
+Time taken to compute OS and SNR: 45.92 seconds
+Total time taken: 57.52 seconds
+Initial SNR: 42.9101, Target SNR: 4.0000
+Scaling distances by factor 3.2753 to achieve target SNR...
+✓ Simulation 10 done (57.6 s)
+
+======================================================================
+ENSEMBLE SUMMARY
+======================================================================
+Success rate: 100.0% (10/10)
+
+Binaries per population:
+  Mean ± std : 1000 ± 0
+  Range      : [1000, 1000]
+
+SNR achieved:
+  Mean ± std : 4.0000 ± 0.0000
+  Range      : [4.0000, 4.0000]
+
+Total time: 763.8 s (12.7 min)
+======================================================================
+
+💾 Saved: data/2026-04-01/optimistic_run_9/consistent_population_optimistic_targetSNR4.0_sims10.json
+💾 Saved compressed pickle: data/2026-04-01/optimistic_run_9/consistent_population_optimistic_targetSNR4.0_sims10.pkl.gz
+
+======================================================================
+ANALYSIS COMPLETE
+Results saved to: data/2026-04-01/optimistic_run_9
+======================================================================
+
+==========================================
+Job finished at: Wed Apr  1 09:50:57 AEDT 2026
+Exit code: 0
+==========================================

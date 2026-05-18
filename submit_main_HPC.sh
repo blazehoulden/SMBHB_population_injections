@@ -1,38 +1,40 @@
 #!/usr/bin/env bash
 # =============================================================================
-# submit_pipeline.sh  —  SMBHB population analysis Slurm orchestrator
+# submit_main_HPC.sh  —  SMBHB population analysis Slurm orchestrator
 #
-# Pipeline:
-#   stage1 array  (N_SIMS jobs, one per population)
-#     └─afterok──> stage2 array  (N_SIMS jobs, one per population)
+# Pipeline (repeated N_SIMS times independently):
 #
-# Stage 1 (stage1_setup.py):
-#   Each array task generates one SMBHB population, computes the per-pulsar
-#   TOA changes, and saves both the population shard and the delta-stoa arrays.
-#   Array index == sim_id (0 .. N_SIMS-1).
+#   stage1 flat array  (N_SIMS × N_CHUNKS jobs)
+#     task_id = sim_id * N_CHUNKS + chunk_id
+#     each job generates one chunk of one simulation
+#     └─afterok──> stage2 single job
+#                  waits for ALL N_S1_TASKS stage-1 tasks to complete,
+#                  then combines all chunks for all sims, scales SNR,
+#                  updates shards, optionally runs CGW
 #
-# Stage 2 (stage2_inject.py):
-#   Each array task loads the corresponding population shard and all its
-#   delta-stoa files, simulates noise, adds the GW signal, computes the
-#   optimal-statistic SNR, scales to target, updates h0/D_comov/z in the
-#   store, and finally computes CGW SNRs for the top binaries.
-#   Array index == sim_id (0 .. N_SIMS-1).
+# Output layout:
+#   <output_dir>/
+#     sim000/
+#       populations/   subpop_000.pkl.gz ... subpop_{N_CHUNKS-1:03d}.pkl.gz
+#       stoas/         sim0000/ ... sim{N_CHUNKS-1:04d}/
+#       metadata/      config.json
+#     sim001/
+#       ...
 #
 # Usage
 # ─────
-#   bash submit_pipeline.sh [OPTIONS]
+#   bash submit_main_HPC.sh [OPTIONS]
 #
 # Options
 #   --config          population config name               [optimistic]
 #   --target-snr      target OS SNR                        [4.0]
 #   --snr-range       SNR acceptance window (low high)     [3.5 4.25]
-#   --simulations     number of populations                [10]
-#   --chunk-size      binaries per population shard        [1000000]
-#   --output-dir      root directory for outputs           [auto]
-#   --project         Slurm account/project                [$SLURM_ACCOUNT]
-#   --partition       Slurm partition                      [compute]
-#   --python          python interpreter to use            [python]
-#   --cgw             enable CGW analysis in stage 2       [off]
+#   --simulations     number of independent populations    [400]
+#   --n-chunks        number of chunks per simulation      [10]
+#   --chunk-size      binaries per chunk                   [1000000]
+#   --output-dir      root directory for all outputs       [auto]
+#   --cgw             enable CGW analysis in stage 2       [on]
+#   --no-cgw          disable CGW analysis in stage 2      [off]
 #   --dry-run         print sbatch commands only           [off]
 #
 # Stage resource overrides
@@ -41,9 +43,20 @@
 #   --s1-cpus / --s2-cpus   CPUs per job
 # =============================================================================
 
-set -euo pipefail
+set -eo pipefail
+PS1="${PS1:-}"
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "=========================================="
+echo "Job ID: ${SLURM_JOB_ID:-n/a}"
+echo "Job Name: ${SLURM_JOB_NAME:-n/a}"
+echo "Node: ${SLURM_NODELIST:-n/a}"
+echo "Start Time: $(date)"
+echo "=========================================="
+echo ""
+
+ENV_SETUP="module purge; unset PYTHONPATH; module load mamba; mamba activate smbhb312;"
+
+REPO_DIR="/fred/oz005/users/bhoulden/SMBHB_population_injections"
 
 # =============================================================================
 # CONFIG DEFAULTS
@@ -52,23 +65,20 @@ CONFIG="${SMBHB_CONFIG:-optimistic}"
 TARGET_SNR="${SMBHB_TARGET_SNR:-4.0}"
 SNR_LOW="${SMBHB_SNR_LOW:-3.5}"
 SNR_HIGH="${SMBHB_SNR_HIGH:-4.25}"
-N_SIMS="${SMBHB_SIMULATIONS:-10}"
+N_SIMS="${SMBHB_SIMULATIONS:-400}"
+N_CHUNKS="${SMBHB_N_CHUNKS:-10}"
 CHUNK_SIZE="${SMBHB_CHUNK_SIZE:-1000000}"
-PROJECT="${SMBHB_PROJECT:-${SLURM_ACCOUNT:-default}}"
-PARTITION="${SMBHB_PARTITION:-compute}"
-PYTHON="${SMBHB_PYTHON:-python}"
-CGW_FLAG=""
+CGW_FLAG="${SMBHB_CGW_FLAG:---cgw}"
 DRY_RUN=0
 
-# Stage 1: population synthesis + TOA delta computation (CPU-heavy, NUFFT)
-S1_CPUS=32;  S1_MEM="64G";  S1_TIME="08:00:00"
+# Stage 1: one chunk per task — pop synthesis + NUFFT
+S1_CPUS=1;  S1_MEM="14G";  S1_TIME="00:15:00"
 
-# Stage 2: noise sim + SNR scaling + CGW analysis (memory-heavy, Enterprise)
-S2_CPUS=16;  S2_MEM="64G";  S2_TIME="04:00:00"
+# Stage 2: single job — loads all chunks for all sims, Enterprise SNR loop
+S2_CPUS=1;  S2_MEM="44G";  S2_TIME="01:30:00"
 
-# Max simultaneous jobs per array (avoid flooding the scheduler)
-S1_MAX_CONCURRENT=50
-S2_MAX_CONCURRENT=50
+# Max simultaneous jobs per array (stage 1 only)
+S1_MAX_CONCURRENT=100
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -79,12 +89,11 @@ while [[ $# -gt 0 ]]; do
         --target-snr)    TARGET_SNR="$2";               shift 2 ;;
         --snr-range)     SNR_LOW="$2"; SNR_HIGH="$3";   shift 3 ;;
         --simulations)   N_SIMS="$2";                   shift 2 ;;
+        --n-chunks)      N_CHUNKS="$2";                 shift 2 ;;
         --chunk-size)    CHUNK_SIZE="$2";               shift 2 ;;
         --output-dir)    OUTPUT_DIR="$2";               shift 2 ;;
-        --project)       PROJECT="$2";                  shift 2 ;;
-        --partition)     PARTITION="$2";                shift 2 ;;
-        --python)        PYTHON="$2";                   shift 2 ;;
         --cgw)           CGW_FLAG="--cgw";              shift   ;;
+        --no-cgw)        CGW_FLAG="";                   shift   ;;
         --dry-run)       DRY_RUN=1;                     shift   ;;
         --s1-time)       S1_TIME="$2";                  shift 2 ;;
         --s2-time)       S2_TIME="$2";                  shift 2 ;;
@@ -104,14 +113,15 @@ fi
 
 mkdir -p "${OUTPUT_DIR}/logs"
 
+# Derived counts
+N_S1_TASKS=$(( N_SIMS * N_CHUNKS ))
+S1_LAST=$(( N_S1_TASKS - 1 ))
+
 # =============================================================================
 # HELPERS
 # =============================================================================
 log() { echo "[submit_pipeline] $*"; }
 
-# Submit via sbatch, or echo in dry-run mode.
-# Always uses --parsable so we get a bare job ID back.
-# Returns the job ID string.
 run_sbatch() {
     local desc="$1"; shift
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -127,50 +137,46 @@ run_sbatch() {
 # =============================================================================
 log "============================================================"
 log "SMBHB Slurm pipeline"
-log "  Repo dir    : ${REPO_DIR}"
-log "  Output dir  : ${OUTPUT_DIR}"
-log "  Config      : ${CONFIG}"
-log "  Target SNR  : ${TARGET_SNR}  range=[${SNR_LOW}, ${SNR_HIGH}]"
-log "  Populations : ${N_SIMS}"
-log "  Chunk size  : ${CHUNK_SIZE}"
-log "  Partition   : ${PARTITION}"
-log "  Project     : ${PROJECT}"
-log "  CGW         : ${CGW_FLAG:-off}"
-log "  Dry run     : ${DRY_RUN}"
+log "  Repo dir      : ${REPO_DIR}"
+log "  Output dir    : ${OUTPUT_DIR}"
+log "  Config        : ${CONFIG}"
+log "  Target SNR    : ${TARGET_SNR}  range=[${SNR_LOW}, ${SNR_HIGH}]"
+log "  Simulations   : ${N_SIMS}"
+log "  Chunks / sim  : ${N_CHUNKS}  x  ${CHUNK_SIZE} binaries"
+log "  Total pop/sim : $(( N_CHUNKS * CHUNK_SIZE )) binaries"
+log "  S1 tasks      : ${N_S1_TASKS}  (${N_SIMS} sims x ${N_CHUNKS} chunks)"
+log "  S2 tasks      : 1  (single job, combines all sims after stage 1)"
+log "  CGW           : $([[ -n \"${CGW_FLAG}\" ]] && echo on || echo off)"
+log "  Dry run       : ${DRY_RUN}"
 log "============================================================"
 
-ARRAY_RANGE="0-$((N_SIMS - 1))"
-
 # =============================================================================
-# STAGE 1 — population synthesis array
+# STAGE 1 — flat array: task_id = sim_id * N_CHUNKS + chunk_id
 #
-# One job per simulation (sim_id = SLURM_ARRAY_TASK_ID).
-# Each job:
-#   - loads pulsars
-#   - generates one SMBHB population shard  (populations/subpop_NNN.pkl.gz)
-#   - computes per-pulsar TOA deltas         (stoas/simNNNN/{psr}_delta.npy)
-#   - writes metadata/config.json            (first task wins, idempotent content)
+# Each task decodes:
+#   sim_id   = task_id // N_CHUNKS
+#   chunk_id = task_id  % N_CHUNKS
+# and writes to <output_dir>/sim{sim_id:03d}/
 # =============================================================================
-log "Submitting stage 1 array (${N_SIMS} jobs)..."
+log "Submitting stage 1 flat array (${N_S1_TASKS} tasks)..."
 
 S1_JOB=$(run_sbatch "stage1" \
     --job-name="smbhb_s1_${CONFIG}" \
-    --account="${PROJECT}" \
-    --partition="${PARTITION}" \
     --nodes=1 \
     --ntasks=1 \
     --cpus-per-task="${S1_CPUS}" \
     --mem="${S1_MEM}" \
     --time="${S1_TIME}" \
-    --array="${ARRAY_RANGE}%${S1_MAX_CONCURRENT}" \
+    --array="0-${S1_LAST}%${S1_MAX_CONCURRENT}" \
     --output="${OUTPUT_DIR}/logs/stage1_%A_%a.out" \
     --error="${OUTPUT_DIR}/logs/stage1_%A_%a.err" \
-    --wrap="${PYTHON} ${REPO_DIR}/stage1_setup.py \
+    --wrap="${ENV_SETUP} OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+        python -u ${REPO_DIR}/stage1_setup.py \
         --config ${CONFIG} \
         --target-snr ${TARGET_SNR} \
         --snr-range ${SNR_LOW} ${SNR_HIGH} \
-        --simulations ${N_SIMS} \
         --chunk-size ${CHUNK_SIZE} \
+        --n-chunks ${N_CHUNKS} \
         --output-dir ${OUTPUT_DIR} \
         --task-id \$SLURM_ARRAY_TASK_ID"
 )
@@ -178,45 +184,36 @@ S1_JOB=$(echo "$S1_JOB" | tr -d '[:space:]')
 log "  Stage 1 array job ID: ${S1_JOB}"
 
 # =============================================================================
-# STAGE 2 — noise simulation + SNR scaling + CGW analysis array
+# STAGE 2 — single job that combines ALL stage-1 outputs
 #
-# One job per simulation (sim_id = SLURM_ARRAY_TASK_ID), runs after ALL
-# stage-1 jobs complete successfully (afterok on the full array).
-# Each job:
-#   - loads pulsars + the population shard for its sim_id
-#   - sums the saved per-pulsar TOA deltas for that sim
-#   - simulates noise to produce a noise-only set of stoas
-#   - adds the GW TOA deltas to produce noise+GW stoas
-#   - computes optimal-statistic SNR
-#   - iterates distance/redshift scaling until SNR lands in target range
-#   - updates h0, D_comov, z in the population shard
-#   - computes CGW SNR for a pre-filtered subset of binaries, saves to shard
+# --dependency=afterok:<array_job_id> blocks until EVERY task in the
+# stage-1 array has completed successfully before this job starts.
+# stage2_inject.py receives --n-sims and loops over all sim_ids itself.
 # =============================================================================
-log "Submitting stage 2 array (${N_SIMS} jobs, depends on stage 1)..."
+log "Submitting stage 2 single job (depends on ALL ${N_S1_TASKS} stage-1 tasks)..."
 
 S2_JOB=$(run_sbatch "stage2" \
     --job-name="smbhb_s2_${CONFIG}" \
-    --account="${PROJECT}" \
-    --partition="${PARTITION}" \
     --nodes=1 \
     --ntasks=1 \
     --cpus-per-task="${S2_CPUS}" \
     --mem="${S2_MEM}" \
     --time="${S2_TIME}" \
-    --array="${ARRAY_RANGE}%${S2_MAX_CONCURRENT}" \
-    --dependency="afterok:${S1_JOB}" \
-    --output="${OUTPUT_DIR}/logs/stage2_%A_%a.out" \
-    --error="${OUTPUT_DIR}/logs/stage2_%A_%a.err" \
-    --wrap="${PYTHON} ${REPO_DIR}/stage2_inject.py \
+    --dependency="afterok:${S1_JOB}_*" \
+    --output="${OUTPUT_DIR}/logs/stage2_%j.out" \
+    --error="${OUTPUT_DIR}/logs/stage2_%j.err" \
+    --wrap="${ENV_SETUP} OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+        python -u ${REPO_DIR}/stage2_inject.py \
         --output-dir ${OUTPUT_DIR} \
         --config ${CONFIG} \
         --target-snr ${TARGET_SNR} \
         --snr-range ${SNR_LOW} ${SNR_HIGH} \
-        ${CGW_FLAG} \
-        --task-id \$SLURM_ARRAY_TASK_ID"
+        --n-sims ${N_SIMS} \
+        --n-chunks ${N_CHUNKS} \
+        ${CGW_FLAG}"
 )
 S2_JOB=$(echo "$S2_JOB" | tr -d '[:space:]')
-log "  Stage 2 array job ID: ${S2_JOB}"
+log "  Stage 2 job ID: ${S2_JOB}"
 
 # =============================================================================
 # DONE
@@ -225,15 +222,26 @@ log ""
 log "Pipeline submitted successfully."
 log ""
 log "Dependency chain:"
-log "  stage1 array (${S1_JOB})  [${N_SIMS} jobs, sim_id 0...$((N_SIMS-1))]"
-log "    └─ stage2 array (${S2_JOB})  [${N_SIMS} jobs, sim_id 0...$((N_SIMS-1))]"
+log "  stage1 flat array (${S1_JOB})  [${N_S1_TASKS} tasks — all must succeed]"
+log "    └─ stage2 single job (${S2_JOB})  [combines all ${N_SIMS} sim(s)]"
 log ""
 log "Monitor with:"
 log "  squeue -j ${S1_JOB},${S2_JOB}"
-log "  tail -f ${OUTPUT_DIR}/logs/stage1_${S1_JOB}_0.out"
+log "  tail -f ${OUTPUT_DIR}/logs/stage2_${S2_JOB}.out"
 log ""
 log "Output directory:"
 log "  ${OUTPUT_DIR}/"
-log "    populations/    — SMBHB population shards (updated by stage 2)"
-log "    stoas/          — per-sim per-pulsar TOA delta files (from stage 1)"
-log "    metadata/       — config.json"
+log "    sim000/ ... sim$(printf '%03d' $(( N_SIMS - 1 )))/"
+log "      populations/  — shards updated by stage 2"
+log "      stoas/        — per-chunk TOA deltas from stage 1"
+log "      metadata/     — config.json"
+
+EXIT_CODE=$?
+
+echo ""
+echo "=========================================="
+echo "Job finished at: $(date)"
+echo "Exit code: $EXIT_CODE"
+echo "=========================================="
+
+exit $EXIT_CODE

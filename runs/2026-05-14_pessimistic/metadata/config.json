@@ -1,0 +1,11 @@
+{
+  "config": "pessimistic",
+  "target_snr": 4.0,
+  "snr_range": [
+    3.5,
+    4.25
+  ],
+  "simulations": 1,
+  "chunk_size": 1000000,
+  "Tspan_seconds": 505861299.1402199
+}
