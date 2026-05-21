@@ -45,12 +45,13 @@ import config
 from consistent_pop_synth import compute_population_snr, suppress_enterprise_warnings
 from data_loader import load_pulsars, filter_pulsars_15yr, parse_pulsar_parameters
 from signal_injection import simulate_psr
-from stage1_setup import ShardedPickleStore
-from CGW_SNR import compute_cgw_snr_optimal_population
+from stage1_setup import ShardedPickleStore, _compute_analytic_proxy
+from CGW_SNR import compute_cgw_snr_optimal_population_fast
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
+from debug.test_cgw_proxy import validate_cgw_proxy
 
-N_PRE_FILTER_PER_CHUNK  = 2_000
-N_GLOBAL_CGW_CANDIDATES = 2_000
+N_PRE_FILTER_PER_CHUNK  = 12_500
+N_GLOBAL_CGW_CANDIDATES = 12_500
 N_TOP_SOURCES           = 50
 MAX_SCALE_ITER          = 20
 
@@ -64,26 +65,70 @@ def _load_and_sum_toa_deltas(
     chunk_ids: List[int],
     psr_names: List[str],
 ) -> Dict[str, np.ndarray]:
-    """Sum per-pulsar Δstoa arrays across all chunks → one combined delta."""
-    combined: Dict[str, np.ndarray] = {}
+
+    combined = {name: None for name in psr_names}
 
     for chunk_id in chunk_ids:
-        sim_dir = os.path.join(sim_out_dir, "stoas", f"sim{chunk_id:04d}")
-        if not os.path.isdir(sim_dir):
-            sys.exit(f"ERROR: stoa dir not found: {sim_dir}")
-        for name in psr_names:
-            fpath = os.path.join(sim_dir, f"{name}_delta.npy")
-            if not os.path.isfile(fpath):
-                sys.exit(f"ERROR: missing delta file: {fpath}")
-            delta = np.load(fpath).astype(np.float64)
-            if name in combined:
-                combined[name] += delta
-            else:
-                combined[name] = delta.copy()
 
-    print(f"  Summed Δstoas across {len(chunk_ids)} chunks for {len(combined)} pulsars")
+        fpath = os.path.join(
+            sim_out_dir,
+            "stoas",
+            f"chunk_{chunk_id:04d}.npz"
+        )
+
+        if not os.path.isfile(fpath):
+            sys.exit(f"ERROR: missing delta file: {fpath}")
+
+        with np.load(fpath) as data:
+
+            for name in psr_names:
+
+                delta = data[name]
+
+                if combined[name] is None:
+                    combined[name] = delta.astype(np.float64)
+                else:
+                    combined[name] += delta
+
+    print(
+        f"  Summed Δstoas across "
+        f"{len(chunk_ids)} chunks for {len(combined)} pulsars"
+    )
+
     return combined
 
+def _cleanup_chunk_stoas(sim_out_dir: str, chunk_ids: List[int]) -> None:
+    """
+    Delete per-chunk Δstoa .npz files after the combined residuals have been
+    saved.  The combined signal is preserved under residuals/; the raw chunks
+    are no longer needed.
+    """
+    stoa_dir = os.path.join(sim_out_dir, "stoas")
+    removed, skipped, freed_bytes = 0, 0, 0
+
+    for chunk_id in chunk_ids:
+        fpath = os.path.join(stoa_dir, f"chunk_{chunk_id:04d}.npz")
+        if os.path.isfile(fpath):
+            freed_bytes += os.path.getsize(fpath)
+            os.remove(fpath)
+            removed += 1
+        else:
+            skipped += 1
+
+    # Remove the stoas/ directory itself if it's now empty
+    try:
+        os.rmdir(stoa_dir)
+        dir_removed = True
+    except OSError:
+        dir_removed = False  # not empty (unexpected extra files present)
+
+    freed_mb = freed_bytes / 1e6
+    print(
+        f"\n🗑️  Cleaned up chunk Δstoa files: "
+        f"{removed} removed, {skipped} missing  "
+        f"({freed_mb:.1f} MB freed)"
+        + (f"  — stoas/ dir removed" if dir_removed else "")
+    )
 
 def _comov_redshift_from_scaling(
     D_comov: np.ndarray,
@@ -130,6 +175,8 @@ def _scale_and_iterate(
     Tspan_seconds: float,
     raw_noise_params: Dict[str, Dict],
     max_iterations: int = MAX_SCALE_ITER,
+    curn_components: int = 14,
+    rn_components: int = 30,
 ) -> Tuple[float, object, list]:
 
     noise_only_snr = compute_population_snr(
@@ -139,6 +186,8 @@ def _scale_and_iterate(
         Tspan=Tspan_seconds,
         current_stoas=noise_stoas,
         return_psrs_pta=False,
+        curn_components=curn_components,
+        rn_components=rn_components,
     )
     print(f"  Noise-only OS SNR: {noise_only_snr:.4f}")
 
@@ -191,6 +240,8 @@ def _scale_and_iterate(
             raw_noise_params=raw_noise_params,
             Tspan=Tspan_seconds,
             current_stoas=signal_stoas,
+            curn_components=curn_components,
+            rn_components=rn_components,
         )
         print(f"  Iter {iteration+1:2d}: OS SNR={snr:.4f}  "
             f"target=[{snr_low},{snr_high}]  scale={cumulative_scale:.4f}×")
@@ -243,7 +294,6 @@ def _apply_scaling_to_all_chunks(
 
         print(f"    chunk {chunk_id:03d}: updated", flush=True)
 
-
 def _compute_cgw_snrs(
     store: ShardedPickleStore,
     chunk_ids: List[int],
@@ -255,22 +305,28 @@ def _compute_cgw_snrs(
 ) -> None:
     """
     Two-pass CGW SNR computation across all chunks.
-    Pass 1: pre-filter each chunk to top N_PRE_FILTER_PER_CHUNK by proxy.
-    Pass 2: evaluate CGW SNR on top N_GLOBAL_CGW_CANDIDATES globally.
+    Pass 1: pre-filter each chunk using analytic s^T N^{-1} s proxy (full Nvecs).
+    Pass 2: evaluate full CGW SNR on top N_GLOBAL_CGW_CANDIDATES globally.
     """
+
     print(f"\n  CGW: pre-filtering {len(chunk_ids)} chunks "
-          f"(top {N_PRE_FILTER_PER_CHUNK} each)...")
+          f"(top {N_PRE_FILTER_PER_CHUNK} each by analytic proxy)...")
 
-    candidate_list = []   # (chunk_id, local_idx, proxy)
+    candidate_list = []  # (chunk_id, local_idx, proxy)
 
+    # ── Pass 1: analytic proxy across all chunks ──────────────────────────────
+    # Note: pop here is a PopulationArrays, but _compute_analytic_proxy
+    # handles both via hasattr(pop, 'f') check
     for chunk_id in chunk_ids:
         pop    = store.read(chunk_id)
         n      = len(pop)
         n_keep = min(N_PRE_FILTER_PER_CHUNK, n)
 
-        proxies = (pop.h0 / (2.0 * np.pi * pop.f)) * np.array([
-            sky_sensitivity_weight(pop.ra[i], pop.dec[i]) for i in range(n)
-        ])
+        # Use Stage 1 proxy scores if available, else compute fresh
+        if hasattr(pop, 'cgw_proxy') and pop.cgw_proxy is not None:
+            proxies = pop.cgw_proxy.astype(np.float64)
+        else:
+            proxies = _compute_analytic_proxy(pop, enterprise_psrs, Tspan_seconds=Tspan_seconds)
 
         if n_keep == n:
             top_local = np.argsort(proxies)[::-1]
@@ -286,9 +342,9 @@ def _compute_cgw_snrs(
 
     candidate_list.sort(key=lambda x: x[2], reverse=True)
     global_candidates = candidate_list[:N_GLOBAL_CGW_CANDIDATES]
-    print(f"  {len(candidate_list)} candidates merged → top {len(global_candidates)} for CGW SNR")
+    print(f"  {len(candidate_list)} candidates merged → top {len(global_candidates)} for full CGW SNR")
 
-    # Group by chunk to minimise re-loads
+    # ── Assemble top binaries (grouped by chunk to minimise re-loads) ─────────
     by_chunk: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
     for global_rank, (chunk_id, local_idx, _) in enumerate(global_candidates):
         by_chunk[chunk_id].append((global_rank, local_idx))
@@ -301,8 +357,9 @@ def _compute_cgw_snrs(
         del pop
         gc.collect()
 
-    print(f"  Computing CGW SNR for {len(top_binaries)} candidates...")
-    top_snrs = compute_cgw_snr_optimal_population(
+    # ── Pass 2: full SNR — precomputed matrices passed in ────────────────────
+    print(f"  Computing full CGW SNR for {len(top_binaries)} candidates...")
+    top_snrs, top_breakdowns = compute_cgw_snr_optimal_population_fast(
         psrs=enterprise_psrs,
         pta=pta,
         population=top_binaries,
@@ -310,9 +367,10 @@ def _compute_cgw_snrs(
         parsed_noise_params=parsed_noise_params,
         Tspan=Tspan_seconds,
         profile=True,
+        return_breakdown=True,
     )
 
-    # Write cgw_snr back to each chunk
+    # ── Write cgw_snr back to store ───────────────────────────────────────────
     chunk_snr_maps: Dict[int, Dict[int, float]] = defaultdict(dict)
     for global_rank, (chunk_id, local_idx, _) in enumerate(global_candidates):
         chunk_snr_maps[chunk_id][local_idx] = float(top_snrs[global_rank])
@@ -326,19 +384,52 @@ def _compute_cgw_snrs(
         del pop
         gc.collect()
 
-    # Print top sources
-    # Compute proxy rank from global_candidates (already sorted by proxy descending)
+    # ── Print top sources — cache chunks to avoid repeated loads ──────────────
     proxy_rank_map = {
         (chunk_id, local_idx): proxy_rank
         for proxy_rank, (chunk_id, local_idx, _) in enumerate(global_candidates, start=1)
     }
 
-    ranked = sorted(zip(global_candidates, top_snrs), key=lambda x: x[1], reverse=True)
-    n_show = min(N_TOP_SOURCES, len(ranked))
+    ranked  = sorted(zip(global_candidates, top_snrs), key=lambda x: x[1], reverse=True)
+    n_show  = min(N_TOP_SOURCES, len(ranked))
+
+    # Persist the five loudest binaries and their per-pulsar contributions so the
+    # summary builder can embed them directly in summary.pkl.gz.
+    candidate_breakdown_map = {
+        (chunk_id, local_idx): top_breakdowns[i]
+        for i, (chunk_id, local_idx, _) in enumerate(global_candidates)
+    }
+
+    top_breakdown_records = []
+    for rank, ((chunk_id, local_idx, proxy), snr_val) in enumerate(ranked[:5], start=1):
+        global_rank = proxy_rank_map[(chunk_id, local_idx)]
+        per_pulsar = candidate_breakdown_map[(chunk_id, local_idx)]
+        top_breakdown_records.append(
+            {
+                "rank": rank,
+                "global_rank": global_rank,
+                "chunk_id": int(chunk_id),
+                "local_idx": int(local_idx),
+                "proxy": float(proxy),
+                "cgw_snr": float(snr_val),
+                "per_pulsar_rho_sq": {k: float(v) for k, v in per_pulsar.items()},
+            }
+        )
+
+    metadata_dir = os.path.join(os.path.dirname(str(store.dir)), "metadata")
+    os.makedirs(metadata_dir, exist_ok=True)
+    with open(os.path.join(metadata_dir, "top_cgw_breakdowns.json"), "w") as fh:
+        json.dump(top_breakdown_records, fh, indent=2)
+
+    chunk_cache = {}
+    for (chunk_id, local_idx, _), _ in ranked[:n_show]:
+        if chunk_id not in chunk_cache:
+            chunk_cache[chunk_id] = store.read(chunk_id)
+
     print(f"\n  Top {n_show} CGW candidates:")
     for rank, ((chunk_id, local_idx, proxy), snr_val) in enumerate(ranked[:n_show], start=1):
         proxy_rank = proxy_rank_map[(chunk_id, local_idx)]
-        pop = store.read(chunk_id)
+        pop = chunk_cache[chunk_id]
         print(
             f"    {rank:2d}.  chunk={chunk_id:03d}  local_idx={local_idx:7d}  "
             f"f={pop.f[local_idx]:.2e} Hz  "
@@ -347,7 +438,8 @@ def _compute_cgw_snrs(
             f"proxy={proxy:.4e} (rank #{proxy_rank})  "
             f"CGW_SNR={snr_val:.4f}"
         )
-        del pop
+    del chunk_cache
+    gc.collect()
 
 
 # =============================================================================
@@ -444,6 +536,49 @@ def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_pa
         return False
     print(f"\n📦 Found {len(chunk_ids)} chunks: {chunk_ids}")
 
+    # ── proxy-only mode: skip noise/scaling, just build PTA and validate ──────
+    if args.proxy_only:
+        print(f"\n{'='*60}")
+        print(f"Proxy-only mode — sim_id={sim_id}")
+        print(f"  Skipping noise simulation and SNR scaling.")
+        print(f"{'='*60}")
+
+        # Build PTA from current (unscaled) stoas — good enough for proxy test
+        print("\n🔊 Simulating noise (for PTA structure only)...")
+        for i, psr in enumerate(psrs_clean):
+            print(f"  [{i+1}/{len(psrs_clean)}] {psr.name}...", end=" ", flush=True)
+            simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
+            print("done", flush=True)
+        noise_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+
+        _, pta, enterprise_psrs = compute_population_snr(
+            psrs_clean=psrs_clean,
+            population=None,
+            raw_noise_params=raw_noise_params,
+            Tspan=Tspan_seconds,
+            current_stoas=noise_stoas,
+            return_psrs_pta=True,
+        )
+
+        validate_cgw_proxy(
+            store=store,
+            chunk_ids=chunk_ids,
+            pta=pta,
+            enterprise_psrs=enterprise_psrs,
+            raw_noise_params=raw_noise_params,
+            parsed_noise_params=parsed_noise_params,
+            Tspan_seconds=Tspan_seconds,
+            n_test=args.n_test,
+        )
+        sentinel = os.path.join(sim_out_dir, "metadata", "stage2_complete.json")
+        with open(sentinel, "w") as fh:
+            json.dump({
+                "sim_id":       sim_id,
+                "proxy_only":   True,
+                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }, fh, indent=2)
+        return True
+    
     # ── 1. Sum Δstoas across all chunks ───────────────────────────────────────
     psr_names = [psr.name for psr in psrs_clean]
     print(f"\n📂 Summing Δstoas across {len(chunk_ids)} chunks...")
@@ -472,6 +607,7 @@ def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_pa
             snr_high=snr_high,
             Tspan_seconds=Tspan_seconds,
             raw_noise_params=raw_noise_params,
+
         )
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -488,8 +624,10 @@ def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_pa
         cumulative_scale=cumulative_scale,
     )
 
+    # ── Delete per-chunk stoa files — combined residuals already saved ────────
+    _cleanup_chunk_stoas(sim_out_dir, chunk_ids)
     # Now safe to free the large arrays
-    del combined_delta_stoas, noise_stoas
+    del combined_delta_stoas, noise_stoas, pta
     if not args.cgw:
         del pta, enterprise_psrs
     gc.collect()
@@ -501,6 +639,28 @@ def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_pa
     # ── 5. CGW SNR analysis ───────────────────────────────────────────────────
     if args.cgw:
         print("\n🔭 Computing CGW SNRs...")
+        from pta_builder import build_pta_and_params
+        pta, _, _ = build_pta_and_params(
+            psrs=enterprise_psrs,
+            noise_params_15yr=raw_noise_params,
+            Tspan=Tspan_seconds,
+            nmodes=150,
+            curn_components=None,
+            rn_components=None,
+        )
+        if args.validate_proxy:
+            validate_cgw_proxy(
+                store=store,
+                chunk_ids=chunk_ids,
+                pta=pta,
+                enterprise_psrs=enterprise_psrs,
+                raw_noise_params=raw_noise_params,
+                parsed_noise_params=parsed_noise_params,
+                Tspan_seconds=Tspan_seconds,
+                n_test=args.n_test,
+            )
+
+
         _compute_cgw_snrs(
             store=store,
             chunk_ids=chunk_ids,
@@ -513,6 +673,13 @@ def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_pa
         print("✓ CGW complete")
     else:
         print("\n(CGW skipped — use --cgw to enable)")
+    sentinel = os.path.join(sim_out_dir, "metadata", "stage2_complete.json")
+    with open(sentinel, "w") as fh:
+        json.dump({
+            "sim_id":           sim_id,
+            "cumulative_scale": float(cumulative_scale),
+            "completed_at":     time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }, fh, indent=2)
 
     elapsed = time.time() - t_sim
     print(f"\n✅ Stage 2 sim_id={sim_id} complete in {elapsed / 60:.1f} min")
@@ -520,195 +687,134 @@ def process_sim(sim_id: int, args, psrs_clean, raw_noise_params, parsed_noise_pa
     return True
 
 
-# =============================================================================
-# Cross-sim summary object
-# =============================================================================
-
 def _build_summary_object(
-    args,
+    output_dir: str,
+    sim_id: int,
     n_keep_per_category: int = 200,
 ) -> None:
-    """
-    After all sims complete, sweep every shard across every sim and collect
-    the most scientifically interesting binaries into a single .pkl.gz.
+    import gzip, pickle, heapq
 
-    Categories collected (indices unioned so one binary can qualify on many):
-      - highest CGW SNR
-      - nearest / most distant (D_comov)
-      - highest / lowest frequency
-      - heaviest / lightest chirp mass  (Mc)
-      - heaviest / lightest total mass  (Mtot)
-      - highest strain  (h0)
-      - lowest / highest redshift  (z)
+    sim_out_dir = os.path.join(output_dir, f"sim{sim_id:03d}")
+    out_path    = os.path.join(sim_out_dir, "summary.pkl.gz")
 
-    Output: <output_dir>/summary_population.pkl.gz
-    """
-    import gzip, pickle
+    pop_dir   = os.path.join(sim_out_dir, "populations")
+    store     = ShardedPickleStore(pop_dir)
+    chunk_ids = store.available()
 
-    out_path = os.path.join(args.output_dir, "summary_population.pkl.gz")
     print(f"\n{'='*60}")
-    print(f"Building cross-sim summary object → {out_path}")
+    print(f"Building summary object for sim{sim_id:03d} → {out_path}")
     print(f"  n_keep_per_category = {n_keep_per_category}")
     print(f"{'='*60}")
 
-    # Collect one big list of (field→value) dicts; we'll sort at the end.
-    # To avoid loading everything into RAM we do two passes:
-    #   Pass 1 — find threshold values for each category.
-    #   Pass 2 — collect only the qualifying rows.
-    # For simplicity (and because n_keep_per_category is small relative to
-    # the total) we do a single pass with bounded heaps instead.
-
-    import heapq
-
-    # Each heap stores (sort_key, global_index) — we use a min-heap so the
-    # root is the *worst* element currently tracked; if a new element beats
-    # it we replace the root.
-    # For "highest X" we store (-X, idx); for "lowest X" we store (X, idx).
-    # We also store enough per-binary data to reconstruct the object later.
-
-    # Map of category_name → (heap, is_max)
-    # heap entries: (key, flat_global_idx)
-    # We collect the actual PopulationArrays rows in a separate dict keyed
-    # by flat_global_idx so we don't duplicate storage.
-
     categories = {
-        "cgw_snr_high":  ([], True,  "cgw_snr"),
-        "D_comov_near":  ([], False, "D_comov"),
-        "D_comov_far":   ([], True,  "D_comov"),
-        "f_low":         ([], False, "f"),
-        "f_high":        ([], True,  "f"),
-        "Mc_low":        ([], False, "Mc"),
-        "Mc_high":       ([], True,  "Mc"),
-        "Mtot_low":      ([], False, "Mtot"),
-        "Mtot_high":     ([], True,  "Mtot"),
-        "h0_high":       ([], True,  "h0"),
-        "z_low":         ([], False, "z"),
-        "z_high":        ([], True,  "z"),
+        "cgw_snr_high": ([], True,  "cgw_snr"),
+        "D_comov_near": ([], False, "D_comov"),
+        "D_comov_far":  ([], True,  "D_comov"),
+        "f_low":        ([], False, "f"),
+        "f_high":       ([], True,  "f"),
+        "Mc_low":       ([], False, "Mc"),
+        "Mc_high":      ([], True,  "Mc"),
+        "Mtot_low":     ([], False, "Mtot"),
+        "Mtot_high":    ([], True,  "Mtot"),
+        "h0_high":      ([], True,  "h0"),
+        "z_low":        ([], False, "z"),
+        "z_high":       ([], True,  "z"),
     }
 
-    # flat_global_idx → single-binary PopulationArrays (pop[i])
-    collected: Dict[int, object] = {}
-    # flat_global_idx → sim_id so we can tag each binary
-    idx_to_sim: Dict[int, int]   = {}
-    global_counter = 0
+    field_buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
+    field_names: List[str] = []
+    total_scanned = 0
 
     def _heap_push(heap, is_max, key, gidx, cap):
-        """Push (key, gidx) onto a bounded min-heap of size `cap`."""
         entry = (-key if is_max else key, gidx)
         if len(heap) < cap:
             heapq.heappush(heap, entry)
-        elif entry < heap[0]:   # better than current worst
+        elif entry < heap[0]:
             heapq.heapreplace(heap, entry)
 
-    for sim_id in range(args.n_sims):
-        sim_out_dir = os.path.join(args.output_dir, f"sim{sim_id:03d}")
-        pop_dir     = os.path.join(sim_out_dir, "populations")
-        store       = ShardedPickleStore(pop_dir)
-        chunk_ids   = store.available()
+    for chunk_id in chunk_ids:
+        pop     = store.read(chunk_id)
+        n       = len(pop)
+        has_cgw = hasattr(pop, "cgw_snr") and pop.cgw_snr is not None
 
-        print(f"  sim {sim_id:03d}: {len(chunk_ids)} chunks", flush=True)
+        if not field_names:
+            field_names = [
+                name
+                for name, value in vars(pop).items()
+                if isinstance(value, np.ndarray)
+            ]
 
-        for chunk_id in chunk_ids:
-            pop = store.read(chunk_id)
-            n   = len(pop)
+        for field_name in field_names:
+            field_buffers[field_name].append(np.asarray(getattr(pop, field_name)))
 
-            # Which fields does this pop actually have?
-            has_cgw = hasattr(pop, "cgw_snr") and pop.cgw_snr is not None
+        for local_i in range(n):
+            gidx = total_scanned + local_i
+            vals = {
+                "cgw_snr": float(pop.cgw_snr[local_i]) if has_cgw else -1.0,
+                "D_comov": float(pop.D_comov[local_i]),
+                "f":       float(pop.f[local_i]),
+                "Mc":      float(pop.Mc[local_i]),
+                "Mtot":    float(pop.Mtot[local_i]),
+                "h0":      float(pop.h0[local_i]),
+                "z":       float(pop.z[local_i]),
+            }
 
-            for local_i in range(n):
-                gidx = global_counter + local_i
+            qualifies = False
+            for cat_name, (heap, is_max, field) in categories.items():
+                key   = vals[field]
+                entry = (-key if is_max else key, gidx)
+                if len(heap) < n_keep_per_category or entry < heap[0]:
+                    qualifies = True
+                    break
 
-                # Evaluate every category
-                vals = {
-                    "cgw_snr": float(pop.cgw_snr[local_i]) if has_cgw else -1.0,
-                    "D_comov": float(pop.D_comov[local_i]),
-                    "f":       float(pop.f[local_i]),
-                    "Mc":      float(pop.Mc[local_i]),
-                    "Mtot":    float(pop.Mtot[local_i]),
-                    "h0":      float(pop.h0[local_i]),
-                    "z":       float(pop.z[local_i]),
-                }
-
-                qualifies = False
+            if qualifies:
                 for cat_name, (heap, is_max, field) in categories.items():
-                    key = vals[field]
-                    entry = (-key if is_max else key, gidx)
-                    if len(heap) < n_keep_per_category:
-                        qualifies = True
-                    elif entry < heap[0]:
-                        qualifies = True
-                    if qualifies:
-                        break  # no need to check further — we'll store this one
+                    _heap_push(heap, is_max, vals[field], gidx, n_keep_per_category)
 
-                if qualifies:
-                    # Store the binary; push to all relevant heaps
-                    collected[gidx] = pop[local_i]
-                    idx_to_sim[gidx] = sim_id
-                    for cat_name, (heap, is_max, field) in categories.items():
-                        _heap_push(heap, is_max, vals[field], gidx, n_keep_per_category)
+        total_scanned += n
+        del pop
+        gc.collect()
 
-            global_counter += n
-            del pop
-            gc.collect()
-
-    # ── Build per-category index sets ─────────────────────────────────────────
     category_indices: Dict[str, List[int]] = {}
     for cat_name, (heap, is_max, field) in categories.items():
         category_indices[cat_name] = sorted({gidx for (_, gidx) in heap})
 
-    all_indices = sorted(collected.keys())
-    print(f"\n  Total unique binaries collected: {len(all_indices):,}")
+    print(f"  Total binaries scanned: {total_scanned:,}")
     for cat_name, idxs in category_indices.items():
         print(f"    {cat_name:<20s}: {len(idxs):,}")
 
-    # ── Concatenate into a single PopulationArrays ─────────────────────────────
-    # We concatenate the single-binary objects in global index order so that
-    # category_indices (which use global indices) remain valid as positions
-    # in the final array.
-    gidx_to_pos = {gidx: pos for pos, gidx in enumerate(all_indices)}
-
-    # Use the first binary to discover field names
-    sample = collected[all_indices[0]]
-    fields = [f for f in vars(sample) if isinstance(getattr(sample, f), np.ndarray)]
-
-    # Build concatenated arrays
     arrays: Dict[str, np.ndarray] = {
-        field: np.concatenate([
-            np.atleast_1d(getattr(collected[gidx], field))
-            for gidx in all_indices
-        ])
-        for field in fields
+        field_name: np.concatenate(buffers)
+        for field_name, buffers in field_buffers.items()
+        if buffers
     }
+    arrays["global_idx"] = np.arange(total_scanned, dtype=np.int64)
 
-    # Tag each binary with its sim_id and original global index
-    arrays["sim_id"]      = np.array([idx_to_sim[gidx]  for gidx in all_indices], dtype=np.int32)
-    arrays["global_idx"]  = np.array(all_indices, dtype=np.int64)
+    top_cgw_breakdowns = []
+    breakdown_path = os.path.join(sim_out_dir, "metadata", "top_cgw_breakdowns.json")
+    if os.path.isfile(breakdown_path):
+        with open(breakdown_path) as fh:
+            top_cgw_breakdowns = json.load(fh)
 
-    # Remap category_indices from global-idx space to position space
     summary_meta = {
         "category_indices": {
-            cat: [gidx_to_pos[gidx] for gidx in idxs]
+            cat: idxs
             for cat, idxs in category_indices.items()
         },
-        "n_sims":               args.n_sims,
+        "sim_id":               sim_id,
         "n_keep_per_category":  n_keep_per_category,
-        "total_scanned":        global_counter,
+        "total_scanned":        total_scanned,
+        "summary_version":      2,
+        "full_population":      True,
+        "top_cgw_breakdowns":   top_cgw_breakdowns,
     }
 
     payload = {"arrays": arrays, "meta": summary_meta}
-
     with gzip.open(out_path, "wb") as fh:
         pickle.dump(payload, fh, protocol=4)
 
     size_mb = os.path.getsize(out_path) / 1e6
-    print(f"\n✅ Summary object written: {out_path}  ({size_mb:.1f} MB)")
-    print(f"   Load with:")
-    print(f"     import gzip, pickle")
-    print(f"     with gzip.open('{out_path}', 'rb') as f:")
-    print(f"         d = pickle.load(f)")
-    print(f"     arrays = d['arrays']   # dict of np.ndarray, all same length")
-    print(f"     meta   = d['meta']     # category_indices, etc.")
-
+    print(f"✅ Summary written: {out_path}  ({size_mb:.1f} MB)")
 
 
 # =============================================================================
@@ -722,11 +828,19 @@ def parse_args():
                    choices=list(config.POPULATION_CONFIGS.keys()))
     p.add_argument("--target-snr",  type=float, default=4.0)
     p.add_argument("--snr-range",   nargs=2, type=float, default=[3.5, 4.25])
-    p.add_argument("--n-sims",      type=int,   required=True,
-                   help="Total number of simulations (0 .. n_sims-1)")
     p.add_argument("--n-chunks",    type=int,   required=True,
                    help="Number of chunks per simulation (used for logging only)")
     p.add_argument("--cgw",         action="store_true")
+    p.add_argument("--validate-proxy", action="store_true",
+               help="Validate CGW proxy vs true SNR before full computation (slow, use once)")
+    p.add_argument("--proxy-only", action="store_true",
+               help="Skip noise simulation and SNR scaling — just validate the CGW proxy on existing shards")
+    p.add_argument("--n-test", type=int, default=1_000,
+               help="Number of binaries to sample for proxy validation (default: 1000)")
+    p.add_argument("--sim-id", type=int, default=None,
+               help="Process only this sim_id (default: loop over all 0..n_sims-1)")
+    p.add_argument("--clean-failed", action="store_true",
+               help="Remove incomplete sim directories so stage1 can regenerate cleanly")
     return p.parse_args()
 
 
@@ -738,8 +852,22 @@ def main():
     args = parse_args()
     t0   = time.time()
 
+    # ── clean-failed mode — remove incomplete sims and exit ───────────────────
+    if args.clean_failed:
+        import glob, shutil
+        print("\n🧹 Cleaning incomplete sim directories...")
+        for sim_dir in sorted(glob.glob(os.path.join(args.output_dir, "sim[0-9][0-9][0-9]"))):
+            sentinel = os.path.join(sim_dir, "metadata", "stage2_complete.json")
+            if not os.path.isfile(sentinel):
+                print(f"  Removing incomplete {os.path.basename(sim_dir)}...")
+                shutil.rmtree(sim_dir)
+            else:
+                print(f"  Preserving complete {os.path.basename(sim_dir)}")
+        print("✓ Clean done")
+        sys.exit(0)
+
     print(f"\n{'='*60}")
-    print(f"Stage 2 — single job, processing {args.n_sims} simulation(s)")
+    print(f"Stage 2 — single job, processing 1 simulation")
     print(f"  Output dir : {args.output_dir}")
     print(f"  Config     : {args.config}")
     print(f"  Target SNR : {args.target_snr}  range={args.snr_range}")
@@ -757,24 +885,23 @@ def main():
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
 
     # ── Loop over all sim_ids ─────────────────────────────────────────────────
-    failed = []
-    for sim_id in range(args.n_sims):
-        success = process_sim(sim_id, args, psrs_clean, raw_noise_params, parsed_noise_params)
-        if not success:
-            failed.append(sim_id)
+    if args.sim_id is None:
+        print("ERROR: --sim-id is required for stage 2", file=sys.stderr)
+        sys.exit(1)
+    sim_id = args.sim_id
+
+    success = process_sim(sim_id, args, psrs_clean, raw_noise_params, parsed_noise_params)
+
+    if not success:
+        print(f"ERROR: sim_id={sim_id} failed", file=sys.stderr)
+        sys.exit(1)  # non-zero exit triggers Slurm afternotok dependency
 
     # ── Summary ───────────────────────────────────────────────────────────────
     elapsed = time.time() - t0
-    n_ok    = args.n_sims - len(failed)
     print(f"\n{'='*60}")
-    print(f"Stage 2 complete — {n_ok}/{args.n_sims} sims succeeded in {elapsed/60:.1f} min")
-    if failed:
-        print(f"  FAILED sim_ids: {failed}", file=sys.stderr)
-        sys.exit(1)
+    print(f"Stage 2 complete — 1 sim succeeded in {elapsed/60:.1f} min")
 
-    # ── Build cross-sim summary object ────────────────────────────────────────
-    if not failed or len(failed) < args.n_sims:   # at least one sim succeeded
-        _build_summary_object(args, n_keep_per_category=200)
+    _build_summary_object(args.output_dir, sim_id=sim_id, n_keep_per_category=200)
 
     print(f"{'='*60}")
 

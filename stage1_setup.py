@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from consistent_pop_synth import suppress_enterprise_warnings
 from data_loader import load_pulsars, filter_pulsars_15yr
-from signal_injection import change_in_TOAs_days_population_nufft
+from signal_injection import change_in_TOAs_days_population_nufft, _antenna_response_vec, _get_psr_radec
 from SMBHB_pop_synth import PopulationArrays
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
 
@@ -59,7 +59,7 @@ FIELD_DTYPES: Dict[str, type] = {
     "cgw_snr":  np.float16,
 }
 SCALAR_FIELDS = list(FIELD_DTYPES.keys())
-N_PRE_FILTER_PER_CHUNK  = 2_500
+N_PRE_FILTER_PER_CHUNK  = 12_500
 
 
 class ShardedPickleStore:
@@ -81,18 +81,20 @@ class ShardedPickleStore:
     def update(
         self,
         idx: int,
-        h0:      Optional[np.ndarray] = None,
-        D_comov: Optional[np.ndarray] = None,
-        z:       Optional[np.ndarray] = None,
-        cgw_snr: Optional[np.ndarray] = None,
-        amp_A:   Optional[Dict[str, np.ndarray]] = None,
-        amp_B:   Optional[Dict[str, np.ndarray]] = None,
+        h0:        Optional[np.ndarray] = None,
+        D_comov:   Optional[np.ndarray] = None,
+        z:         Optional[np.ndarray] = None,
+        cgw_snr:   Optional[np.ndarray] = None,
+        cgw_proxy: Optional[np.ndarray] = None,   # ← add this
+        amp_A:     Optional[Dict[str, np.ndarray]] = None,
+        amp_B:     Optional[Dict[str, np.ndarray]] = None,
     ) -> None:
         pop = self.read(idx)
-        if h0      is not None: pop.h0      = h0.astype(np.float32)
-        if D_comov is not None: pop.D_comov = D_comov.astype(np.float32)
-        if z       is not None: pop.z       = z.astype(np.float32)
-        if cgw_snr is not None: pop.cgw_snr = cgw_snr.astype(np.float32)
+        if h0        is not None: pop.h0        = h0.astype(np.float32)
+        if D_comov   is not None: pop.D_comov   = D_comov.astype(np.float32)
+        if z         is not None: pop.z         = z.astype(np.float32)
+        if cgw_snr   is not None: pop.cgw_snr   = cgw_snr.astype(np.float32)
+        if cgw_proxy is not None: pop.cgw_proxy = cgw_proxy.astype(np.float32)  # ← add this
         if amp_A is not None:
             for psr, arr in amp_A.items():
                 pop.amp_A[psr] = arr.astype(np.float32)
@@ -123,34 +125,121 @@ class ShardedPickleStore:
         for psr in list(pop.amp_B):
             pop.amp_B[psr] = pop.amp_B[psr].astype(np.float32)
         return pop
+    
+def _compute_analytic_proxy(pop, psrs, Nvecs=None, Tspan_seconds=None):
+    """
+    Analytic approximation to sqrt(s^T N^{-1} s), vectorized over all binaries.
+
+    rho^2 ≈ sum_psr  <sin^2> * (A^2 + B^2) * sum(1/Nvec)
+
+    where A = Fp * h0 * (1 + cos^2(iota)) / (2*pi*f)
+          B = Fx * h0 * (-2*cos(iota))    / (2*pi*f)
+
+    and <sin^2> = 0.5 * (1 - sin(2*pi*f*T) / (2*pi*f*T))
+        is the time-averaged sin^2 correction (exact for a stationary
+        sinusoid over baseline T). For f*T >> 1 this -> 0.5 (standard
+        result); for f*T ~ 1 (low-frequency regime) it suppresses rho
+        relative to the naive 0.5 assumption.
+
+    Nvecs: list of per-pulsar Nvec arrays (Stage 2, from PTA object).
+           If None, falls back to toaerrs^2 (Stage 1, libstempo objects,
+           toaerrs in microseconds -> converted to seconds here).
+
+    pop: either a PopulationArrays object (Stage 1) with array attributes,
+         or a list of binary objects (Stage 2) with scalar attributes.
+
+    Tspan_seconds: observation baseline in seconds. Required when the
+                   low-frequency correction is desired; if None the
+                   correction is skipped and <sin^2> = 0.5 is used.
+    """
+    # ── Per-pulsar noise weights — computed once, binary-independent ──────────
+    if Nvecs is not None:
+        inv_Nvec_sums = np.array([np.sum(1.0 / Nvec) for Nvec in Nvecs])
+    else:
+        inv_Nvec_sums = np.array([
+            np.sum(1.0 / (psr.toaerrs * 1e-6)**2) for psr in psrs
+        ])
+
+    psr_coords = [_get_psr_radec(psr) for psr in psrs]
+
+    # ── Extract binary params as arrays ──────────────────────────────────────
+    if hasattr(pop, 'f'):
+        f   = pop.f
+        h0  = pop.h0
+        ci  = np.cos(pop.iota)
+        ra  = pop.ra
+        dec = pop.dec
+        psi = pop.psi
+    else:
+        f   = np.array([b.f    for b in pop])
+        h0  = np.array([b.h0   for b in pop])
+        ci  = np.cos(np.array([b.iota for b in pop]))
+        ra  = np.array([b.ra   for b in pop])
+        dec = np.array([b.dec  for b in pop])
+        psi = np.array([b.psi  for b in pop])
+
+    # ── Amplitude factors — shape (N_binaries,) ───────────────────────────────
+    norm = h0 / (2.0 * np.pi * f)
+    Aamp = norm * (1.0 + ci**2)
+    Bamp = norm * (-2.0 * ci)
+
+    # ── Time-averaged sin^2 correction — shape (N_binaries,) ─────────────────
+    # <sin^2(2*pi*f*t)> over [0, T] = 0.5 * (1 - sin(2*pi*f*T) / (2*pi*f*T))
+    # This is the exact mean for a single stationary sinusoid; reduces to 0.5
+    # when f*T >> 1. We use it multiplicatively to replace the naive 0.5
+    # assumed in the loop below.
+    if Tspan_seconds is not None:
+        phase = 2.0 * np.pi * f * Tspan_seconds          # 2*pi*f*T, shape (N_binaries,)
+        sinc_term = np.where(
+            phase > 1e-6,
+            np.sin(phase) / phase,                        # unnormalized sinc
+            1.0 - phase**2 / 6.0                          # Taylor expansion near 0
+        )
+        time_avg = 0.5 * (1.0 - sinc_term)               # exact <sin^2>, shape (N_binaries,)
+        time_avg = np.clip(time_avg, 1e-3, 0.5)           # safety floor; never exceeds 0.5
+    else:
+        time_avg = 0.5                                    # scalar, high-f limit
+
+    # ── Sum over pulsars ──────────────────────────────────────────────────────
+    # rho^2 = <sin^2> * sum_psr [ (Fp*Aamp)^2 + (Fx*Bamp)^2 ] * inv_Nvec_sum
+    # Factor out time_avg: accumulate the antenna/noise sum first, then multiply.
+    antenna_sum = np.zeros(len(f))
+    for (psr_ra, psr_dec), inv_Nvec_sum in zip(psr_coords, inv_Nvec_sums):
+        Fp, Fx = _antenna_response_vec(psr_ra, psr_dec, ra, dec, psi)
+        A = Fp * Aamp
+        B = Fx * Bamp
+        antenna_sum += (A**2 + B**2) * inv_Nvec_sum
+
+    rho_sq = time_avg * antenna_sum
+
+    # ── Array-level sky sensitivity weight ────────────────────────────────────
+    sky_weights = sky_sensitivity_weight(ra, dec)
+
+    return np.sqrt(rho_sq) * sky_weights
+
 
 def _filter_population_extremes(
     pop: PopulationArrays,
+    psrs,
     n_keep: int = 100,
     n_total: int = None,
-) -> PopulationArrays:
+    Tspan_seconds: Optional[float] = None,
+) -> tuple[PopulationArrays, np.ndarray]:
     """
-    Keep extreme binaries across all parameters PLUS the top binaries by
-    CGW proxy SNR (h0 / (2π f) * sky_sensitivity_weight).
-
-    The CGW-proxy slice fills up to `n_total` slots (defaulting to
-    N_PRE_FILTERED if defined, else 30 * n_keep), with parameter-extreme
-    binaries unioned in on top.
+    Returns (filtered_pop, proxy_scores) where proxy_scores align with
+    filtered_pop so they can be saved directly to the shard.
     """
     n = len(pop)
 
-    # How many total to keep (CGW-proxy dominated)
     if n_total is None:
-        n_total = globals().get("N_PRE_FILTERED", 30 * n_keep)
+        n_total= N_PRE_FILTER_PER_CHUNK
     n_total = min(n_total, n)
-    n_keep  = min(n_keep, n // 2)   # safety cap on extremes slice
+    n_keep  = min(n_keep, n // 2)
 
     indices = set()
 
-    # ── 1. CGW proxy SNR (primary filter) ───────────────────────────────────
-    proxies = (pop.h0 / (2.0 * np.pi * pop.f)) * np.array([
-        sky_sensitivity_weight(pop.ra[i], pop.dec[i]) for i in range(n)
-    ])
+    proxies = _compute_analytic_proxy(pop, psrs, Nvecs=None, Tspan_seconds=Tspan_seconds)
+
     n_cgw = min(n_total, n)
     if n_cgw == n:
         cgw_top = np.argsort(proxies)[::-1]
@@ -159,36 +248,39 @@ def _filter_population_extremes(
         cgw_top = cgw_top[np.argsort(proxies[cgw_top])[::-1]]
     indices.update(cgw_top.tolist())
 
-    # ── 2. Parameter extremes (union'd in so nothing rare is missed) ─────────
     for arr in (pop.f, pop.D_comov, pop.h0, pop.Mc, pop.Mtot):
         order = np.argsort(arr)
         indices.update(order[:n_keep].tolist())
         indices.update(order[-n_keep:].tolist())
-    # h0 / loudest: top only (no "quietest" extreme needed)
     h0_order = np.argsort(pop.h0)
     indices.update(h0_order[-n_keep:].tolist())
 
     idx = np.array(sorted(indices))
     print(
         f"  Population filtered: {n:,} → {len(idx):,} kept "
-        f"(top-{n_cgw} CGW-proxy + {len(idx) - n_cgw} parameter extremes)"
+        f"(top-{n_cgw} analytic-proxy + {len(idx) - n_cgw} parameter extremes)"
     )
-    return pop[idx]
+    return pop[idx], proxies[idx]   # ← return both
+
 
 # =============================================================================
 # Helpers
 # =============================================================================
 
 def _save_toa_deltas(delta_stoas, out_dir: str, chunk_id: int) -> None:
-    """Save per-pulsar Δstoa arrays for one chunk."""
-    sim_dir = os.path.join(out_dir, "stoas", f"sim{chunk_id:04d}")
-    os.makedirs(sim_dir, exist_ok=True)
-    for psr_name, delta in delta_stoas:
-        np.save(
-            os.path.join(sim_dir, f"{psr_name}_delta.npy"),
-            delta.astype(np.float64),
-        )
-    print(f"  Saved Δstoas for {len(delta_stoas)} pulsars → {sim_dir}")
+    stoa_dir = os.path.join(out_dir, "stoas")
+    os.makedirs(stoa_dir, exist_ok=True)
+
+    outpath = os.path.join(stoa_dir, f"chunk_{chunk_id:04d}.npz")
+
+    save_dict = {
+        psr_name: delta.astype(np.float64)
+        for psr_name, delta in delta_stoas
+    }
+
+    np.savez(outpath, **save_dict)
+
+    print(f"  Saved Δstoas for {len(save_dict)} pulsars → {outpath}")
 
 
 # =============================================================================
@@ -207,6 +299,7 @@ def parse_args():
                    help="Number of chunks per simulation (used to decode task_id)")
     p.add_argument("--task-id",     type=int, default=None,
                    help="Flat array task ID (overrides $SLURM_ARRAY_TASK_ID)")
+    p.add_argument("--sim-id",  type=int, required=True)
     return p.parse_args()
 
 
@@ -226,8 +319,10 @@ def main():
             sys.exit("ERROR: --task-id not set and $SLURM_ARRAY_TASK_ID is not defined.")
         task_id = int(env_val)
 
-    sim_id   = task_id // args.n_chunks
-    chunk_id = task_id  % args.n_chunks
+    sim_id = args.sim_id
+    if sim_id is None:
+        sim_id   = task_id // args.n_chunks
+    chunk_id = task_id 
 
     # Per-simulation output directory
     sim_out_dir = os.path.join(args.output_dir, f"sim{sim_id:03d}")
@@ -275,11 +370,12 @@ def main():
 
     # ── 5. Save population shard ──────────────────────────────────────────────
     print(f"\n💾 Filtering to extreme binaries...")
-    population_batch = _filter_population_extremes(population_batch, n_keep=100, )
+    population_batch, proxy_scores = _filter_population_extremes(population_batch, n_keep=100, psrs=psrs_clean, Tspan_seconds=Tspan_seconds)
 
     print(f"\n💾 Saving population shard → subpop_{chunk_id:03d}.pkl.gz ...")
     store = ShardedPickleStore(pop_dir)
     store.write(chunk_id, population_batch)
+    store.update(chunk_id, cgw_proxy=proxy_scores)
     print(f"✓ Shard written")
 
     del population_batch, delta_stoas

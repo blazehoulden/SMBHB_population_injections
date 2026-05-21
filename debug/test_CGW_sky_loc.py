@@ -208,13 +208,14 @@ def _build_sky_weight_interpolator():
 _SKY_WEIGHT_INTERP = _build_sky_weight_interpolator()
 
 
-def sky_sensitivity_weight(ra: float, dec: float) -> float:
+def sky_sensitivity_weight(ra_arr: np.ndarray, dec_arr: np.ndarray) -> np.ndarray:
     """
     Interpolated sky sensitivity weight at (ra, dec).
     Weight > 1  →  hotspot; Weight < 1  →  coldspot.
     Median sky position gives weight ≈ 1.0.
     """
-    return float(_SKY_WEIGHT_INTERP(ra, dec))
+    points = np.column_stack([ra_arr, dec_arr])
+    return _SKY_WEIGHT_INTERP(points).astype(np.float32)
 
 
 

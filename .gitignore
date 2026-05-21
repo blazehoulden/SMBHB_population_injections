@@ -14,6 +14,10 @@ venv/
 *.hdf5
 *.npz
 
+# Logs/text files
+*.out
+*.txt
+
 # Local data
 data/
 cache/
@@ -22,3 +26,7 @@ figures/
 nanograv_pulsars_cache.pkl
 tempo2_runtime.tar.gz
 data/2026-02-17/pessimistic/optimal_snr_population.json
+logs/
+runs/
+old_successful_run_logs/
+psars_narrowband/

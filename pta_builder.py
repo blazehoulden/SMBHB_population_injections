@@ -7,7 +7,7 @@ import numpy as np
 def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
                          gw_log10_A=np.log10(2.4e-15), gw_gamma=13.0/3.0, 
                          include_GW=True, include_RN=True, include_WN=True,
-                         nmodes=150):
+                         nmodes=150, curn_components=None, rn_components=None):
     """
     Build PTA model and ensure all required parameters exist.
     
@@ -46,9 +46,15 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
         mn = white_signals.MeasurementNoise(efac=parameter.Constant(val=1e-8), log10_t2equad=parameter.Constant(val=-12), selection=selection)
 
     pl   = utils.powerlaw(log10_A=log10_A, gamma=gamma)
-    rn   = gp_signals.FourierBasisGP(spectrum=pl, components=nmodes, Tspan=Tspan)
+    if rn_components is not None:
+        rn = gp_signals.FourierBasisGP(spectrum=pl, components=rn_components, Tspan=Tspan)
+    else:
+        rn = gp_signals.FourierBasisGP(spectrum=pl, components=nmodes, Tspan=Tspan)
     cpl  = utils.powerlaw(log10_A=gw_log10_A, gamma=gw_gamma)
-    curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
+    if curn_components is not None:
+        curn = gp_signals.FourierBasisGP(spectrum=cpl, components=curn_components, Tspan=Tspan, name=crn_name)
+    else:
+        curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
 
     model = tm
     if include_GW:
@@ -62,7 +68,10 @@ def build_pta_and_params(psrs, noise_params_15yr, Tspan, crn_name="gw",
     if include_GW == False:
         gw_log10_A=-20.0 # should be negligible enough - similar to WN above
         cpl  = utils.powerlaw(log10_A=gw_log10_A, gamma=gw_gamma)
-        curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
+        if curn_components is not None:
+            curn = gp_signals.FourierBasisGP(spectrum=cpl, components=curn_components, Tspan=Tspan, name=crn_name)
+        else:
+            curn = gp_signals.FourierBasisGP(spectrum=cpl, components=nmodes, Tspan=Tspan, name=crn_name)
         model += curn
 
     # ---- Instantiate per pulsar ----

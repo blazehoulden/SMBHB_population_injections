@@ -4,6 +4,7 @@ from enterprise_extensions.deterministic import cw_delay
 from optimal_SNR_calc import measured_strain_all_binaries_all_pulsars
 from signal_injection import population_residuals
 from scipy.linalg import cho_factor, cho_solve
+import time
 def compute_cgw_signal_enterprise(psr, binary):
     """Compute CGW timing residual signal for a single pulsar using enterprise."""
     s_a = cw_delay(
@@ -59,6 +60,143 @@ def compute_cgw_snr_optimal_population(psrs, pta, population, raw_noise_params, 
     if profile:
         elapsed = time.time() - start_time
         print(f"Total SNR computation for population took {elapsed:.2f} seconds.")
+    return results
+
+from scipy.linalg import cho_factor, cho_solve
+import numpy as np
+
+
+def compute_cgw_snr_optimal_population_fast(
+    psrs,
+    pta,
+    population,
+    raw_noise_params,
+    parsed_noise_params,
+    Tspan,
+    profile=False,
+    return_breakdown=False,
+):
+
+    import time
+
+    t0 = time.time()
+
+    # =========================================================
+    # PRECOMPUTE EVERYTHING
+    # =========================================================
+
+    phiinvs = pta.get_phiinv(raw_noise_params, logdet=False)
+    TNTs    = pta.get_TNT(raw_noise_params)
+    Ts      = pta.get_basis()
+    Nvecs   = pta.get_ndiag(raw_noise_params)
+
+    psr_map = {psr.name: psr for psr in psrs}
+
+    precomputed = []
+
+    for psr_name, Nvec, TNT, phiinv, T in zip(
+        pta.pulsars,
+        Nvecs,
+        TNTs,
+        phiinvs,
+        Ts,
+    ):
+
+        Sigma = TNT + (
+            np.diag(phiinv)
+            if phiinv.ndim == 1
+            else phiinv
+        )
+
+        # PREFACTORIZE ONCE
+        cf = cho_factor(
+            Sigma
+        )
+
+        precomputed.append(
+            (
+                psr_name,
+                psr_map[psr_name],
+                parsed_noise_params[psr_name],
+                Nvec,
+                T,
+                cf,
+            )
+        )
+
+    if profile:
+        print(f"Precompute time: {time.time()-t0:.2f} s")
+
+    # =========================================================
+    # EXACT enterprise_extensions INNER PRODUCT
+    # =========================================================
+
+    def fast_inner_product_rr_exact(x, y, Nvec, Tmat, cf):
+
+        # EXACT SAME OPERATIONS
+        TNy = Nvec.solve(y, left_array=Tmat)
+        TNx = Nvec.solve(x, left_array=Tmat)
+        xNy = Nvec.solve(y, left_array=x)
+
+        # ONLY DIFFERENCE:
+        # reuse prefactorized Sigma
+        SigmaTNy = cho_solve(
+            cf,
+            TNy,
+        )
+
+        return xNy - TNx.T @ SigmaTNy
+
+    # =========================================================
+    # MAIN LOOP
+    # =========================================================
+
+    results = np.empty(len(population), dtype=np.float64)
+    breakdowns = [] if return_breakdown else None
+
+    for i, binary in enumerate(population):
+
+        rho_sq = 0.0
+        per_pulsar = {} if return_breakdown else None
+
+        for (
+            psr_name,
+            psr,
+            psr_noise_params,
+            Nvec,
+            T,
+            cf,
+        ) in precomputed:
+
+            s_a = population_residuals(
+                psr.toas,
+                psr,
+                [binary],
+                Tspan,
+                psr_noise_params,
+            )
+
+            contrib = fast_inner_product_rr_exact(
+                s_a,
+                s_a,
+                Nvec,
+                T,
+                cf,
+            )
+            contrib = float(np.real(contrib))
+            rho_sq += contrib
+            if return_breakdown:
+                per_pulsar[psr_name] = max(contrib, 0.0)
+
+        results[i] = np.sqrt(rho_sq)
+        if return_breakdown:
+            breakdowns.append(per_pulsar)
+
+    if profile:
+        print(f"Total runtime: {time.time()-t0:.2f} s")
+
+    if return_breakdown:
+        return results, breakdowns
     return results
 
 

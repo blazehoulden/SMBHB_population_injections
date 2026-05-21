@@ -120,9 +120,10 @@ def antenna_response_vec(psr_ra, psr_dec, ra_arr, dec_arr, psi_arr):
     m_rot   =  cos_psi * m_hat + sin_psi * n_hat
     n_rot   = -sin_psi * m_hat + cos_psi * n_hat
 
-    denom = 1 + p_hat @ omega_hat      # (N,)
-    p_m   = p_hat @ m_rot              # (N,)
-    p_n   = p_hat @ n_rot              # (N,)
+    # --- antenna patterns ---
+    denom = 1.0 + np.dot(p_hat, omega_hat)        # (N,)
+    p_m   = np.dot(p_hat, m_rot)                  # (N,)
+    p_n   = np.dot(p_hat, n_rot)                  # (N,)
 
     Fp = 0.5 * (p_m**2 - p_n**2) / denom
     Fx =       (p_m   * p_n)     / denom
@@ -626,16 +627,6 @@ def antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi, norm = True):
 
 def r_k(t, psr, binary):
     """Calculate timing residual from single circular SMBHB (Earth term only) This assumption holds for most cases (see Appendix in https://arxiv.org/pdf/1003.0677)."""
-    # f = binary['f']
-    # Mc = binary['Mc']
-    # D_comov = binary['D_comov']
-    # z = binary['z']
-    # D_lum = D_comov * (1 + z) # in Mpc
-    # ra = binary['ra']
-    # dec = binary['dec']
-    # psi = binary.get('psi', 0.0)
-    # phi0 = binary.get('phi0', 0.0)
-    # iota = binary.get('iota', 0.0)
 
     f = binary.f
     ra = binary.ra
@@ -880,6 +871,38 @@ def _antenna_response_vec(psr_ra, psr_dec, ra_arr, dec_arr, psi_arr):
     Fx =       (p_m   * p_n)     / denom
     return Fp, Fx                            # each (N,)
 
+def _get_psr_radec(psr):
+    """
+    Extract (ra, dec) in radians from either a libstempo or Enterprise pulsar object.
+    Tries RAJ/DECJ first, falls back to ELONG/ELAT ecliptic coords, 
+    then falls back to _raj/_decj (Enterprise).
+    """
+    # --- libstempo path ---
+    if hasattr(psr, 'pars'):
+        try:
+            pars = psr.pars()
+            if 'RAJ' in pars and 'DECJ' in pars:
+                return psr['RAJ'].val, psr['DECJ'].val
+            elif 'ELONG' in pars and 'ELAT' in pars:
+                from astropy.coordinates import SkyCoord
+                import astropy.units as u
+                coord = SkyCoord(
+                    lon=psr['ELONG'].val * u.rad,
+                    lat=psr['ELAT'].val  * u.rad,
+                    frame='geocentricmeanecliptic'
+                )
+                return coord.icrs.ra.rad, coord.icrs.dec.rad
+        except Exception:
+            pass  # fall through to _raj/_decj
+
+    # --- Enterprise path (or libstempo fallback) ---
+    if hasattr(psr, '_raj') and hasattr(psr, '_decj'):
+        return psr._raj, psr._decj
+
+    raise AttributeError(
+        f"Cannot extract RA/Dec from pulsar object of type {type(psr)}. "
+        f"Expected RAJ/DECJ or ELONG/ELAT params, or _raj/_decj attributes."
+    )
 
 def _gw_residuals_vec(t, psr, population):
     """

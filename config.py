@@ -12,32 +12,32 @@ pc = 3.085677581e16   # Parsec [m]
 # Population configuration presets
 POPULATION_CONFIGS = {
     'test': {
-        'n_binaries': 1000,
-        'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(12.0),
-        'z_max': 0.5,
-        'description': 'Tiny population for local testing'
-    },
-    'pessimistic': {
-        'n_binaries': 1_000_000_000,
+        'n_binaries': 20_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(8.0),
         'z_max': 1.0,
-        'description': 'Larger mass, higher spread in distance, small population'
+        'description': 'Tiny population for local testing'
+    },
+    'pessimistic': {
+        'n_binaries': 50_000_000_000,
+        'mass_distribution': 'exponential_damping',
+        'mass_cutoff_0': 10**(8.0),
+        'z_max': 1.0,
+        'description': 'Lower mass, higher population size'
     },
     'realistic': {
-        'n_binaries': 100_000_000,
+        'n_binaries': 500_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(8.5),
         'z_max': 1.0,
-        'description': 'Medium mass, medium spread in distance, medium population'
+        'description': 'Medium mass, medium population size'
     },
     'optimistic': {
         'n_binaries': 10_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9),
         'z_max': 1.0,
-        'description': 'Lower mass, lower spread in distance, large population'
+        'description': 'Higher mass, lower population size'
     }
 }
 
@@ -98,8 +98,8 @@ def generate_population(config, smbhb_module, n_binaries = None, compute_strain=
             mass_distribution=config['mass_distribution'],
             alpha_0=1.21,
             alpha_z=0.0,
-            mass_min=1e7,
-            mass_max=1e11,
+            mass_min=10**(7.5),
+            mass_max=10**(12.5),
             mass_cutoff_0=config['mass_cutoff_0'],
             mass_cutoff_z=0.0,
             compute_strain=compute_strain,
@@ -118,8 +118,8 @@ def generate_population(config, smbhb_module, n_binaries = None, compute_strain=
             mass_distribution=config['mass_distribution'],
             alpha_0=1.21,
             alpha_z=0.0,
-            mass_min=1e7,
-            mass_max=1e11,
+            mass_min=10**(7.5),
+            mass_max=10**(12.5),
             mass_cutoff_0=config['mass_cutoff_0'],
             mass_cutoff_z=0.0,
             compute_strain=compute_strain,

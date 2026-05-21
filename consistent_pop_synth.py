@@ -45,6 +45,8 @@ def compute_population_snr(
     include_RN=True,
     include_WN=True,
     nmodes=150,
+    curn_components=None,
+    rn_components=None,
 ):
     if timer:
         t_start = time.perf_counter()
@@ -119,7 +121,9 @@ def compute_population_snr(
         include_GW=include_GW,
         include_RN=include_RN,
         include_WN=include_WN,
-        nmodes=nmodes
+        nmodes=nmodes,
+        curn_components=curn_components,
+        rn_components=rn_components,
     )
     gc.collect()
 

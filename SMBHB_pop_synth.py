@@ -257,8 +257,8 @@ def sample_masses_power_law(n_binaries: int,
                             redshift_array: np.ndarray,
                             alpha_0: float = 1.21,
                             alpha_z: float = 0.0,
-                            mass_min: float = 1e7,
-                            mass_max: float = 1e11) -> np.ndarray:
+                            mass_min: float = 10**(7.5),
+                            mass_max: float = 10**(12.5)) -> np.ndarray:
     """
     Sample primary masses from p(M) ∝ M^(-α) via vectorised inverse-CDF.
  
@@ -317,7 +317,7 @@ def sample_from_precomputed_cdf(n_samples, mass_grid, cdf_grid):
 def sample_masses_exponential_damping(n_binaries, redshift_array,
                                       mass_cutoff_0=1e9, mass_cutoff_z=0.0,
                                       alpha_0=1.21, alpha_z=0.0,
-                                      mass_min=1e7, mass_max=1e11,
+                                      mass_min=10**(7.5), mass_max=10**(12.5),
                                       use_pure_power_law=False):
     alpha      = alpha_0
     mass_cutoff = mass_cutoff_0
@@ -478,9 +478,9 @@ def generate_smbhb_population(
         mass_distribution: str = 'power_law',
         alpha_0: float = 1.21,
         alpha_z: float = 0.0,
-        mass_min: float = 1e7,
-        mass_max: float = 1e11,
-        mass_cutoff_0: float = 1e9,
+        mass_min: float = 10**(7.5),
+        mass_max: float = 10**(12.5),
+        mass_cutoff_0: float = 10**(9),
         mass_cutoff_z: float = 0.0,
         compute_strain: bool = True,
         T_obs_seconds: float = 16.03 * YEAR_S,
