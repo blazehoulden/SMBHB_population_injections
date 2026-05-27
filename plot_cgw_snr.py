@@ -71,27 +71,27 @@ def _set_apj_style():
         "font.family": "serif",
         "font.serif": ["Times New Roman", "Times", "STIXGeneral", "DejaVu Serif"],
         "mathtext.fontset": "stix",
-            "axes.labelsize": 11,
-        "axes.titlesize": 11,
-            "xtick.labelsize": 9,
-            "ytick.labelsize": 9,
-            "legend.fontsize": 8.5,
-            "figure.titlesize": 12,
+        "axes.labelsize": 13,
+        "axes.titlesize": 13,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 10,
+        "figure.titlesize": 14,
         "axes.linewidth": 0.8,
         "xtick.direction": "in",
         "ytick.direction": "in",
         "xtick.top": True,
         "ytick.right": True,
-            # Force readable black text/axes on white background
-            "axes.edgecolor": "black",
-            "axes.labelcolor": "black",
-            "axes.titlecolor": "black",
-            "xtick.color": "black",
-            "ytick.color": "black",
-            "text.color": "black",
-            "legend.edgecolor": "0.2",
-            "legend.facecolor": "white",
-            "legend.fancybox": False,
+        # Force readable black text/axes on white background
+        "axes.edgecolor": "black",
+        "axes.labelcolor": "black",
+        "axes.titlecolor": "black",
+        "xtick.color": "black",
+        "ytick.color": "black",
+        "text.color": "black",
+        "legend.edgecolor": "0.2",
+        "legend.facecolor": "white",
+        "legend.fancybox": False,
     })
 
 
@@ -139,22 +139,23 @@ def plot_mc_vs_distance(ax, binaries, snrs, cmap, norm, annotate_top=5):
         edgecolors="black", linewidths=0.35, zorder=3
     )
 
-    top_idx = np.where(valid)[0][np.argsort(snra[valid])[-annotate_top:]]
-    for i in top_idx:
-        ax.annotate(
-            f"#{i+1}",
-            (mcs[i], dists[i]),
-            xytext=(4, 4),
-            textcoords="offset points",
-            fontsize=7,
-            color="0.15"
-        )
+    if annotate_top > 0:
+        top_idx = np.where(valid)[0][np.argsort(snra[valid])[-annotate_top:]]
+        for i in top_idx:
+            ax.annotate(
+                f"#{i+1}",
+                (mcs[i], dists[i]),
+                xytext=(4, 4),
+                textcoords="offset points",
+                fontsize=9,
+                color="0.15"
+            )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel(r"$\mathcal{M}_c$ [M$_\odot$]", color="black")
     ax.set_ylabel(r"$D_{\rm comov}$ [Mpc]", color="black")
-    ax.tick_params(which="both", labelsize=9, colors='black')
+    ax.tick_params(which="both", labelsize=11, colors='black')
     for spine in ax.spines.values():
         spine.set_color('black')
         spine.set_linewidth(0.8)
@@ -180,22 +181,23 @@ def plot_h0_vs_frequency(ax, binaries, snrs, cmap, norm, annotate_top=5):
         edgecolors="black", linewidths=0.35, zorder=3
     )
 
-    top_idx = np.where(valid)[0][np.argsort(snra[valid])[-annotate_top:]]
-    for i in top_idx:
-        ax.annotate(
-            f"#{i+1}",
-            (h0s[i], freqs[i]),
-            xytext=(4, 4),
-             textcoords="offset points",
-            fontsize=7,
-            color="0.15"
-        )
+    if annotate_top > 0:
+        top_idx = np.where(valid)[0][np.argsort(snra[valid])[-annotate_top:]]
+        for i in top_idx:
+            ax.annotate(
+                f"#{i+1}",
+                (h0s[i], freqs[i]),
+                xytext=(4, 4),
+                textcoords="offset points",
+                fontsize=9,
+                color="0.15"
+            )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(r"$h_0 = 2\frac{(G\mathcal{M})^{5/3}}{c^4D_{\rm{comov}}}(\pi f_{\rm GW}(1 + z))^{2/3}$", color="black")
+    ax.set_xlabel(r"$h_0$", color="black")
     ax.set_ylabel(r"$f_{\rm GW}$ [Hz]", color="black")
-    ax.tick_params(which="both", labelsize=9, colors='black')
+    ax.tick_params(which="both", labelsize=11, colors='black')
     for spine in ax.spines.values():
         spine.set_color('black')
         spine.set_linewidth(0.8)
@@ -260,14 +262,6 @@ def plot_skymap(ax, binaries, snrs, psrs, cmap, norm):
             edgecolors="black", linewidths=0.3,
             zorder=4,
         )
-        if snr >= sorted(snra)[-5]:
-            ax.annotate(
-                f"#{i+1}",
-                (bx, by), xytext=(4, 4),
-                textcoords="offset points",
-                fontsize=7, color="0.15", zorder=6,
-            )
-
     # ---- dummy legend handles ----
     from matplotlib.lines import Line2D
     handles = [
@@ -289,9 +283,9 @@ def plot_cgw_analysis(
     top_snrs,
     psrs,
     save_path=None,
-    figsize=(7.0, 9.6),
+    figsize=(7.2, 11.2),
     style="default",
-    annotate_top=5,
+    annotate_top=0,
 ):
     """
     Generate a single-column, three-panel figure (stacked vertically):
@@ -324,8 +318,8 @@ def plot_cgw_analysis(
         _set_apj_style()
         fig = plt.figure(figsize=figsize, constrained_layout=False)
 
-        gs = gridspec.GridSpec(3, 1, figure=fig, hspace=0.28,
-                       left=0.13, right=0.86, top=0.97, bottom=0.08)
+        gs = gridspec.GridSpec(3, 1, figure=fig, hspace=0.34,
+                   left=0.12, right=0.86, top=0.97, bottom=0.07)
 
         ax_h0_freq   = fig.add_subplot(gs[0, 0])
         ax_mc_dist   = fig.add_subplot(gs[1, 0])
@@ -336,12 +330,12 @@ def plot_cgw_analysis(
         plot_skymap(ax_sky, top_binaries, snra, psrs, cmap, norm)
 
         # shared colourbar on right edge
-        cbar_ax = fig.add_axes([0.88, 0.15, 0.018, 0.74])
+        cbar_ax = fig.add_axes([0.88, 0.16, 0.018, 0.72])
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label("Optimal SNR", fontsize=10)
-        cbar.ax.tick_params(labelsize=9, colors='black')
+        cbar.set_label("Optimal SNR", fontsize=12)
+        cbar.ax.tick_params(labelsize=11, colors='black')
         # Ensure colourbar text/labels are visible on white background
         try:
             cbar.ax.yaxis.label.set_color('black')

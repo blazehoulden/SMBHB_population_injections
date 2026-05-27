@@ -5,10 +5,11 @@ Run with: python main.py
 """
 import os
 import sys
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling, suppress_enterprise_warnings
 from debug.test_CGW_sky_loc import sky_sensitivity_weight, test_sky_CGW_SNR_location
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+from sensitivity_curves import make_pta_sensitivity
 import argparse
 import config
 import numpy as np
@@ -31,7 +32,6 @@ from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binar
 from CGW_SNR import compute_cgw_snr_optimal_population, compute_population_gwb_psd_from_psrs, get_per_pulsar_covariance_from_population
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, save_results_dual, print_population_diagnostics, print_scaling_summary, compact_consistent_results_for_storage
-from io_backends import population_to_zarr
 import subprocess
 # from pulsar_noise_using_enterprise import get_noise_matrix
 from enterprise.signals.gp_bases import createfourierdesignmatrix_red
@@ -218,7 +218,6 @@ def main():
         psrs_clean, raw_noise_params, Tspan_seconds = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
         if toggle_memory_profiling:
             log_memory("After filtering pulsars")
-    
     # psrs_clean, Tspan_seconds = get_clean_pulsars_and_tspan(psrs_filtered)
     # print(f"\n✓ Ready: {len(psrs_clean)} pulsars, Tspan = {Tspan_seconds/(365.25*86400):.1f} years")
     # if toggle_memory_profiling:
@@ -454,8 +453,9 @@ def main():
             psrs=psrs,
             save_path=f"figures/cgw_analysis_{CONFIG_NAME}.pdf",
             style="dark_background",
-            annotate_top=5,
+            annotate_top=0,
         )
+
 
 
 
@@ -481,6 +481,25 @@ def main():
         print("ANALYSIS COMPLETE")
         print(f"Results saved to: {save_dir}")
         print("="*70)
+
+    if config.MAKE_SENSITIVITY_CURVES:
+        print("\n" + "="*70)
+        print("MAKING SENSITIVITY CURVES")
+        print("="*70)
+
+        real_sc, real_dsc, curves = make_pta_sensitivity(
+            psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds,
+            synthetic_configs=[
+                dict(label='2× cadence (best 5)', color='magenta',
+                    mode='best_cadence', cadence_factor=2),
+                dict(label='4× precision (best 5)', color='lime',
+                    mode='best_precision', toaerr_factor=0.25),
+                dict(label='2× cadence (all)', color='gold',
+                    mode='all_cadence', cadence_factor=2),
+                    dict(label='2× cadence, 4× precision (best 5)', color='navy',
+                    mode='best_both', cadence_factor=2, toaerr_factor=0.25),
+            ]
+        )
 
     if config.OPTIMAL_SNR_POPULATION:
         population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)

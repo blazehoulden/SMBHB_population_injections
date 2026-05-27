@@ -1,0 +1,490 @@
+import numpy as np
+import scipy.linalg as sl
+import matplotlib.pyplot as plt
+import glob, pickle, json
+import hasasia.sensitivity as hsen
+import hasasia.sim as hsim
+import hasasia.skymap as hsky
+from enterprise.pulsar import Pulsar as ePulsar
+
+
+def _set_apj_style():
+    """Apply a clean, publication-friendly ApJ-style appearance."""
+    plt.rcParams.update({
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "axes.labelsize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
+        "axes.linewidth": 0.9,
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.top": True,
+        "ytick.right": True,
+        "axes.edgecolor": "black",
+        "axes.labelcolor": "black",
+        "text.color": "black",
+        "xtick.color": "black",
+        "ytick.color": "black",
+        "legend.edgecolor": "0.2",
+        "legend.facecolor": "white",
+        "legend.frameon": True,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def make_corr(psr, raw_noise_params, thin=1):
+    toas    = psr.toas[::thin]
+    toaerrs = psr.toaerrs[::thin]
+    flags   = psr.flags['f'][::thin]
+
+    N = toaerrs.size
+    _, _, fl, _, bi = hsen.quantize_fast(toas, toaerrs, flags=flags, dt=1)
+    backends  = np.unique(flags)
+    sigma_sqr = np.zeros(N)
+    ecorrs    = np.zeros_like(fl, dtype=float)
+
+    for be in backends:
+        mask   = np.where(flags == be)
+        key_ef = '{0}_{1}_efac'.format(psr.name, be)
+        key_eq = '{0}_{1}_log10_t2equad'.format(psr.name, be)
+        key_ec = '{0}_{1}_log10_ecorr'.format(psr.name, be)
+
+        if not all(k in raw_noise_params for k in [key_ef, key_eq, key_ec]):
+            missing = [k for k in [key_ef, key_eq, key_ec] if k not in raw_noise_params]
+            raise KeyError(f"Missing noise params for backend '{be}': {missing}")
+
+        sigma_sqr[mask] = (raw_noise_params[key_ef]**2 * toaerrs[mask]**2
+                           + (10**raw_noise_params[key_eq])**2)
+        mask_ec           = np.where(fl == be)
+        ecorrs[mask_ec]   = 10**raw_noise_params[key_ec]
+
+    j = [ecorrs[ii]**2 * np.ones((len(bucket), len(bucket)))
+         for ii, bucket in enumerate(bi)]
+    J = sl.block_diag(*j)
+    return np.diag(sigma_sqr) + J
+
+
+# ---------------------------------------------------------------------------
+# Real curves
+# ---------------------------------------------------------------------------
+
+def build_real_curves(ePsrs, parsed_noise_params, raw_noise_params, freqs, thin=10):
+    """Build real sensitivity curves from ePulsar objects."""
+    print('--- Building real sensitivity curves ---')
+    real_psrs = []
+    real_specs_per_psr = {}
+
+    for ePsr in ePsrs:
+        corr = make_corr(ePsr, raw_noise_params, thin=thin)
+        plaw = hsen.red_noise_powerlaw(A=9e-16, gamma=13/3., freqs=freqs)
+
+        if (ePsr.name in parsed_noise_params and
+                'red_noise' in parsed_noise_params[ePsr.name]):
+            rn = parsed_noise_params[ePsr.name]['red_noise']
+            plaw += hsen.red_noise_powerlaw(
+                A=10**rn['log10_A'], gamma=rn['gamma'], freqs=freqs)
+
+        corr += hsen.corr_from_psd(freqs=freqs, psd=plaw, toas=ePsr.toas[::thin])
+        psr = hsen.Pulsar(toas=ePsr.toas[::thin],
+                          toaerrs=ePsr.toaerrs[::thin],
+                          phi=ePsr.phi, theta=ePsr.theta,
+                          N=corr, designmatrix=ePsr.Mmat[::thin, :])
+        psr.name = ePsr.name
+        real_psrs.append(psr)
+        print(f'\r  real PSR {ePsr.name} complete', end='', flush=True)
+    print()
+
+    real_specs = []
+    for p in real_psrs:
+        sp = hsen.Spectrum(p, freqs=freqs)
+        _ = sp.NcalInv
+        real_specs_per_psr[p.name] = sp
+        real_specs.append(sp)
+
+    real_sc  = hsen.GWBSensitivityCurve(real_specs)
+    real_dsc = hsen.DeterSensitivityCurve(real_specs)
+    return real_sc, real_dsc, real_specs_per_psr
+
+
+# ---------------------------------------------------------------------------
+# Synthetic curve builder — realistic modifications of the real data
+# ---------------------------------------------------------------------------
+
+def _interleave_toas(toas, toaerrs, Mmat, flags, factor=2):
+    """
+    Increase cadence by inserting `factor-1` new TOAs between every consecutive
+    real pair.  New TOAs inherit the noise properties of their nearest real
+    neighbour and the design-matrix rows are linearly interpolated.
+
+    Parameters
+    ----------
+    factor : int
+        Cadence multiplier.  factor=2 → twice as many observations.
+
+    Returns
+    -------
+    new_toas, new_toaerrs, new_Mmat, new_flags  (sorted by time)
+    """
+    n = len(toas)
+    extra_toas    = []
+    extra_errs    = []
+    extra_Mmat    = []
+    extra_flags   = []
+
+    for i in range(n - 1):
+        dt = toas[i+1] - toas[i]
+        for k in range(1, factor):
+            frac   = k / factor
+            t_new  = toas[i] + frac * dt
+            # inherit noise from nearest neighbour
+            err_new = toaerrs[i] if frac < 0.5 else toaerrs[i+1]
+            flag_new = flags[i] if frac < 0.5 else flags[i+1]
+            # linearly interpolate design matrix row
+            row_new  = (1 - frac) * Mmat[i] + frac * Mmat[i+1]
+            extra_toas.append(t_new)
+            extra_errs.append(err_new)
+            extra_flags.append(flag_new)
+            extra_Mmat.append(row_new)
+
+    if not extra_toas:
+        return toas, toaerrs, Mmat, flags
+
+    all_toas  = np.concatenate([toas,    extra_toas])
+    all_errs  = np.concatenate([toaerrs, extra_errs])
+    all_flags = np.concatenate([flags,   extra_flags])
+    all_Mmat  = np.vstack([Mmat, extra_Mmat])
+
+    idx        = np.argsort(all_toas)
+    return all_toas[idx], all_errs[idx], all_Mmat[idx], all_flags[idx]
+
+
+def _build_one_psr_realistic(
+    ePsr,
+    parsed_noise_params,
+    raw_noise_params,
+    freqs,
+    thin            = 10,
+    toaerr_factor   = 1.0,
+    cadence_factor  = 1,
+):
+    """
+    Build a single hsen.Pulsar that is as close as possible to the real NG15
+    pulsar, with optional modifications:
+
+    toaerr_factor   — multiply all TOA errors by this (0.5 = twice as precise)
+    cadence_factor  — integer; interleave this many extra observations per gap
+                      (2 = twice the cadence)
+
+    Everything else (real timestamps, real design matrix, real noise
+    parameters) is preserved exactly.
+    """
+    name      = ePsr.name
+    toas      = ePsr.toas[::thin].copy()
+    toaerrs   = ePsr.toaerrs[::thin].copy()
+    Mmat      = ePsr.Mmat[::thin, :].copy()
+    flags     = ePsr.flags['f'][::thin].copy()
+
+    # --- apply cadence increase ---
+    if cadence_factor > 1:
+        toas, toaerrs, Mmat, flags = _interleave_toas(
+            toas, toaerrs, Mmat, flags, factor=cadence_factor)
+
+    # --- apply precision increase ---
+    toaerrs = toaerrs * toaerr_factor
+
+    # --- build noise covariance using real noise parameters ---
+    # We replicate make_corr but on our (possibly extended) arrays.
+    N_obs = len(toas)
+    _, _, fl, _, bi = hsen.quantize_fast(toas, toaerrs, flags=flags, dt=1)
+    backends  = np.unique(flags)
+    sigma_sqr = np.zeros(N_obs)
+    ecorrs    = np.zeros_like(fl, dtype=float)
+
+    for be in backends:
+        mask   = np.where(flags == be)
+        key_ef = f'{name}_{be}_efac'
+        key_eq = f'{name}_{be}_log10_t2equad'
+        key_ec = f'{name}_{be}_log10_ecorr'
+
+        if not all(k in raw_noise_params for k in [key_ef, key_eq, key_ec]):
+            missing = [k for k in [key_ef, key_eq, key_ec] if k not in raw_noise_params]
+            raise KeyError(f"[{name}] Missing noise params for backend '{be}': {missing}")
+
+        # EFAC and EQUAD scale with toaerrs — which already include the factor
+        sigma_sqr[mask] = (raw_noise_params[key_ef]**2 * toaerrs[mask]**2
+                           + (10**raw_noise_params[key_eq])**2)
+        mask_ec           = np.where(fl == be)
+        ecorrs[mask_ec]   = 10**raw_noise_params[key_ec]
+
+    j    = [ecorrs[ii]**2 * np.ones((len(bucket), len(bucket)))
+            for ii, bucket in enumerate(bi)]
+    J    = sl.block_diag(*j)
+    corr = np.diag(sigma_sqr) + J
+
+    # --- red noise / GWB prior (real parameters) ---
+    plaw = hsen.red_noise_powerlaw(A=9e-16, gamma=13/3., freqs=freqs)
+    if (name in parsed_noise_params and
+            'red_noise' in parsed_noise_params[name]):
+        rn    = parsed_noise_params[name]['red_noise']
+        plaw += hsen.red_noise_powerlaw(
+            A=10**rn['log10_A'], gamma=rn['gamma'], freqs=freqs)
+
+    corr += hsen.corr_from_psd(freqs=freqs, psd=plaw, toas=toas)
+
+    try:
+        np.linalg.cholesky(corr)
+    except np.linalg.LinAlgError:
+        raise ValueError(f'[{name}] Noise matrix not positive definite after modification')
+
+    psr      = hsen.Pulsar(toas=toas, toaerrs=toaerrs,
+                           phi=ePsr.phi, theta=ePsr.theta,
+                           N=corr, designmatrix=Mmat)
+    psr.name = name
+    return psr
+
+
+def build_realistic_synthetic_curves(
+    ePsrs,
+    parsed_noise_params,
+    raw_noise_params,
+    freqs,
+    thin                = 10,
+    label               = 'Synthetic PTA',
+    # Which pulsars get the "best" treatment (if using per-pulsar upgrades)
+    best_psrs           = ('J0437-4715', 'J1909-3744', 'J1713+0747',
+                           'J0030+0451', 'J1744-1134'),
+    # Modification mode — choose ONE of:
+    #   'best_cadence'    — best_psrs get cadence_factor, others unchanged
+    #   'best_precision'  — best_psrs get toaerr_factor, others unchanged
+    #   'all_cadence'     — every pulsar gets cadence_factor
+    #   'all_precision'   — every pulsar gets toaerr_factor
+    #   'best_both'       — best_psrs get both improvements
+    mode                = 'best_cadence',
+    toaerr_factor       = 0.5,   # 0.5 = twice as precise
+    cadence_factor      = 2,     # 2   = twice as many observations
+):
+    """
+    Build synthetic sensitivity curves that are *identical* to the real NG15
+    curves except for a single, controlled modification.
+
+    The real TOA timestamps, design matrix, and noise parameters are used
+    directly — only the specific modification requested is applied.
+
+    Modes
+    -----
+    best_cadence    Observe `best_psrs` twice as often (cadence_factor × interleaved TOAs)
+    best_precision  Measure `best_psrs` twice as precisely (toaerrs × toaerr_factor)
+    all_cadence     Double cadence for the entire array
+    all_precision   Double precision for the entire array
+    best_both       Double cadence AND precision for `best_psrs`
+    """
+    print(f'--- Building realistic synthetic curves: [{label}] mode={mode} ---')
+
+    psrs = []
+    for ePsr in ePsrs:
+        name        = ePsr.name
+        is_best     = name in best_psrs
+
+        # Determine per-pulsar modification
+        if mode == 'best_cadence':
+            cf = cadence_factor if is_best else 1
+            ef = 1.0
+        elif mode == 'best_precision':
+            cf = 1
+            ef = toaerr_factor if is_best else 1.0
+        elif mode == 'all_cadence':
+            cf = cadence_factor
+            ef = 1.0
+        elif mode == 'all_precision':
+            cf = 1
+            ef = toaerr_factor
+        elif mode == 'best_both':
+            cf = cadence_factor if is_best else 1
+            ef = toaerr_factor  if is_best else 1.0
+        else:
+            raise ValueError(f'Unknown mode: {mode!r}')
+
+        try:
+            psr = _build_one_psr_realistic(
+                ePsr, parsed_noise_params, raw_noise_params, freqs,
+                thin=thin, toaerr_factor=ef, cadence_factor=cf,
+            )
+            tag = ''
+            if cf > 1: tag += f' cadence×{cf}'
+            if ef < 1: tag += f' precision×{1/ef:.0f}'
+            print(f'  [{label}] {name:20s}  n_obs={len(psr.toas):4d}{tag}')
+            psrs.append(psr)
+        except Exception as e:
+            print(f'  WARNING: {name} skipped — {e}')
+
+    if not psrs:
+        raise RuntimeError(f'No pulsars built for "{label}"')
+
+    specs = []
+    for p in psrs:
+        try:
+            sp      = hsen.Spectrum(p, freqs=freqs)
+            NcalInv = sp.NcalInv
+            n_bad   = np.sum(~np.isfinite(NcalInv)) + np.sum(NcalInv <= 0)
+            if n_bad > 0:
+                print(f'  WARNING: {p.name} has {n_bad} bad NcalInv values, skipping')
+                continue
+            specs.append(sp)
+        except Exception as e:
+            print(f'  WARNING: Spectrum failed for {p.name}: {e}')
+
+    if not specs:
+        raise RuntimeError(f'No valid spectra for "{label}"')
+
+    print(f'  {len(specs)} valid spectra for "{label}"')
+    sc  = hsen.GWBSensitivityCurve(specs)
+    dsc = hsen.DeterSensitivityCurve(specs)
+    print(f'  h_c (GWB)   [{np.nanmin(sc.h_c):.2e}, {np.nanmax(sc.h_c):.2e}]')
+    print(f'  h_c (Deter) [{np.nanmin(dsc.h_c):.2e}, {np.nanmax(dsc.h_c):.2e}]')
+    return sc, dsc
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+def plot_sensitivity_comparison(real_sc, real_dsc, synthetic_curves, outdir='figures'):
+    import os; os.makedirs(outdir, exist_ok=True)
+
+    _set_apj_style()
+
+    fig, ax = plt.subplots(figsize=(7.4, 5.6))
+
+    ax.loglog(real_dsc.freqs, real_dsc.h_c, color='black', lw=2.2, label='NG15')
+
+    for label, color, syn_sc, syn_dsc in synthetic_curves:
+        print(f'  plotting {label}: h_c range [{syn_dsc.h_c.min():.2e}, {syn_dsc.h_c.max():.2e}]')
+        ax.loglog(syn_dsc.freqs, syn_dsc.h_c, color=color, lw=1.8, label=label)
+
+    ax.set_xlabel('Frequency [Hz]')
+    ax.set_ylabel(r'Characteristic strain $h_c$')
+    ax.tick_params(which='both', direction='in', top=True, right=True, labelsize=12)
+    ax.grid(which='both', ls='--', lw=0.45, alpha=0.35)
+    ax.legend(frameon=True)
+
+    plt.tight_layout()
+    plt.savefig(f'{outdir}/sensitivity_curves_comparison.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Top-level entry point
+# ---------------------------------------------------------------------------
+
+def make_pta_sensitivity(
+    lPsrs,
+    parsed_noise_params,
+    raw_noise_params,
+    Tspan_seconds,
+    thin              = 10,
+    synthetic_configs = None,
+    outdir            = 'figures',
+):
+    """
+    Build and plot real + synthetic NG15-based PTA sensitivity curves.
+
+    synthetic_configs : list of dicts, each with keys:
+        label           str    — legend label
+        color           str    — matplotlib colour
+        mode            str    — one of: 'best_cadence', 'best_precision',
+                                         'all_cadence', 'all_precision', 'best_both'
+        best_psrs       tuple  — names of "best" pulsars (used by best_* modes)
+        toaerr_factor   float  — TOA error multiplier (default 0.5 = 2× precision)
+        cadence_factor  int    — cadence multiplier  (default 2 = 2× cadence)
+
+    Example configs
+    ---------------
+    [
+        dict(label='2× cadence (best 5)', color='tomato',
+             mode='best_cadence', cadence_factor=2),
+
+        dict(label='2× precision (best 5)', color='seagreen',
+             mode='best_precision', toaerr_factor=0.5),
+
+        dict(label='2× cadence (all)', color='darkorange',
+             mode='all_cadence', cadence_factor=2),
+
+        dict(label='2× precision (all)', color='purple',
+             mode='all_precision', toaerr_factor=0.5),
+
+        dict(label='2× cadence + precision (best 5)', color='gold',
+             mode='best_both', cadence_factor=2, toaerr_factor=0.5),
+    ]
+    """
+    import os; os.makedirs(outdir, exist_ok=True)
+
+    _set_apj_style()
+
+    if synthetic_configs is None:
+        synthetic_configs = [
+            dict(label='2× cadence (best 5 PSRs)',    color='tomato',
+                 mode='best_cadence',   cadence_factor=2),
+            dict(label='2× precision (best 5 PSRs)',  color='seagreen',
+                 mode='best_precision', toaerr_factor=0.5),
+            dict(label='2× cadence (all PSRs)',        color='darkorange',
+                 mode='all_cadence',    cadence_factor=2),
+        ]
+
+    ePsrs = [ePulsar(psr, ephem='DE440', backend='tempo2') for psr in lPsrs]
+    freqs = np.logspace(np.log10(1 / (5 * Tspan_seconds)), np.log10(3e-7), 900)
+
+    # --- real curves ---
+    real_sc, real_dsc, _ = build_real_curves(
+        ePsrs, parsed_noise_params, raw_noise_params, freqs, thin=thin)
+
+    fig, ax = plt.subplots(figsize=(7.4, 5.6))
+    ax.loglog(real_dsc.freqs, real_dsc.h_c, color='black', lw=2.2, label='NG15 deterministic')
+    ax.set_xlabel('Frequency [Hz]')
+    ax.set_ylabel(r'Characteristic strain $h_c$')
+    ax.tick_params(which='both', direction='in', top=True, right=True, labelsize=12)
+    ax.grid(which='both', ls='--', lw=0.45, alpha=0.35)
+    ax.legend(frameon=True)
+    plt.tight_layout()
+    plt.savefig(f'{outdir}/sensitivity_curves_real.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    # --- synthetic curves ---
+    DEFAULT_BEST_PSRS = ('J0437-4715', 'J1909-3744', 'J1713+0747',
+                         'J0030+0451', 'J1744-1134')
+
+    synthetic_curves = []
+    for cfg in synthetic_configs:
+        try:
+            sc, dsc = build_realistic_synthetic_curves(
+                ePsrs               = ePsrs,
+                parsed_noise_params = parsed_noise_params,
+                raw_noise_params    = raw_noise_params,
+                freqs               = freqs,
+                thin                = thin,
+                label               = cfg['label'],
+                best_psrs           = cfg.get('best_psrs',        DEFAULT_BEST_PSRS),
+                mode                = cfg.get('mode',             'best_cadence'),
+                toaerr_factor       = cfg.get('toaerr_factor',    0.5),
+                cadence_factor      = cfg.get('cadence_factor',   2),
+            )
+            synthetic_curves.append((cfg['label'], cfg['color'], sc, dsc))
+            print(f'  OK: "{cfg["label"]}"')
+        except Exception as e:
+            print(f'  ERROR for "{cfg["label"]}": {e}')
+            import traceback; traceback.print_exc()
+
+    if not synthetic_curves:
+        print('WARNING: no synthetic curves built, skipping comparison plot')
+        return real_sc, real_dsc, []
+
+    plot_sensitivity_comparison(real_sc, real_dsc, synthetic_curves, outdir=outdir)
+    return real_sc, real_dsc, synthetic_curves
