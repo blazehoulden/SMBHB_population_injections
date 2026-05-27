@@ -166,12 +166,22 @@ bash submit_pipeline.sh --cgw --output-dir /scratch/$USER/run_cgw
 Results appear in each `pop_{NNNN}_result.json` under the `"cgw"` key.
 
 ### Optimistic settings
+#### new settings
+sbatch submit_main_HPC.sh --config optimistic --simulations 73 --chunk-size 5_000_000 --n-chunks 1 --cgw --s1-time "00:25:00" --s1-mem "12G" --s2-time "02:40:00" --s2-mem "24G"
+
 sbatch submit_main_HPC.sh --config optimistic --simulations 355 --chunk-size 10_000_000 --n-chunks 1 --cgw --s1-time "00:25:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G"
 
 ### Pessimistic settings
+### new settings
+sbatch submit_main_HPC.sh --config pessimistic --simulations 250 --chunk-size 50_000_000 --n-chunks 8  --cgw --s1-time "01:20:00" --s1-mem "30G" --s2-time "02:40:00" --s2-mem "26G"
+
+
 sbatch submit_main_HPC.sh --config pessimistic --simulations 1 --chunk-size 50_000_000 --n-chunks 1  --cgw --s1-time "00:50:00" --s1-mem "28G" --s2-time "02:00:00" --s2-mem "36G"
 
 ### Realistic settings
+#### new settings
+sbatch submit_main_HPC.sh --config realistic --simulations 69 --chunk-size 20_000_000 --n-chunks 1 --cgw --s1-time "00:45:00" --s1-mem "20G" --s2-time "02:40:00" --s2-mem "24G"
+
 sbatch submit_main_HPC.sh --config realistic --simulations 1 --chunk-size 50_000_000 --n-chunks 10 --cgw --s1-time "00:50:00" --s1-mem "28G" --s2-time "02:00:00" --s2-mem "36G"
 
 ### Test settings

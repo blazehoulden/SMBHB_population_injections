@@ -19,23 +19,23 @@ POPULATION_CONFIGS = {
         'description': 'Tiny population for local testing'
     },
     'pessimistic': {
-        'n_binaries': 50_000_000_000,
+        'n_binaries': 400_000_000,
         'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(8.0),
+        'mass_cutoff_0': 10**(8.7),
         'z_max': 1.0,
         'description': 'Lower mass, higher population size'
     },
     'realistic': {
-        'n_binaries': 500_000_000,
+        'n_binaries': 20_000_000,
         'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(8.5),
+        'mass_cutoff_0': 10**(9.0),
         'z_max': 1.0,
         'description': 'Medium mass, medium population size'
     },
     'optimistic': {
-        'n_binaries': 10_000_000,
+        'n_binaries': 5_000_000,
         'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(9),
+        'mass_cutoff_0': 10**(9.3),
         'z_max': 1.0,
         'description': 'Higher mass, lower population size'
     }

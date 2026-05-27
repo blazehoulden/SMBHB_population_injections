@@ -2,7 +2,7 @@ import numpy as np
 from enterprise_extensions.frequentist.Fe_statistic import innerProduct_rr
 from enterprise_extensions.deterministic import cw_delay
 from optimal_SNR_calc import measured_strain_all_binaries_all_pulsars
-from signal_injection import population_residuals
+from signal_injection import population_residuals, get_base_name
 from scipy.linalg import cho_factor, cho_solve
 import time
 def compute_cgw_signal_enterprise(psr, binary):
@@ -186,7 +186,8 @@ def compute_cgw_snr_optimal_population_fast(
             contrib = float(np.real(contrib))
             rho_sq += contrib
             if return_breakdown:
-                per_pulsar[psr_name] = max(contrib, 0.0)
+                base_name = get_base_name(psr_name)
+                per_pulsar[base_name] = per_pulsar.get(base_name, 0.0) + max(contrib, 0.0)
 
         results[i] = np.sqrt(rho_sq)
         if return_breakdown:

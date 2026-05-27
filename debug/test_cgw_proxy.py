@@ -2,9 +2,10 @@
 """
 debug/test_cgw_proxy.py
 
-Self-contained validation of the analytic CGW proxy against true SNRs.
-Run from anywhere:
-    python debug/test_cgw_proxy.py --output-dir /path/to/sim/output --sim-id 0 --n-test 500
+Validation of the analytic CGW proxy against true SNRs.
+Can be called directly from stage2_inject.py via --proxy-only or --validate-proxy,
+or run standalone:
+    python debug/test_cgw_proxy.py --output-dir /path/to/output --sim-id 0 --n-test 500
 """
 
 import sys
@@ -24,32 +25,8 @@ import config
 from data_loader import load_pulsars, filter_pulsars_15yr, parse_pulsar_parameters
 from signal_injection import simulate_psr
 from stage1_setup import ShardedPickleStore, _compute_analytic_proxy
-from CGW_SNR import compute_cgw_snr_optimal_population, compute_cgw_snr_optimal_population_fast
+from CGW_SNR import compute_cgw_snr_optimal_population_fast
 from consistent_pop_synth import compute_population_snr, suppress_enterprise_warnings
-
-
-def _make_pta_and_enterprise_psrs(psrs_clean, raw_noise_params, Tspan_seconds, sim_out_dir):
-    """
-    Simulate noise and build PTA + enterprise pulsars, exactly as stage2 does.
-    """
-    print("\n🔊 Simulating pulsar noise (needed to build PTA)...")
-    for i, psr in enumerate(psrs_clean):
-        print(f"  [{i+1}/{len(psrs_clean)}] {psr.name}...", end=" ", flush=True)
-        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
-        print("done", flush=True)
-    noise_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
-
-    print("\n🔧 Building PTA object...")
-    _, pta, enterprise_psrs = compute_population_snr(
-        psrs_clean=psrs_clean,
-        population=None,
-        raw_noise_params=raw_noise_params,
-        Tspan=Tspan_seconds,
-        current_stoas=noise_stoas,
-        return_psrs_pta=True,
-    )
-    print(f"  ✓ PTA built with {len(enterprise_psrs)} pulsars")
-    return pta, enterprise_psrs, noise_stoas
 
 
 def validate_cgw_proxy(
@@ -134,7 +111,8 @@ def validate_cgw_proxy(
         if hasattr(pop, 'cgw_proxy') and pop.cgw_proxy is not None:
             chunk_proxies = pop.cgw_proxy.astype(np.float64)
         else:
-            chunk_proxies = _compute_analytic_proxy(pop, enterprise_psrs)
+            chunk_proxies = _compute_analytic_proxy(pop, enterprise_psrs,
+                                                    Tspan_seconds=Tspan_seconds)
 
         for sample_pos, local_idx in entries:
             test_binaries[sample_pos]  = pop[local_idx]
@@ -162,7 +140,7 @@ def validate_cgw_proxy(
     print(f"  True SNR computation took {time.time() - t0:.1f}s")
 
     # ── Rank correlation ──────────────────────────────────────────────────────
-    rho, pval  = spearmanr(proxy_scores, true_snrs)
+    rho, pval   = spearmanr(proxy_scores, true_snrs)
     proxy_ranks = n_test - np.argsort(np.argsort(proxy_scores))   # rank 1 = best
     true_ranks  = n_test - np.argsort(np.argsort(true_snrs))
 
@@ -199,7 +177,7 @@ def validate_cgw_proxy(
                   f"{test_f[i]:10.2e}  {test_h0[i]:10.2e}  "
                   f"{test_chunk[i]:5d}  {test_local_idx[i]:9d}")
 
-    # ── Proxy overestimates: high proxy rank, low true SNR ───────────────────
+    # ── Proxy overestimates: high proxy rank, low true SNR ────────────────────
     top10_proxy   = proxy_ranks <= max(1, n_test // 10)
     bottom50_true = true_ranks  >  n_test // 2
     over_mask     = top10_proxy & bottom50_true
@@ -217,6 +195,32 @@ def validate_cgw_proxy(
                   f"{test_f[i]:10.2e}  {test_h0[i]:10.2e}  "
                   f"{test_chunk[i]:5d}  {test_local_idx[i]:9d}")
 
+    # ── Frequency analysis of top-50 misses ───────────────────────────────────
+    k = 50
+    if n_test >= k:
+        true_top_k  = set(np.argsort(true_snrs)[-k:])
+        proxy_top_k = set(np.argsort(proxy_scores)[-k:])
+        missed_idx  = np.array(list(true_top_k - proxy_top_k))
+        caught_idx  = np.array(list(true_top_k & proxy_top_k))
+
+        if len(missed_idx) > 0:
+            print(f"\n  Frequency analysis of top-{k} misses:")
+            print(f"  {'':>6}  {'true_snr':>10}  {'proxy':>12}  {'f_Hz':>10}  "
+                  f"{'h0':>10}  {'proxy_rank':>11}")
+            for i in missed_idx[np.argsort(true_snrs[missed_idx])[::-1]]:
+                print(f"  {'MISS':>6}  {true_snrs[i]:10.4f}  {proxy_scores[i]:12.4e}  "
+                      f"{test_f[i]:10.2e}  {test_h0[i]:10.2e}  {proxy_ranks[i]:11d}")
+            for i in caught_idx[np.argsort(true_snrs[caught_idx])[::-1]][:5]:
+                print(f"  {'CAUGHT':>6}  {true_snrs[i]:10.4f}  {proxy_scores[i]:12.4e}  "
+                      f"{test_f[i]:10.2e}  {test_h0[i]:10.2e}  {proxy_ranks[i]:11d}")
+
+            if len(missed_idx) > 0:
+                print(f"\n  Missed  — f: median={np.median(test_f[missed_idx]):.2e}  "
+                      f"min={test_f[missed_idx].min():.2e}  max={test_f[missed_idx].max():.2e}")
+            if len(caught_idx) > 0:
+                print(f"  Caught  — f: median={np.median(test_f[caught_idx]):.2e}  "
+                      f"min={test_f[caught_idx].min():.2e}  max={test_f[caught_idx].max():.2e}")
+
     # ── Distribution summaries ────────────────────────────────────────────────
     print(f"\n  True SNR stats across {n_test} sampled binaries:")
     print(f"    min={true_snrs.min():.4f}  max={true_snrs.max():.4f}  "
@@ -228,3 +232,205 @@ def validate_cgw_proxy(
           f"p95={np.percentile(proxy_scores, 95):.4e}")
 
     print(f"\n{'='*60}\n")
+
+
+def validate_proxy_filtering_ratio(
+    store: ShardedPickleStore,
+    chunk_ids: List[int],
+    pta,
+    enterprise_psrs,
+    raw_noise_params,
+    parsed_noise_params,
+    Tspan_seconds: float,
+    n_keep: int = 12_500,
+    seed: int = 42,
+) -> None:
+    """
+    Production-relevant proxy validation: compute proxy for ALL binaries,
+    keep top n_keep, evaluate true SNR on all kept + a sample of rejected.
+
+    Reports whether any rejected binary would have beaten the worst kept
+    binary — the exact failure mode that matters in production.
+    """
+    rng = np.random.default_rng(seed)
+
+    print(f"\n{'='*60}")
+    print(f"CGW Proxy Filtering Ratio Test  (n_keep={n_keep:,})")
+    print(f"{'='*60}")
+
+    # ── Precompute noise matrices ─────────────────────────────────────────────
+    print("  Precomputing PTA noise matrices...")
+    phiinvs = pta.get_phiinv(raw_noise_params, logdet=False)
+    TNTs    = pta.get_TNT(raw_noise_params)
+    Ts      = pta.get_basis()
+    Nvecs   = pta.get_ndiag(raw_noise_params)
+    psr_map = {psr.name: psr for psr in enterprise_psrs}
+    Sigmas  = [
+        TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
+        for TNT, phiinv in zip(TNTs, phiinvs)
+    ]
+
+    # ── Get all proxies for first chunk ──────────────────────────────────────
+    # Use first chunk only — test is per-chunk filtering behaviour
+    chunk_id = chunk_ids[0]
+    pop = store.read(chunk_id)
+    n   = len(pop)
+
+    if hasattr(pop, 'cgw_proxy') and pop.cgw_proxy is not None:
+        proxies = pop.cgw_proxy.astype(np.float64)
+    else:
+        proxies = _compute_analytic_proxy(pop, enterprise_psrs,
+                                          Tspan_seconds=Tspan_seconds)
+
+    # ── Split into kept and rejected ──────────────────────────────────────────
+    n_keep_actual = min(n_keep, n)
+    top_idx       = np.argpartition(proxies, -n_keep_actual)[-n_keep_actual:]
+    reject_mask   = np.ones(n, dtype=bool)
+    reject_mask[top_idx] = False
+    reject_idx    = np.where(reject_mask)[0]
+
+    n_check_rejected = min(n_keep_actual, len(reject_idx))
+    if n_check_rejected == 0:
+        print(f"  Only {n:,} binaries — all kept (n_keep={n_keep_actual}). "
+              f"Test not meaningful; use a larger chunk.")
+        del pop
+        gc.collect()
+        return
+
+    rejected_sample = rng.choice(reject_idx, size=n_check_rejected, replace=False)
+    eval_idx        = np.concatenate([top_idx, rejected_sample])
+    binaries        = [pop[i] for i in eval_idx]
+    del pop
+    gc.collect()
+
+    # ── Evaluate true SNR ─────────────────────────────────────────────────────
+    print(f"\n  Evaluating true SNR on {len(binaries)} binaries "
+          f"({n_keep_actual:,} kept + {n_check_rejected:,} rejected sample)...")
+    t0 = time.time()
+    true_snrs = np.array(compute_cgw_snr_optimal_population_fast(
+        psrs=enterprise_psrs,
+        pta=pta,
+        population=binaries,
+        raw_noise_params=raw_noise_params,
+        parsed_noise_params=parsed_noise_params,
+        Tspan=Tspan_seconds,
+        profile=False,
+    ))
+    print(f"  Took {time.time() - t0:.1f}s")
+
+    kept_snrs     = true_snrs[:n_keep_actual]
+    rejected_snrs = true_snrs[n_keep_actual:]
+
+    print(f"\n  Filtering ratio: keeping {n_keep_actual:,} / {n:,} "
+          f"({100*n_keep_actual/n:.3f}%)")
+    print(f"\n  True SNR — KEPT by proxy (n={n_keep_actual:,}):")
+    print(f"    min={kept_snrs.min():.6f}  median={np.median(kept_snrs):.6f}  "
+          f"max={kept_snrs.max():.6f}  p95={np.percentile(kept_snrs, 95):.6f}")
+    print(f"  True SNR — REJECTED by proxy sample (n={n_check_rejected:,}):")
+    print(f"    min={rejected_snrs.min():.6f}  median={np.median(rejected_snrs):.6f}  "
+          f"max={rejected_snrs.max():.6f}  p95={np.percentile(rejected_snrs, 95):.6f}")
+
+    kept_min     = kept_snrs.min()
+    worst_missed = rejected_snrs.max()
+    n_missed     = (rejected_snrs > kept_min).sum()
+
+    print(f"\n  Worst kept SNR    : {kept_min:.6f}")
+    print(f"  Worst missed SNR  : {worst_missed:.6f}")
+    print(f"  Rejected beats kept threshold: {n_missed} / {n_check_rejected} "
+          f"({100*n_missed/n_check_rejected:.2f}%)")
+
+    if n_keep_actual / n > 0.5:
+        print(f"\n  ⚠️  WARNING: keeping {100*n_keep_actual/n:.1f}% of chunk — "
+              f"filtering ratio too low to be meaningful.")
+        print(f"     Use a chunk of at least {n_keep_actual * 20:,} binaries "
+              f"for a production-representative test.")
+    elif worst_missed > kept_min:
+        print(f"\n  ⚠️  PROXY IS MISSING SOURCES above the kept threshold")
+        print(f"     Recommend increasing N_PRE_FILTER_PER_CHUNK or relying on "
+              f"the regime rescue logic in _compute_cgw_snrs")
+    else:
+        print(f"\n  ✓  No rejected binary exceeds worst kept binary — proxy is safe")
+
+    print(f"\n{'='*60}\n")
+
+
+def main():
+    import json
+
+    p = argparse.ArgumentParser(description="Validate CGW proxy vs true SNR")
+    p.add_argument("--output-dir", required=True,
+                   help="Stage 2 output directory containing sim subdirs")
+    p.add_argument("--sim-id",     type=int, default=0,
+                   help="Which sim to test against (default: 0)")
+    p.add_argument("--n-test",     type=int, default=500,
+                   help="Number of binaries to evaluate (default: 500)")
+    p.add_argument("--seed",       type=int, default=42)
+    p.add_argument("--config", "-c", default="optimistic",
+                   choices=list(config.POPULATION_CONFIGS.keys()))
+    args = p.parse_args()
+
+    sim_out_dir = os.path.join(args.output_dir, f"sim{args.sim_id:03d}")
+
+    config_path = os.path.join(sim_out_dir, "metadata", "config.json")
+    with open(config_path) as fh:
+        run_config = json.load(fh)
+    Tspan_seconds = run_config["Tspan_seconds"]
+    print(f"  Tspan = {Tspan_seconds/3.156e7:.2f} yr")
+
+    print("\n📡 Loading pulsars...")
+    psrs_unfiltered = load_pulsars(verbose=True)
+    with suppress_enterprise_warnings():
+        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
+    print(f"✓ {len(psrs_clean)} pulsars loaded")
+
+    parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
+
+    print("\n🔊 Simulating noise (for PTA structure only)...")
+    for i, psr in enumerate(psrs_clean):
+        print(f"  [{i+1}/{len(psrs_clean)}] {psr.name}...", end=" ", flush=True)
+        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
+        print("done", flush=True)
+    noise_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+
+    print("\n🔧 Building PTA object...")
+    _, pta, enterprise_psrs = compute_population_snr(
+        psrs_clean=psrs_clean,
+        population=None,
+        raw_noise_params=raw_noise_params,
+        Tspan=Tspan_seconds,
+        current_stoas=noise_stoas,
+        return_psrs_pta=True,
+    )
+    print(f"  ✓ PTA built with {len(enterprise_psrs)} pulsars")
+
+    pop_dir   = os.path.join(sim_out_dir, "populations")
+    store     = ShardedPickleStore(pop_dir)
+    chunk_ids = store.available()
+    print(f"\n📦 Found {len(chunk_ids)} chunks in {pop_dir}")
+
+    validate_cgw_proxy(
+        store=store,
+        chunk_ids=chunk_ids,
+        pta=pta,
+        enterprise_psrs=enterprise_psrs,
+        raw_noise_params=raw_noise_params,
+        parsed_noise_params=parsed_noise_params,
+        Tspan_seconds=Tspan_seconds,
+        n_test=args.n_test,
+        seed=args.seed,
+    )
+
+    validate_proxy_filtering_ratio(
+        store=store,
+        chunk_ids=chunk_ids,
+        pta=pta,
+        enterprise_psrs=enterprise_psrs,
+        raw_noise_params=raw_noise_params,
+        parsed_noise_params=parsed_noise_params,
+        Tspan_seconds=Tspan_seconds,
+        n_keep=12_500,
+    )
+
+
+if __name__ == "__main__":
+    main()
