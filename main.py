@@ -488,16 +488,16 @@ def main():
         print("="*70)
 
         real_sc, real_dsc, curves = make_pta_sensitivity(
-            psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds,
+            psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds, thin = 30,
             synthetic_configs=[
-                dict(label='2× cadence (best 5)', color='magenta',
-                    mode='best_cadence', cadence_factor=2),
+                dict(label='5× cadence (best 5)', color='magenta',
+                    mode='best_cadence', cadence_factor=5),
                 dict(label='4× precision (best 5)', color='lime',
                     mode='best_precision', toaerr_factor=0.25),
-                dict(label='2× cadence (all)', color='gold',
-                    mode='all_cadence', cadence_factor=2),
-                    dict(label='2× cadence, 4× precision (best 5)', color='navy',
-                    mode='best_both', cadence_factor=2, toaerr_factor=0.25),
+                # dict(label='2× cadence (all)', color='gold',
+                #     mode='all_cadence', cadence_factor=2),
+                    dict(label='5× cadence, 4× precision (best 5)', color='navy',
+                    mode='best_both', cadence_factor=5, toaerr_factor=0.25),
             ]
         )
 

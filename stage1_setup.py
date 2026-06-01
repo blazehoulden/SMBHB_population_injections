@@ -2,20 +2,24 @@
 """
 Stage 1 — Population synthesis + TOA delta computation.
 
-Called as a Slurm flat array task.
-  task_id  = SLURM_ARRAY_TASK_ID
-  sim_id   = task_id // n_chunks
-  chunk_id = task_id  % n_chunks
+For each simulation chunk:
+  1. Load pulsars for each enabled scenario (one at a time, freed after use).
+  2. Generate one chunk of binaries.
+  3. Compute per-pulsar TOA deltas via NUFFT for every scenario.
+  4. Save deltas:  <output_dir>/sim{sim_id}/stoas/chunk_{chunk_id:04d}[_<scenario>].npz
+  5. Filter and save population shard.
+  6. Write metadata.
 
-What this job does
-──────────────────
-1.  Decode sim_id and chunk_id from the flat task_id.
-2.  Load + filter pulsars.
-3.  Generate one chunk of --chunk-size binaries for sim_id.
-4.  Compute per-pulsar TOA deltas via NUFFT injection.
-5.  Save deltas to   <output_dir>/sim{sim_id:03d}/stoas/sim{chunk_id:04d}/{psr}_delta.npy
-6.  Save population  <output_dir>/sim{sim_id:03d}/populations/subpop_{chunk_id:03d}.pkl.gz
-7.  Write metadata   <output_dir>/sim{sim_id:03d}/metadata/config.json  (chunk_id==0 wins)
+Synthetic PTA scenarios are driven by --synthetic-pta-config, which accepts
+a JSON string of scenario definitions (same format as data_loader.SCENARIOS).
+Pass an empty dict '{}' or omit the flag to run baseline only.
+
+Memory strategy
+───────────────
+Pulsars for each scenario are loaded, used to compute TOA deltas, and
+immediately deleted before the next scenario is processed. Only the baseline
+pulsars are retained (briefly) for the population pre-filter. The large
+population_batch is also deleted after the filter step.
 """
 
 import argparse
@@ -27,7 +31,7 @@ import pickle
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -35,10 +39,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from consistent_pop_synth import suppress_enterprise_warnings
-from data_loader import load_pulsars, filter_pulsars_15yr
+from data_loader import load_pulsars, filter_pulsars_15yr, SCENARIOS as DEFAULT_SCENARIOS
 from signal_injection import change_in_TOAs_days_population_nufft, _antenna_response_vec, _get_psr_radec
 from SMBHB_pop_synth import PopulationArrays
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
+
 
 # =============================================================================
 # ShardedPickleStore
@@ -128,6 +133,10 @@ class ShardedPickleStore:
         return pop
 
 
+# =============================================================================
+# Pulsar geometry helpers
+# =============================================================================
+
 def _get_psr_radec(psr):
     """
     Extract (ra, dec) in radians from either a libstempo or Enterprise pulsar object.
@@ -213,6 +222,10 @@ def _antenna_response_vec(psr_ra, psr_dec, ra_arr, dec_arr, psi_arr):
 
     return Fp, Fx
 
+
+# =============================================================================
+# Analytic proxy SNR
+# =============================================================================
 
 def _compute_analytic_proxy(pop, psrs, Nvecs=None, Tspan_seconds=None):
     """
@@ -333,6 +346,10 @@ def _compute_analytic_proxy(pop, psrs, Nvecs=None, Tspan_seconds=None):
     return np.sqrt(rho_sq) * sky_weights
 
 
+# =============================================================================
+# Population filter
+# =============================================================================
+
 def _filter_population_extremes(
     pop: PopulationArrays,
     psrs,
@@ -412,23 +429,29 @@ def _filter_population_extremes(
 
 
 # =============================================================================
-# Helpers
+# TOA delta I/O
 # =============================================================================
 
-def _save_toa_deltas(delta_stoas, out_dir: str, chunk_id: int) -> None:
-    stoa_dir = os.path.join(out_dir, "stoas")
+def _delta_filename(chunk_id: int, scenario: Optional[str] = None) -> str:
+    suffix = f'_{scenario}' if scenario else ''
+    return f'chunk_{chunk_id:04d}{suffix}.npz'
+
+
+def _save_toa_deltas(
+    delta_stoas,          # list of (psr_name, delta_days) pairs
+    out_dir: str,
+    chunk_id: int,
+    scenario: Optional[str] = None,
+) -> None:
+    stoa_dir = os.path.join(out_dir, 'stoas')
     os.makedirs(stoa_dir, exist_ok=True)
-
-    outpath = os.path.join(stoa_dir, f"chunk_{chunk_id:04d}.npz")
-
+    outpath  = os.path.join(stoa_dir, _delta_filename(chunk_id, scenario))
     save_dict = {
         psr_name: delta.astype(np.float64)
         for psr_name, delta in delta_stoas
     }
-
     np.savez(outpath, **save_dict)
-
-    print(f"  Saved Δstoas for {len(save_dict)} pulsars → {outpath}")
+    print(f'  Saved Δstoas ({len(save_dict)} pulsars) → {outpath}')
 
 
 # =============================================================================
@@ -436,18 +459,36 @@ def _save_toa_deltas(delta_stoas, out_dir: str, chunk_id: int) -> None:
 # =============================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Stage 1: population synthesis")
-    p.add_argument("--config", "-c", default="optimistic",
+    p = argparse.ArgumentParser(description='Stage 1: population synthesis')
+    p.add_argument('--config', '-c', default='optimistic',
                    choices=list(config.POPULATION_CONFIGS.keys()))
-    p.add_argument("--target-snr",  type=float, default=4.0)
-    p.add_argument("--snr-range",   nargs=2, type=float, default=[3.5, 4.25])
-    p.add_argument("--output-dir",  type=str, required=True)
-    p.add_argument("--chunk-size",  type=int, default=1_000_000)
-    p.add_argument("--n-chunks",    type=int, default=10,
-                   help="Number of chunks per simulation (used to decode task_id)")
-    p.add_argument("--task-id",     type=int, default=None,
-                   help="Flat array task ID (overrides $SLURM_ARRAY_TASK_ID)")
-    p.add_argument("--sim-id",      type=int, required=True)
+    p.add_argument('--target-snr',  type=float, default=4.0)
+    p.add_argument('--snr-range',   nargs=2, type=float, default=[3.5, 4.0])
+    p.add_argument('--output-dir',  type=str, required=True)
+    p.add_argument('--chunk-size',  type=int, default=1_000_000)
+    p.add_argument('--n-chunks',    type=int, default=10,
+                   help='Number of chunks per simulation (used to decode task_id)')
+    p.add_argument('--task-id',     type=int, default=None,
+                   help='Flat array task ID (overrides $SLURM_ARRAY_TASK_ID)')
+    p.add_argument('--sim-id',      type=int, required=True)
+    # JSON string defining synthetic PTA scenarios.
+    # Keys are scenario labels; values match data_loader.SCENARIOS format.
+    # Example: '{"5x_cadence": {"cadence_factor": 5, "toaerr_factor": 1.0, "best_only": true}}'
+    # Pass '{}' or omit to run baseline only.
+    p.add_argument(
+        '--synthetic-pta-config',
+        type=str,
+        default=None,
+        help='JSON dict of synthetic PTA scenario definitions. '
+             'If omitted, the three default scenarios are used when '
+             '--synthetic-ptas is set.',
+    )
+    p.add_argument(
+        '--synthetic-ptas',
+        action='store_true',
+        default=False,
+        help='Enable synthetic PTA scenarios alongside baseline.',
+    )
     return p.parse_args()
 
 
@@ -459,42 +500,53 @@ def main():
     args = parse_args()
     t0   = time.time()
 
-    # ── decode task_id → chunk_id ─────────────────────────────────────────────
+    # ── Decode task_id → chunk_id ─────────────────────────────────────────────
     task_id = args.task_id
     if task_id is None:
-        env_val = os.environ.get("SLURM_ARRAY_TASK_ID")
+        env_val = os.environ.get('SLURM_ARRAY_TASK_ID')
         if env_val is None:
-            sys.exit("ERROR: --task-id not set and $SLURM_ARRAY_TASK_ID is not defined.")
+            sys.exit('ERROR: --task-id not set and $SLURM_ARRAY_TASK_ID undefined.')
         task_id = int(env_val)
 
     sim_id   = args.sim_id
     chunk_id = task_id   # task_id is now directly the chunk_id (0..N_CHUNKS-1)
 
     # Per-simulation output directory
-    sim_out_dir = os.path.join(args.output_dir, f"sim{sim_id:03d}")
-    pop_dir     = os.path.join(sim_out_dir, "populations")
-    meta_dir    = os.path.join(sim_out_dir, "metadata")
-
+    sim_out_dir = os.path.join(args.output_dir, f'sim{sim_id:03d}')
+    pop_dir     = os.path.join(sim_out_dir, 'populations')
+    meta_dir    = os.path.join(sim_out_dir, 'metadata')
     os.makedirs(pop_dir,  exist_ok=True)
     os.makedirs(meta_dir, exist_ok=True)
 
-    print(f"\n{'='*60}")
-    print(f"Stage 1 — task_id={task_id}  sim_id={sim_id}  chunk_id={chunk_id}")
-    print(f"  config={args.config}  chunk_size={args.chunk_size:,}")
-    print(f"  output → {sim_out_dir}")
-    print(f"{'='*60}")
+    print(f'\n{"="*60}')
+    print(f'Stage 1 — task_id={task_id}  sim_id={sim_id}  chunk_id={chunk_id}')
+    print(f'  config={args.config}  chunk_size={args.chunk_size:,}')
+    print(f'  output → {sim_out_dir}')
+    print(f'{"="*60}')
 
-    # ── 1. Load + filter pulsars ──────────────────────────────────────────────
-    print("\n📡 Loading pulsars...")
-    psrs_unfiltered = load_pulsars(verbose=True)
+    # ── Resolve scenario configs ──────────────────────────────────────────────
+    # Build ordered list: baseline first, then any synthetic scenarios.
+    if args.synthetic_ptas:
+        if args.synthetic_pta_config:
+            syn_scenarios = json.loads(args.synthetic_pta_config)
+        else:
+            # default: all non-baseline scenarios from data_loader
+            syn_scenarios = {
+                k: v for k, v in DEFAULT_SCENARIOS.items()
+                if k != 'baseline'
+            }
+        print(f'  Synthetic scenarios: {list(syn_scenarios.keys())}')
+    else:
+        syn_scenarios = {}
 
-    print("\n🔍 Filtering pulsars (15-year array)...")
-    with suppress_enterprise_warnings():
-        psrs_clean, _, Tspan_seconds = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
-    print(f"✓ {len(psrs_clean)} pulsars, Tspan = {Tspan_seconds / (365.25 * 86400):.1f} yr")
+    all_scenario_labels: List[str] = ['baseline'] + list(syn_scenarios.keys())
 
-    # ── 2. Generate population chunk ──────────────────────────────────────────
-    print(f"\n🌌 Generating population chunk ({args.chunk_size:,} binaries)...")
+    # Combined scenarios dict for load_pulsars resolution
+    combined_scenarios = dict(DEFAULT_SCENARIOS)
+    combined_scenarios.update(syn_scenarios)
+
+    # ── 1. Generate population chunk (before pulsar loops to keep it in scope)
+    print(f'\n🌌 Generating {args.chunk_size:,} binaries...')
     selected_config  = config.POPULATION_CONFIGS[args.config]
     smbhb_module     = config.load_smbhb_module()
     population_batch = config.generate_population(
@@ -502,55 +554,115 @@ def main():
         smbhb_module=smbhb_module,
         n_binaries=args.chunk_size,
     )
-    print(f"✓ Generated {len(population_batch):,} binaries")
+    print(f'✓ Generated {len(population_batch):,} binaries')
 
-    # ── 3. Compute TOA deltas ─────────────────────────────────────────────────
-    print("\n⚡ Computing TOA changes via NUFFT injection...")
-    delta_stoas = change_in_TOAs_days_population_nufft(
-        psrs_clean, population_batch, verbose=True
-    )
-    print(f"✓ Computed Δstoas for {len(delta_stoas)} pulsars")
+    # ── 2. Process scenarios one at a time ────────────────────────────────────
+    # Memory strategy: load a scenario's pulsars, compute + save TOA deltas,
+    # then delete the pulsar objects before loading the next scenario.
+    # Only the baseline pulsars and Tspan are kept past their own iteration
+    # (held briefly for the population filter step after the loop).
 
-    # ── 4. Save TOA deltas ────────────────────────────────────────────────────
-    _save_toa_deltas(delta_stoas, sim_out_dir, chunk_id)
+    print('\n📡 Processing scenarios (one at a time for memory efficiency)...')
+    t_load_total  = 0.0
+    t_nufft_total = 0.0
 
-    # ── 5. Filter population and save shard ───────────────────────────────────
-    print(f"\n💾 Filtering to extreme binaries...")
+    psrs_baseline  = None
+    Tspan_seconds  = None   # set from baseline; used for population filter
+
+    for scenario_label in all_scenario_labels:
+        t_scen = time.time()
+        is_baseline = (scenario_label == 'baseline')
+        print(f'\n  ── Scenario: {scenario_label} {"(baseline)" if is_baseline else ""} ──')
+
+        # Load pulsars
+        t_l0 = time.time()
+        print(f'  📡 Loading pulsars...')
+        psrs_unfiltered = load_pulsars(
+            verbose=True,
+            scenario=scenario_label,
+            scenarios=combined_scenarios,
+        )
+        with suppress_enterprise_warnings():
+            psrs_clean, _, T_span = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
+        del psrs_unfiltered
+        gc.collect()
+        t_load_total += time.time() - t_l0
+        print(f'  ✓ {len(psrs_clean)} pulsars, Tspan={T_span / (365.25*86400):.1f} yr')
+
+        # Retain baseline info for population filter
+        if is_baseline:
+            psrs_baseline = psrs_clean
+            Tspan_seconds = T_span
+
+        # Compute TOA deltas
+        t_n0 = time.time()
+        print(f'  ⚡ Computing TOA Δs via NUFFT...')
+        delta_stoas = change_in_TOAs_days_population_nufft(
+            psrs_clean, population_batch, verbose=True)
+        t_nufft_total += time.time() - t_n0
+        print(f'  ✓ Computed Δstoas for {len(delta_stoas)} pulsars')
+
+        # Save TOA deltas (baseline has no suffix)
+        _save_toa_deltas(
+            delta_stoas, sim_out_dir, chunk_id,
+            scenario=None if is_baseline else scenario_label,
+        )
+
+        # Free memory immediately
+        del delta_stoas
+        if not is_baseline:
+            # Non-baseline pulsars are no longer needed after this point
+            del psrs_clean
+        gc.collect()
+
+        elapsed_scen = time.time() - t_scen
+        print(f'  ✓ Scenario {scenario_label} done in {elapsed_scen/60:.1f} min')
+
+    # ── 3. Filter and save population shard ──────────────────────────────────
+    print(f'\n💾 Filtering to extreme binaries '
+          f'(using baseline pulsars, Tspan={Tspan_seconds/(365.25*86400):.1f} yr)...')
     population_batch, proxy_scores = _filter_population_extremes(
         population_batch,
         n_keep=100,
-        psrs=psrs_clean,
+        psrs=psrs_baseline,
         Tspan_seconds=Tspan_seconds,
     )
 
-    print(f"\n💾 Saving population shard → subpop_{chunk_id:03d}.pkl.gz ...")
+    # Baseline pulsars no longer needed
+    del psrs_baseline
+    gc.collect()
+
+    print(f'\n💾 Saving shard subpop_{chunk_id:03d}.pkl.gz ...')
     store = ShardedPickleStore(pop_dir)
     store.write(chunk_id, population_batch)
     store.update(chunk_id, cgw_proxy=proxy_scores)
-    print(f"✓ Shard written")
+    print('✓ Shard written')
 
-    del population_batch, delta_stoas
+    del population_batch, proxy_scores
     gc.collect()
 
-    # ── 6. Write metadata (chunk_id 0 wins; content is idempotent) ────────────
-    config_path = os.path.join(meta_dir, "config.json")
+    # ── 4. Write metadata (chunk 0 wins; content is idempotent) ──────────────
+    config_path = os.path.join(meta_dir, 'config.json')
     if chunk_id == 0 or not os.path.exists(config_path):
         config_json = {
-            "config":         args.config,
-            "target_snr":     args.target_snr,
-            "snr_range":      args.snr_range,
-            "n_chunks":       args.n_chunks,
-            "chunk_size":     args.chunk_size,
-            "Tspan_seconds":  Tspan_seconds,
+            'config':               args.config,
+            'target_snr':           args.target_snr,
+            'snr_range':            args.snr_range,
+            'n_chunks':             args.n_chunks,
+            'chunk_size':           args.chunk_size,
+            'Tspan_seconds':        Tspan_seconds,
+            'synthetic_scenarios':  list(syn_scenarios.keys()),
         }
-        with open(config_path, "w") as fh:
+        with open(config_path, 'w') as fh:
             json.dump(config_json, fh, indent=2)
-        print(f"✓ Wrote metadata/config.json")
+        print('✓ Wrote metadata/config.json')
 
     elapsed = time.time() - t0
-    print(f"\n✅ Stage 1 task_id={task_id} (sim={sim_id}, chunk={chunk_id}) "
-          f"complete in {elapsed / 60:.1f} min")
+    print(f'\n  Pulsar loading total:  {t_load_total/60:.1f} min')
+    print(f'  NUFFT injection total: {t_nufft_total/60:.1f} min')
+    print(f'\n✅ Stage 1 chunk={chunk_id} (sim={sim_id}) '
+          f'complete in {elapsed/60:.1f} min')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

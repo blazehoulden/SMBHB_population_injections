@@ -170,195 +170,6 @@ def _topk_indices_from_amplitudes(A_arr, B_arr, k, chunk_size=500_000):
     return top_idx[order].astype(np.int64, copy=False), top_val[order].astype(np.float64, copy=False)
 
 
-# def inject_population_nufft(psrs, population, pure_signal=True,
-#                              verbose=False, eps=1e-6,
-#                              precompute_if_missing=False,
-#                              precompute_parallel=False,
-#                              precompute_workers=None,
-#                              cache_precomputed_amplitudes=True,
-#                              track_contributors=False,
-#                              top_k_per_pulsar=20,
-#                              top_k_global=50,
-#                              contributor_chunk_size=500_000,
-#                              contributor_summary=None):
-#     """
-#     Inject SMBHB population via NUFFT type-3 (no frequency quantisation error).
-
-#     Uses finufft.nufft1d3:
-#         f(x_j) = sum_k c_k * exp(i * s_k * x_j)
-
-#     where:
-#         x_j = t_j - t[0]          (TOA times, non-uniform, in seconds)
-#         s_k = 2π f_k              (source frequencies, non-uniform, in rad/s)
-#         c_k = (C_k - i S_k) / 2  (complex amplitude, see derivation below)
-
-#     Derivation
-#     ----------
-#     r(t) = sum_k A_k sin(2π f_k t_rel + φ0_k) + B_k cos(2π f_k t_rel + φ0_k)
-
-#     Expanding with phi0:
-#         S_k = A_k cos(φ0) - B_k sin(φ0)   [coeff of sin(2π f_k t_rel)]
-#         C_k = A_k sin(φ0) + B_k cos(φ0)   [coeff of cos(2π f_k t_rel)]
-
-#     Writing in complex form using e^{isx} = cos(sx) + i sin(sx):
-#         r = Re[ sum_k (C_k - i S_k) * e^{i 2π f_k t_rel} ]
-
-#     For real output we also need the conjugate (negative frequency) term:
-#         r = Re[ sum_k (C_k - i S_k) * e^{+i 2π f_k t_rel}
-#                     + (C_k + i S_k) * e^{-i 2π f_k t_rel} ] / 2
-
-#     Using nufft1d3 with only positive frequencies and dividing by 2:
-#         c_k = (C_k - i S_k) / 2
-#         r = 2 * Re[ nufft1d3(x, s, c) ]
-
-#         No grid, no quantisation — exact to NUFFT tolerance (eps).
-
-#                 Optional amplitude precompute controls:
-#             - precompute_if_missing: compute missing amp_A/B entries before injection.
-#             - precompute_parallel: precompute missing pulsars concurrently with threads.
-#             - precompute_workers: thread count (default = min(missing, cpu_count)).
-#                         - cache_precomputed_amplitudes: if False, amp_A/B generated during
-#                             this call are removed after each pulsar to reduce peak memory.
-#                         - track_contributors: track per-pulsar and global top contributors
-#                             by amplitude proxy A^2 + B^2.
-#                         - top_k_per_pulsar: number of binaries tracked per pulsar.
-#                         - top_k_global: number of globally ranked binaries returned.
-#                         - contributor_chunk_size: chunk size for top-k tracking, controls
-#                             memory use while scanning A/B arrays.
-#                         - contributor_summary: optional dict to populate with tracking output.
-#     """
-#     f_arr    = population.f
-#     phi0_arr = population.phi0
-
-#     # Source frequencies in rad/s — these are the NUFFT "s" points
-#     # No gridding, no rounding — exact frequencies
-#     s_arr = 2 * np.pi * f_arr   # (N,) rad/s
-
-#     if precompute_if_missing:
-#         missing_psrs = [psr for psr in psrs if psr.name not in population.amp_A]
-#         if missing_psrs:
-#             if precompute_parallel and len(missing_psrs) > 1:
-#                 n_workers = precompute_workers or min(len(missing_psrs), os.cpu_count() or 1)
-#                 if verbose:
-#                     print(f"Precomputing amplitudes in parallel for {len(missing_psrs)} pulsars (workers={n_workers})")
-#                 with ThreadPoolExecutor(max_workers=n_workers) as pool:
-#                     futures = [pool.submit(precompute_amplitudes, population, psr) for psr in missing_psrs]
-#                     for fut in futures:
-#                         fut.result()
-#             else:
-#                 if verbose:
-#                     print(f"Precomputing amplitudes for {len(missing_psrs)} pulsars")
-#                 for psr in missing_psrs:
-#                     precompute_amplitudes(population, psr)
-
-#     # phi0 rotation: same for all pulsars (source property)
-#     cos_phi0 = np.cos(phi0_arr)
-#     sin_phi0 = np.sin(phi0_arr)
-
-#     per_pulsar_top = {}
-#     contributor_candidates = set()
-
-#     for psr in psrs:
-#         psr_name = psr.name
-#         computed_here = False
-#         if psr_name not in population.amp_A:
-#             precompute_amplitudes(population, psr)
-#             computed_here = True
-
-#         A_arr = population.amp_A[psr_name]
-#         B_arr = population.amp_B[psr_name]
-
-#         if track_contributors:
-#             idx_top, score_top = _topk_indices_from_amplitudes(
-#                 A_arr,
-#                 B_arr,
-#                 k=top_k_per_pulsar,
-#                 chunk_size=contributor_chunk_size,
-#             )
-#             contributor_candidates.update(idx_top.tolist())
-#             per_pulsar_top[psr_name] = {
-#                 'indices': idx_top.tolist(),
-#                 'amp2': score_top.tolist(),
-#             }
-
-#         # phi0 rotation
-#         S = A_arr * cos_phi0 - B_arr * sin_phi0   # sin(2π f t_rel) coeff
-#         C = A_arr * sin_phi0 + B_arr * cos_phi0   # cos(2π f t_rel) coeff
-
-#         # Complex amplitudes: c_k = (C_k - i S_k) / 2
-#         c = (C - 1j * S) / 2   # (N,)
-
-#         # TOA times relative to first TOA — the NUFFT "x" points
-#         t_sec = np.asarray(psr.toas, dtype=np.float64)
-#         x     = t_sec - t_sec[0]   # (N_toa,) seconds
-
-#         # nufft1d3: f(x_j) = sum_k c_k * exp(i * s_k * x_j)
-#         # isign=+1 matches our e^{+i 2π f t} convention
-#         x      = np.ascontiguousarray(x,     dtype=np.float64)
-#         s_nufft = np.ascontiguousarray(s_arr, dtype=np.float64)
-#         c_nufft = np.ascontiguousarray(c,     dtype=np.complex128)
-
-#         f_out = finufft.nufft1d3(s_nufft, c_nufft, x, isign=+1, eps=eps)
-
-#         # Multiply by 2: we only passed positive frequencies,
-#         # negative frequencies contribute equal real part
-#         r_new = 2 * np.real(f_out)
-
-#         if verbose:
-#             print(f"  {psr_name}: RMS = {r_new.std()*1e9:.3f} ns")
-
-#         if pure_signal:
-#             psr._residuals = r_new
-#         else:
-#             psr._residuals = psr.residuals + r_new
-
-#         if computed_here and not cache_precomputed_amplitudes:
-#             population.amp_A.pop(psr_name, None)
-#             population.amp_B.pop(psr_name, None)
-
-#     if track_contributors:
-#         global_top = {'indices': [], 'score': []}
-#         if contributor_candidates:
-#             candidate_idx = np.asarray(sorted(contributor_candidates), dtype=np.int64)
-#             global_score = np.zeros(candidate_idx.size, dtype=np.float64)
-
-#             for psr in psrs:
-#                 psr_name = psr.name
-#                 A_c = population.amp_A[psr_name][candidate_idx]
-#                 B_c = population.amp_B[psr_name][candidate_idx]
-#                 global_score += A_c * A_c + B_c * B_c
-
-#             k_glob = min(max(int(top_k_global), 0), candidate_idx.size)
-#             if k_glob > 0:
-#                 keep = np.argpartition(global_score, global_score.size - k_glob)[-k_glob:]
-#                 order = np.argsort(global_score[keep])[::-1]
-#                 keep_ord = keep[order]
-#                 global_top = {
-#                     'indices': candidate_idx[keep_ord].tolist(),
-#                     'score': global_score[keep_ord].tolist(),
-#                 }
-
-#         summary = {
-#             'score_definition': 'A^2 + B^2 per pulsar; global score is sum over pulsars',
-#             'n_binaries_total': int(len(population.f)),
-#             'n_candidates_global': int(len(contributor_candidates)),
-#             'per_pulsar_top_k': int(top_k_per_pulsar),
-#             'global_top_k': int(top_k_global),
-#             'per_pulsar': per_pulsar_top,
-#             'global': global_top,
-#         }
-
-#         if contributor_summary is not None:
-#             contributor_summary.clear()
-#             contributor_summary.update(summary)
-#         else:
-#             try:
-#                 population.contributor_summary = summary
-#             except Exception:
-#                 pass
-
-#     return psrs
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 6.  DIRECT BATCHED PATH  (small populations, exact, no FFT)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1452,3 +1263,181 @@ def change_in_TOAs_days_population_nufft(psrs, population,
             population.amp_B.pop(psr_name, None)
 
     return pulsar_time_changes_arr
+
+### Modifying pulsarss to have higher cadence and lower errors to make synthetic pulsar data
+
+# ---------------------------------------------------------------------------
+# Step 1: augment a libstempo pulsar's TOAs before noise simulation
+# ---------------------------------------------------------------------------
+
+def augment_psr_cadence(psr, cadence_factor=2, toaerr_factor=1.0):
+    """
+    Insert interleaved TOAs into a libstempo pulsar object to simulate
+    increased cadence, and/or scale toaerrs to simulate increased precision.
+
+    This must be called BEFORE simulate_psr / any noise injection,
+    because the noise functions act on psr.stoas / psr.toaerrs in place.
+
+    Parameters
+    ----------
+    psr : libstempo.tempopulsar
+    cadence_factor : int
+        Number of times denser to make the TOA grid (2 = twice as many obs).
+        New TOAs are linearly interpolated between existing ones.
+        The flag ('f') of each new TOA is copied from its left neighbour,
+        so EFAC/EQUAD/ECORR assignments remain backend-consistent.
+    toaerr_factor : float
+        Multiply all TOA errors by this factor.
+        0.5 = twice as precise (e.g. 2× integration time or better backend).
+
+    Returns
+    -------
+    psr  (modified in place, also returned for chaining)
+    """
+    if cadence_factor > 1:
+        toas   = psr.stoas.copy()          # MJD
+        errs   = psr.toaerrs.copy()        # microseconds
+        flags  = psr.flagvals('f').copy()  # backend strings
+
+        extra_toas  = []
+        extra_errs  = []
+        extra_flags = []
+
+        for i in range(len(toas) - 1):
+            dt = toas[i+1] - toas[i]
+            for k in range(1, cadence_factor):
+                frac = k / cadence_factor
+                extra_toas.append(toas[i] + frac * dt)
+                # inherit error from nearest neighbour
+                extra_errs.append(errs[i] if frac < 0.5 else errs[i+1])
+                extra_flags.append(flags[i] if frac < 0.5 else flags[i+1])
+
+        if extra_toas:
+            all_toas  = np.concatenate([toas,  extra_toas])
+            all_errs  = np.concatenate([errs,  extra_errs])
+            all_flags = np.concatenate([flags, extra_flags])
+            idx       = np.argsort(all_toas)
+            all_toas  = all_toas[idx]
+            all_errs  = all_errs[idx]
+            all_flags = all_flags[idx]
+
+            # Write back into the libstempo object
+            # stoas is a writable array; we need to resize it by rebuilding
+            # the underlying .tim file and reloading — OR use the array API
+            # directly if your libstempo version supports it.
+            # The cleanest approach is to write a new .tim and reload:
+            _rewrite_tim_and_reload(psr, all_toas, all_errs, all_flags)
+
+    if toaerr_factor != 1.0:
+        psr.toaerrs[:] *= toaerr_factor
+
+    return psr
+
+
+def _rewrite_tim_and_reload(psr, new_stoas_mjd, new_errs_us, new_flags, tmpdir='/tmp'):
+    """
+    Write a new .tim file with augmented TOAs and reload into the same
+    libstempo object in place.
+
+    libstempo doesn't expose a direct 'resize stoas' API, so the cleanest
+    path is to write a minimal tempo2-format .tim and call psr.readtim().
+
+    new_stoas_mjd : array of MJD (float64, barycentric)
+    new_errs_us   : array of TOA errors in microseconds
+    new_flags     : array of backend flag strings (for -f flag)
+    """
+    import os, tempfile
+
+    tim_path = os.path.join(tmpdir, f'{psr.name}_augmented.tim')
+
+    with open(tim_path, 'w') as f:
+        f.write('FORMAT 1\n')
+        for toa, err, flag in zip(new_stoas_mjd, new_errs_us, new_flags):
+            # FORMAT 1: name freq toa err telescope [-flags]
+            # Use the original frequency from the first TOA as a placeholder;
+            # frequency doesn't affect SNR calculations here
+            freq = 1400.0   # MHz — placeholder, fine for noise simulations
+            f.write(f'{psr.name}  {freq:.4f}  {toa:.15f}  {err:.4f}  @  -f {flag}\n')
+
+    psr.readtim(tim_path)
+    # re-zero residuals after reload since the timing model still applies
+    make_ideal_nofit(psr)
+
+
+def simulate_psr_modified(
+    psr,
+    noise_dict,
+    add_WN        = True,
+    add_RN        = True,
+    cadence_factor  = 1,
+    toaerr_factor   = 1.0,
+    plot          = False,
+):
+    """
+    Like simulate_psr, but optionally augments the TOA grid and/or
+    scales timing errors before injecting noise.
+
+    The cadence/precision modifications happen BEFORE noise injection
+    so that the noise is self-consistent with the new TOA set.
+    """
+    psrname  = psr.name
+    basename = get_base_name(psrname)
+
+    print(f"  [{psrname}] zeroing residuals...", flush=True)
+    make_ideal_nofit(psr)
+
+    # --- apply observing strategy modifications ---
+    if cadence_factor > 1 or toaerr_factor != 1.0:
+        print(f"  [{psrname}] augmenting: cadence×{cadence_factor}, "
+              f"err×{toaerr_factor:.2f} ({psr.nobs} → ", end='', flush=True)
+        augment_psr_cadence(psr, cadence_factor=cadence_factor,
+                            toaerr_factor=toaerr_factor)
+        print(f"{psr.nobs} TOAs)", flush=True)
+
+    if plot:
+        LP.plotres(psr); plt.show()
+
+    # --- red noise (identical to your simulate_psr) ---
+    if add_RN:
+        psr_keys = {k: v for k, v in noise_dict.items() if k.startswith(basename)}
+        rn_A_key   = f"{basename}_red_noise_log10_A"
+        rn_gam_key = f"{basename}_red_noise_gamma"
+        if rn_A_key in psr_keys and rn_gam_key in psr_keys:
+            log10_A = psr_keys[rn_A_key]
+            gamma   = psr_keys[rn_gam_key]
+            print(f"  [{psrname}] adding red noise...", flush=True)
+            LT.add_rednoise(psr, 10**log10_A, gamma, components=30)
+
+    # --- white noise (identical to your simulate_psr) ---
+    if add_WN:
+        psr_keys = {k: v for k, v in noise_dict.items() if k.startswith(basename)}
+        systems  = set()
+        for k in psr_keys:
+            middle = k.replace(f"{basename}_", "")
+            for suffix in ['_efac', '_log10_ecorr', '_log10_t2equad']:
+                if middle.endswith(suffix):
+                    systems.add(middle.replace(suffix, ""))
+
+        for sys in systems:
+            efac  = psr_keys.get(f"{basename}_{sys}_efac", 1.0)
+            equad = 10**psr_keys.get(f"{basename}_{sys}_log10_t2equad", -100)
+            ecorr = 10**psr_keys.get(f"{basename}_{sys}_log10_ecorr", -100)
+
+            try:
+                flag_vals = psr.flagvals('f')
+                mask = np.array([sys in fv for fv in flag_vals])
+            except:
+                mask = np.ones(psr.nobs, dtype=bool)
+
+            if mask.sum() == 0:
+                continue
+            print(f"  [{psrname}] white noise for {sys} ({mask.sum()} TOAs)...", flush=True)
+            LT.add_efac(psr, efac, flagid='f', flags=sys)
+            LT.add_equad(psr, equad, flagid='f', flags=sys)
+            LT.add_jitter(psr, ecorr, flagid='f', flags=sys)
+
+    if plot:
+        LP.plotres(psr); plt.show()
+
+    return psr
+

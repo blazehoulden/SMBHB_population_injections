@@ -1361,5 +1361,3 @@ def generate_snr_consistent_populations(
         print(f"{'='*70}\n")
  
     return results
- 
- 
