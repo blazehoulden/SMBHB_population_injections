@@ -9,6 +9,7 @@ import sys
 from collections import defaultdict
 from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
 import libstempo as T
+from signal_injection import get_base_name
 
 def tim_has_toas(tim_path):
     """Quick check if .tim file contains valid TOA data."""
@@ -29,94 +30,7 @@ def tim_has_toas(tim_path):
         return False
     
 SKIP_PULSARS = {}
-# def load_pulsars(verbose=True):
-#     """Load NANOGrav pulsars as libstempo tempopulsar objects."""
-#     if verbose:
-#         print("="*70)
-#         print("LOADING NANOGRAV PULSARS (libstempo)")
-#         print("="*70)
-
-#     # Try cache
-#     if USE_PULSAR_CACHE and os.path.exists(NANOGRAV_PULSAR_CACHE):
-#         if verbose:
-#             print(f"\n📦 Loading from cache: {NANOGRAV_PULSAR_CACHE}")
-#         try:
-#             with open(NANOGRAV_PULSAR_CACHE, 'rb') as f:
-#                 psrs = pickle.load(f)
-#             if verbose:
-#                 print(f"✓ Loaded {len(psrs)} pulsars from cache\n")
-#             return psrs
-#         except Exception as e:
-#             if verbose:
-#                 print(f"⚠ Cache load failed: {e}")
-
-#     parfiles = sorted([f for f in os.listdir(PAR_DIR) if f.endswith(".par")])
-
-#     if verbose:
-#         print(f"[DEBUG] Found {len(parfiles)} .par files")
-
-#     psrs = []
-#     failed_pulsars = []
-
-#     for par in parfiles:
-#         # Skip known problematic pulsars
-#         psr_name = par.split('_')[0]
-#         if psr_name in SKIP_PULSARS:
-#             if verbose:
-#                 print(f"⚠ Skipping {par} (known hang)")
-#             continue
-
-#         tim = par.replace(".par", ".tim")
-#         par_path = os.path.join(PAR_DIR, par)
-#         tim_path = os.path.join(TIM_DIR, tim)
-
-#         if not os.path.exists(tim_path) or not tim_has_toas(tim_path):
-#             if verbose:
-#                 print(f"⚠ No valid tim for {par}")
-#             failed_pulsars.append(par)
-#             continue
-
-#         try:
-#             psr = T.tempopulsar(
-#                 parfile=par_path,
-#                 timfile=tim_path,
-#                 maxobs=60000,
-#                 dofit=False,   # skip internal fit to avoid hangs
-#             )
-#             if psr.nobs == 0:
-#                 if verbose:
-#                     print(f"⚠ Zero TOAs for {par}")
-#                 failed_pulsars.append(par)
-#                 continue
-
-#             psrs.append(psr)
-#             if verbose:
-#                 print(f"✓ Loaded {psr.name} ({psr.nobs} TOAs)")
-
-#         except Exception as e:
-#             if verbose:
-#                 print(f"✗ Failed {par}: {e}")
-#             failed_pulsars.append(par)
-#             continue
-
-#     # Save cache
-#     if USE_PULSAR_CACHE and len(psrs) > 0:
-#         try:
-#             with open(NANOGRAV_PULSAR_CACHE, 'wb') as f:
-#                 pickle.dump(psrs, f, protocol=pickle.HIGHEST_PROTOCOL)
-#             if verbose:
-#                 print(f"\n💾 Saved cache: {NANOGRAV_PULSAR_CACHE}")
-#         except Exception as e:
-#             if verbose:
-#                 print(f"⚠ Could not save cache: {e}")
-
-#     if verbose:
-#         print(f"\n✓ Loaded {len(psrs)} pulsars")
-#         print(f"✗ Failed: {len(failed_pulsars)} — {failed_pulsars}")
-
-#     return psrs
-
-
+MAX_SYNTH_TOAS = None
 
 def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
     """Filter to 15yr pulsars with sufficient baseline."""
@@ -143,6 +57,12 @@ def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
             total_tmin = tmin
         if total_tmax is None or tmax > total_tmax:
             total_tmax = tmax
+        
+    if total_tmin is None or total_tmax is None:
+        if verbose:
+            print(f"\nFiltered: {len(psrs)} → 0 pulsars")
+        return [], params, 0.0
+    
     Tspan = float(total_tmax - total_tmin) # days
     Tspan_seconds = Tspan * 86400 # seconds
     if verbose:
@@ -353,98 +273,496 @@ def _interleave_toas(toas, errs, flags, freqs, factor):
     idx    = np.argsort(all_t)
     return all_t[idx], all_e[idx], all_fl[idx], all_fr[idx]
  
- 
-def _write_scenario_tim(psr, outpath, cadence_factor=1, toaerr_factor=1.0):
+def _find_par_files(par_dir: str, psr_name: str) -> dict:
     """
-    Write a tempo2 FORMAT 1 .tim file with interleaved TOAs and/or scaled
-    errors.  Observing frequency and backend flag are preserved per-TOA.
+    Return a dict mapping variant suffix -> par_path for a given base pulsar name.
+    e.g. {'': '/path/J1713+0747.par', 'ao': '/path/J1713+0747ao.par', 'gbt': ...}
     """
-    toas  = psr.stoas.copy()      # MJD barycentric
-    errs  = psr.toaerrs.copy()   # microseconds
-    flags = psr.flagvals('f').copy()
-    try:
-        freqs = psr.ssbfreqs().copy()
-    except Exception:
-        freqs = np.full(len(toas), 1400.0)
+    _suffixes = ('ao', 'gbt', 'vla', 'fast')
+    result = {}
+    for fname in sorted(os.listdir(par_dir)):
+        if not fname.endswith('.par'):
+            continue
+        stem = fname.replace('.par', '').split('_')[0]
+        base = stem
+        variant = ''
+        for sfx in _suffixes:
+            if base.endswith(sfx):
+                base = base[:-len(sfx)]
+                variant = sfx
+                break
+        if base == psr_name:
+            result[variant] = os.path.join(par_dir, fname)
+    return result
+
+def _find_tim_files(tim_dir: str, psr_name: str) -> list:
+    """
+    Return all .tim files in tim_dir whose basename starts with psr_name.
+    Handles variants like J1713+0747.tim, J1713+0747ao.tim, J1713+0747gbt.tim.
+    """
+    matches = []
+    for fname in os.listdir(tim_dir):
+        if not fname.endswith('.tim'):
+            continue
+        # strip everything after the first underscore or dot to get the stem pulsar name
+        stem = fname.replace('.tim', '').split('_')[0]
+        if stem == psr_name or get_base_name(stem) == psr_name:
+            matches.append(os.path.join(tim_dir, fname))
+    return sorted(matches)
+
+def _parse_tim_lines(tim_path):
+    """Parse .tim into (header_lines, toa_records)."""
+    header_lines, toa_records = [], []
+
+    with open(tim_path) as fh:
+        for raw in fh:
+            line = raw.rstrip('\n')
+            stripped = line.strip()
+
+            if (not stripped or stripped.startswith('FORMAT')
+                    or stripped.startswith('C ') or stripped.startswith('C\t')
+                    or stripped == 'C'):
+                header_lines.append(line)
+                continue
+
+            parts = stripped.split()
+
+            if len(parts) < 4:
+                header_lines.append(line)
+                continue
+
+            try:
+                toa = float(parts[2])
+                err = float(parts[3])
+
+                toa_decimals = (
+                    len(parts[2].split('.')[1])
+                    if '.' in parts[2] else 0
+                )
+
+                err_decimals = (
+                    len(parts[3].split('.')[1])
+                    if '.' in parts[3] else 0
+                )
+
+            except ValueError:
+                header_lines.append(line)
+                continue
+
+            toa_records.append({
+                'line': line,
+                'toa': toa,
+                'err': err,
+                'toa_col': 2,
+                'err_col': 3,
+                'toa_decimals': toa_decimals,
+                'err_decimals': err_decimals,
+            })
+
+    return header_lines, toa_records
+
+def _rebuild_line(record, new_toa=None, new_err=None):
+    """Swap only TOA/error columns; everything else verbatim."""
+
+    parts = record['line'].split()
+
+    if new_toa is not None:
+        nd = record.get('toa_decimals', 16)
+        parts[record['toa_col']] = f'{new_toa:.{nd}f}'
+
+    if new_err is not None:
+        nd = record.get('err_decimals', 4)
+        parts[record['err_col']] = f'{new_err:.{nd}f}'
+
+    return ' '.join(parts)
  
+def _write_scenario_tim(orig_tim_path,
+                        psr_name,
+                        outpath,
+                        cadence_factor=1,
+                        toaerr_factor=1.0):
+    """
+    Write synthetic .tim while preserving every metadata field exactly.
+    Only TOA and uncertainty columns are modified.
+    """
+
+    header_lines, toa_records = _parse_tim_lines(orig_tim_path)
+
+    if not toa_records:
+        raise ValueError(f'No TOA records found in {orig_tim_path}')
+
+    orig_toas = np.array([r['toa'] for r in toa_records])
+
+    n_orig = len(orig_toas)
+
+    entries = [
+        (orig_toas[i], i, False)
+        for i in range(n_orig)
+    ]
+
     if cadence_factor > 1:
-        toas, errs, flags, freqs = _interleave_toas(
-            toas, errs, flags, freqs, cadence_factor)
+
+        for i in range(n_orig - 1):
+
+            dt = orig_toas[i + 1] - orig_toas[i]
+
+            for k in range(1, cadence_factor):
+
+                frac = k / cadence_factor
+
+                entries.append(
+                    (
+                        orig_toas[i] + frac * dt,
+                        i if frac < 0.5 else i + 1,
+                        True,
+                    )
+                )
+
+        entries.sort(key=lambda x: x[0])
+
+    if MAX_SYNTH_TOAS is not None and len(entries) > MAX_SYNTH_TOAS:
+
+        print(
+            f'  ⚠ [{psr_name}] capping '
+            f'{len(entries)} → {MAX_SYNTH_TOAS} TOAs'
+        )
+
+        idx = np.round(
+            np.linspace(
+                0,
+                len(entries) - 1,
+                MAX_SYNTH_TOAS
+            )
+        ).astype(int)
+
+        entries = [entries[i] for i in idx]
+
+    with open(outpath, 'w') as fout:
+
+        for line in header_lines:
+            fout.write(line + '\n')
+
+        for toa_mjd, rec_idx, is_synth in entries:
+
+            rec = toa_records[rec_idx]
+
+            new_err = rec['err'] * toaerr_factor
+
+            if is_synth:
+
+                fout.write(
+                    _rebuild_line(
+                        rec,
+                        new_toa=toa_mjd,
+                        new_err=new_err,
+                    ) + '\n'
+                )
+
+            elif toaerr_factor != 1.0:
+
+                fout.write(
+                    _rebuild_line(
+                        rec,
+                        new_err=new_err,
+                    ) + '\n'
+                )
+
+            else:
+
+                fout.write(rec['line'] + '\n')
+
+    # sanity check
+    written = _tim_nobs(outpath)
+
+    expected = len(entries)
+
+    if written != expected:
+        raise RuntimeError(
+            f'{psr_name}: wrote {written} TOAs '
+            f'but expected {expected}'
+        )
+
+def _load_tim_template(tim_path):
+    """
+    Parse a real NANOGrav .tim file into:
+    - header lines
+    - structured TOA rows (kept as token lists)
+    """
+
+    header = []
+    rows = []
+
+    with open(tim_path, "r") as f:
+        for line in f:
+            s = line.rstrip("\n")
+
+            if not s or s.startswith(("C", "FORMAT")):
+                header.append(s)
+                continue
+
+            parts = s.split()
+            if len(parts) < 4:
+                continue
+
+            rows.append(parts)
+
+    return header, rows
  
-    errs = errs * toaerr_factor
+def _augmented_nobs(nobs, cadence_factor):
+    """Return the exact TOA count after interleaving cadence_factor-1 TOAs per gap."""
+    if cadence_factor <= 1 or nobs <= 0:
+        return int(nobs)
+    return int(nobs + (nobs - 1) * (cadence_factor - 1))
  
-    with open(outpath, 'w') as f:
-        f.write('FORMAT 1\n')
-        for t, e, fl, fr in zip(toas, errs, flags, freqs):
-            f.write(f'{psr.name}  {fr:.4f}  {t:.15f}  {e:.4f}  @  -f {fl}\n')
+def _tim_nobs(tim_path):
+    """Count non-comment TOA lines in a tempo2 .tim file."""
+    count = 0
+    with open(tim_path, 'r') as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped or stripped.startswith(('FORMAT', 'C', '*')):
+                continue
+            count += 1
+    return count
+
+
+def _scenario_tim_is_valid(
+    scen_tim,
+    orig_tim,
+    cadence_factor,
+    toaerr_factor,
+):
+    if not os.path.exists(scen_tim):
+        return False
+
+    n_scen = _tim_nobs(scen_tim)
+
+    if n_scen == 0:
+        return False
+
+    n_orig = _tim_nobs(orig_tim)
+
+    expected = (
+        n_orig +
+        (n_orig - 1) * (cadence_factor - 1)
+    )
+
+    if MAX_SYNTH_TOAS is not None:
+        expected = min(expected, MAX_SYNTH_TOAS)
+
+    if abs(n_scen - expected) > max(5, int(0.05 * expected)):
+        return False
+
+    return True
  
- 
-# ---------------------------------------------------------------------------
-# Extended loader
-# ---------------------------------------------------------------------------
- 
-def load_pulsars(
-    verbose          = True,
-    scenario         = 'baseline',
-    scenarios        = None,            # pass None to use module-level SCENARIOS
-    scenario_tim_dir = 'scenario_tims',
-    par_dir          = None,            # falls back to module-level PAR_DIR
-    tim_dir          = None,            # falls back to module-level TIM_DIR
-    skip_pulsars     = None,            # falls back to module-level SKIP_PULSARS
-    use_cache        = None,            # falls back to module-level USE_PULSAR_CACHE
-    cache_path       = None,            # falls back to module-level NANOGRAV_PULSAR_CACHE
+def _safe_maxobs(tim_path):
+
+    n = _tim_nobs(tim_path)
+
+    return int(n + max(500, 0.05 * n))
+
+def load_single_pulsar(
+    par: str,
+    verbose: bool = False,
+    scenario: str = 'baseline',
+    scenarios = None,
+    scenario_tim_dir: str = 'scenario_tims',
+    par_dir = None,
+    tim_dir = None,
+    skip_pulsars = None,
 ):
     """
-    Load NANOGrav pulsars as libstempo tempopulsar objects.
- 
-    Drop-in replacement for the original load_pulsars().  When scenario is
-    'baseline' (default) behaviour is identical including the pickle cache.
-    For other scenarios the function transparently writes / reuses augmented
-    .tim files and returns the modified pulsars, skipping the cache.
- 
-    Parameters
-    ----------
-    scenario : str
-        Key into `scenarios`.  Default 'baseline'.
-    scenarios : dict or None
-        Scenario definitions (see module-level SCENARIOS for format).
-        If None, the module-level SCENARIOS dict is used.
-    scenario_tim_dir : str
-        Root directory for augmented .tim files; one sub-dir per scenario.
-    par_dir, tim_dir : str or None
-        Override module-level PAR_DIR / TIM_DIR.
-    skip_pulsars : set or None
-        Override module-level SKIP_PULSARS.
-    use_cache : bool or None
-        Override module-level USE_PULSAR_CACHE.
-    cache_path : str or None
-        Override module-level NANOGRAV_PULSAR_CACHE.
- 
-    Returns
-    -------
-    list of libstempo.tempopulsar
+    Load libstempo pulsars for a given .par file.
+
+    If the par file is a base par (e.g. J1713+0747.par), loads ALL tim
+    variants (J1713+0747, J1713+0747ao, J1713+0747gbt).
+    If the par file is a variant par (e.g. J1713+0747ao.par), loads ONLY
+    the matching tim variant (J1713+0747ao) to avoid duplicates when the
+    caller iterates over all par files.
+
+    Returns a list of tempopulsar objects.
     """
-    # resolve module-level globals as fallbacks
-    _par_dir      = par_dir      or PAR_DIR
-    _tim_dir      = tim_dir      or TIM_DIR
-    _skip         = skip_pulsars if skip_pulsars is not None else SKIP_PULSARS
-    _use_cache    = use_cache    if use_cache    is not None else USE_PULSAR_CACHE
-    _cache_path   = cache_path   or NANOGRAV_PULSAR_CACHE
-    _scenarios    = scenarios    if scenarios    is not None else SCENARIOS
- 
+    _par_dir   = par_dir       or PAR_DIR
+    _tim_dir   = tim_dir       or TIM_DIR
+    _skip      = skip_pulsars  if skip_pulsars is not None else SKIP_PULSARS
+    _scenarios = scenarios     if scenarios    is not None else SCENARIOS
+
     if scenario not in _scenarios:
         raise ValueError(
             f"Unknown scenario '{scenario}'. "
             f"Available: {list(_scenarios.keys())}"
         )
- 
+
+    cfg            = _scenarios[scenario]
+    cadence_factor = cfg.get('cadence_factor', 1)
+    toaerr_factor  = cfg.get('toaerr_factor', 1.0)
+    best_only      = cfg.get('best_only', True)
+    best_psrs      = cfg.get('best_psrs', BEST_PSRS)
+    is_baseline    = (cadence_factor == 1 and toaerr_factor == 1.0)
+
+    BASE_MAXOBS = 60000
+    maxobs = int(BASE_MAXOBS * cadence_factor * 1.2)
+    # Derive base pulsar name AND the variant this par file represents
+    _suffixes = ('ao', 'gbt', 'vla', 'fast')
+    par_stem     = par.replace('.par', '').split('_')[0]
+    psr_name     = par_stem
+    par_variant  = ''                      # variant encoded in the par filename
+    for sfx in _suffixes:
+        if psr_name.endswith(sfx):
+            psr_name    = psr_name[:-len(sfx)]
+            par_variant = sfx
+            break
+
+    if psr_name in _skip:
+        return []
+
+    par_map   = _find_par_files(_par_dir, psr_name)
+    all_tims  = [t for t in _find_tim_files(_tim_dir, psr_name) if tim_has_toas(t)]
+
+    if not par_map or not all_tims:
+        return []
+
+    # If called with a variant par (e.g. J1713+0747ao.par), only load the
+    # matching tim variant so the caller doesn't get duplicates when it
+    # iterates over every par file.
+    # If called with the base par (e.g. J1713+0747.par), load ALL variants
+    # whose tim has no dedicated par file of its own (they rely on the base par).
+    if par_variant:
+        # variant par — only the one matching tim
+        tim_paths = [
+            t for t in all_tims
+            if os.path.basename(t).replace('.tim', '').split('_')[0]
+               == f'{psr_name}{par_variant}'
+        ]
+    else:
+        # base par — only tims whose variant has no dedicated par file
+        tim_paths = [
+            t for t in all_tims
+            if os.path.basename(t).replace('.tim', '').split('_')[0][len(psr_name):]
+               not in par_map or
+               os.path.basename(t).replace('.tim', '').split('_')[0][len(psr_name):]
+               == ''
+        ]
+
+    if not tim_paths:
+        return []
+
+    is_best  = psr_name in best_psrs
+    modified = not is_baseline and ((not best_only) or is_best)
+
+    loaded = []
+    for tim_path in tim_paths:
+        tim_stem  = os.path.basename(tim_path).replace('.tim', '').split('_')[0]
+        variant   = tim_stem[len(psr_name):]
+        load_name = f'{psr_name}{variant}'
+
+        par_path = par_map.get(variant) or par_map.get('')
+        if par_path is None:
+            if verbose:
+                print(f'⚠ No par for variant {load_name}, skipping')
+            continue
+
+        effective_tim = tim_path
+
+        if modified:
+            scen_dir = os.path.join(scenario_tim_dir, scenario)
+            os.makedirs(scen_dir, exist_ok=True)
+            scen_tim = os.path.join(scen_dir, f'{load_name}.tim')
+
+            if (not os.path.exists(scen_tim)
+                    or not _scenario_tim_is_valid(
+                        scen_tim, tim_path, cadence_factor, toaerr_factor)):
+                if verbose:
+                    print(f'  ✎ Writing scenario tim for {load_name}...',
+                          end=' ', flush=True)
+                try:
+                    psr_tmp = T.tempopulsar(
+                        parfile=par_path, timfile=tim_path,
+                        maxobs=maxobs, dofit=False)
+                    _write_scenario_tim(
+                        tim_path, load_name, scen_tim,
+                        cadence_factor=cadence_factor,
+                        toaerr_factor=toaerr_factor)
+                    if verbose:
+                        n_new = _augmented_nobs(psr_tmp.nobs, cadence_factor)
+                        print(f'✓ ({psr_tmp.nobs} → ~{n_new} TOAs)')
+                    del psr_tmp
+                    gc.collect()
+                except Exception as e:
+                    if verbose:
+                        print(f'✗ failed: {e}')
+                    continue
+            else:
+                if verbose:
+                    print(f'  ✓ {load_name:20s} scenario tim exists, reusing')
+
+            effective_tim = scen_tim
+
+        elif not is_baseline and verbose:
+            print(f'  ✓ {load_name:20s} not in best_psrs — original tim')
+
+        try:
+            raw_n  = _tim_nobs(effective_tim)
+            psr = T.tempopulsar(
+                parfile=par_path, timfile=effective_tim,
+                maxobs=maxobs, dofit=False)
+            if psr.nobs > 0:
+                loaded.append(psr)
+                if verbose:
+                    print(f'✓ Loaded {psr.name} ({psr.nobs} TOAs) [tim={tim_stem}]')
+        except Exception as e:
+            if verbose:
+                print(f'✗ Failed {load_name}: {e}')
+
+    return loaded
+
+
+def load_pulsars(
+    verbose          = True,
+    scenario         = 'baseline',
+    scenarios        = None,
+    scenario_tim_dir = 'scenario_tims',
+    par_dir          = None,
+    tim_dir          = None,
+    skip_pulsars     = None,
+    use_cache        = None,
+    cache_path       = None,
+):
+    """
+    Load NANOGrav pulsars as libstempo tempopulsar objects.
+
+    Drop-in replacement for the original load_pulsars(). When scenario is
+    'baseline' (default) behaviour is identical including the pickle cache.
+    For other scenarios the function transparently writes / reuses augmented
+    .tim files and returns the modified pulsars, skipping the cache.
+
+    Returns
+    -------
+    list of libstempo.tempopulsar
+    """
+    _par_dir    = par_dir      or PAR_DIR
+    _tim_dir    = tim_dir      or TIM_DIR
+    _skip       = skip_pulsars if skip_pulsars is not None else SKIP_PULSARS
+    _use_cache  = use_cache    if use_cache    is not None else USE_PULSAR_CACHE
+    _cache_path = cache_path   or NANOGRAV_PULSAR_CACHE
+    _scenarios  = scenarios    if scenarios    is not None else SCENARIOS
+
+    if scenario not in _scenarios:
+        raise ValueError(
+            f"Unknown scenario '{scenario}'. "
+            f"Available: {list(_scenarios.keys())}"
+        )
+
     cfg            = _scenarios[scenario]
     cadence_factor = cfg.get('cadence_factor', 1)
     toaerr_factor  = cfg.get('toaerr_factor',  1.0)
     best_only      = cfg.get('best_only',       True)
     best_psrs      = cfg.get('best_psrs',       BEST_PSRS)
     is_baseline    = (cadence_factor == 1 and toaerr_factor == 1.0)
- 
+
+    BASE_MAXOBS = 60000
+    maxobs = int(BASE_MAXOBS * cadence_factor * 1.2)
+
     if verbose:
         print('=' * 70)
         print(f'LOADING NANOGRAV PULSARS (libstempo)  —  scenario: {scenario}')
@@ -452,7 +770,7 @@ def load_pulsars(
             print(f'  cadence×{cadence_factor}  err×{toaerr_factor}'
                   f'  best_only={best_only}')
         print('=' * 70)
- 
+
     # ------------------------------------------------------------------
     # Baseline path: identical to original, cache included
     # ------------------------------------------------------------------
@@ -469,99 +787,132 @@ def load_pulsars(
             except Exception as e:
                 if verbose:
                     print(f'⚠ Cache load failed: {e}')
- 
+
     # ------------------------------------------------------------------
-    # Non-baseline: write / reuse scenario .tim files, then load
+    # Build sorted list of unique base pulsar names from par directory
     # ------------------------------------------------------------------
-    scen_dir  = os.path.join(scenario_tim_dir, scenario)
-    parfiles  = sorted([f for f in os.listdir(_par_dir) if f.endswith('.par')])
- 
+    _suffixes = ('ao', 'gbt', 'vla', 'fast')
+    parfiles   = sorted([f for f in os.listdir(_par_dir) if f.endswith('.par')])
+
+    seen_set   = set()
+    base_names = []
+    for par in parfiles:
+        stem = par.replace('.par', '').split('_')[0]
+        base = stem
+        for sfx in _suffixes:
+            if base.endswith(sfx):
+                base = base[:-len(sfx)]
+                break
+        if base not in seen_set:
+            seen_set.add(base)
+            base_names.append(base)
+
     if verbose:
-        print(f'Found {len(parfiles)} .par files in {_par_dir}')
- 
+        print(f'Found {len(parfiles)} .par files → {len(base_names)} unique pulsars')
+
+    scen_dir       = os.path.join(scenario_tim_dir, scenario)
     psrs           = []
     failed_pulsars = []
- 
-    for par in parfiles:
-        psr_name = par.split('_')[0]
- 
+
+    # load_pulsars iterates by unique base name, so no deduplication
+    # issue here — _find_tim_files returns all variants and we load them all
+    for psr_name in base_names:
         if psr_name in _skip:
             if verbose:
-                print(f'⚠ Skipping {par} (in SKIP_PULSARS)')
+                print(f'⚠ Skipping {psr_name} (in SKIP_PULSARS)')
             continue
- 
-        tim      = par.replace('.par', '.tim')
-        par_path = os.path.join(_par_dir, par)
-        tim_path = os.path.join(_tim_dir, tim)
- 
-        if not os.path.exists(tim_path) or not tim_has_toas(tim_path):
+
+        par_map   = _find_par_files(_par_dir, psr_name)
+        tim_paths = [t for t in _find_tim_files(_tim_dir, psr_name) if tim_has_toas(t)]
+
+        if not par_map:
             if verbose:
-                print(f'⚠ No valid tim for {par}')
-            failed_pulsars.append(par)
+                print(f'⚠ No par file found for {psr_name}')
+            failed_pulsars.append(psr_name)
             continue
- 
-        # ---- determine which .tim to load --------------------------------
-        if not is_baseline:
-            is_best  = any(b in psr_name for b in best_psrs)
-            modified = (not best_only) or is_best
- 
+        if not tim_paths:
+            if verbose:
+                print(f'⚠ No valid tim for {psr_name}')
+            failed_pulsars.append(psr_name)
+            continue
+
+        is_best  = psr_name in best_psrs
+        modified = not is_baseline and ((not best_only) or is_best)
+
+        for tim_path in tim_paths:
+            tim_stem  = os.path.basename(tim_path).replace('.tim', '').split('_')[0]
+            variant   = tim_stem[len(psr_name):]
+            load_name = f'{psr_name}{variant}'
+
+            par_path = par_map.get(variant) or par_map.get('')
+            if par_path is None:
+                if verbose:
+                    print(f'⚠ No par for variant {load_name}, skipping')
+                failed_pulsars.append(load_name)
+                continue
+
+            effective_tim = tim_path
+
             if modified:
                 os.makedirs(scen_dir, exist_ok=True)
-                scen_tim = os.path.join(scen_dir, f'{psr_name}.tim')
- 
-                if not os.path.exists(scen_tim):
+                scen_tim = os.path.join(scen_dir, f'{load_name}.tim')
+
+                if (not os.path.exists(scen_tim)
+                        or not _scenario_tim_is_valid(
+                            scen_tim, tim_path, cadence_factor, toaerr_factor)):
                     if verbose:
-                        print(f'  ✎ Writing scenario tim for {psr_name}...',
+                        print(f'  ✎ Writing scenario tim for {load_name}...',
                               end=' ', flush=True)
                     try:
+                        raw_n  = _tim_nobs(tim_path)
                         psr_tmp = T.tempopulsar(
                             parfile=par_path, timfile=tim_path,
-                            maxobs=60000, dofit=False)
+                            maxobs=maxobs, dofit=False)
                         _write_scenario_tim(
-                            psr_tmp, scen_tim,
+                            tim_path, load_name, scen_tim,
                             cadence_factor=cadence_factor,
                             toaerr_factor=toaerr_factor)
-                        n_new = len(psr_tmp.stoas) * cadence_factor
+                        n_new = _augmented_nobs(psr_tmp.nobs, cadence_factor)
                         if verbose:
                             print(f'✓ ({psr_tmp.nobs} → ~{n_new} TOAs)')
                         del psr_tmp
                     except Exception as e:
                         if verbose:
                             print(f'✗ failed: {e}')
-                        failed_pulsars.append(par)
+                        failed_pulsars.append(load_name)
                         continue
                 else:
                     if verbose:
-                        print(f'  ✓ {psr_name:20s} scenario tim exists, reusing')
- 
-                tim_path = scen_tim
-            else:
+                        print(f'  ✓ {load_name:20s} scenario tim exists, reusing')
+
+                effective_tim = scen_tim
+
+            elif not is_baseline and verbose:
+                print(f'  ✓ {load_name:20s} not in best_psrs — original tim')
+
+            try:
+                raw_n  = _tim_nobs(effective_tim)
+                psr = T.tempopulsar(
+                    parfile=par_path,
+                    timfile=effective_tim,
+                    maxobs=maxobs,
+                    dofit=False,
+                )
+                if psr.nobs == 0:
+                    if verbose:
+                        print(f'⚠ Zero TOAs for {load_name}')
+                    failed_pulsars.append(load_name)
+                    continue
+
+                psrs.append(psr)
                 if verbose:
-                    print(f'  ✓ {psr_name:20s} not in best_psrs — original tim')
- 
-        # ---- load --------------------------------------------------------
-        try:
-            psr = T.tempopulsar(
-                parfile=par_path,
-                timfile=tim_path,
-                maxobs=60000,
-                dofit=False,
-            )
-            if psr.nobs == 0:
+                    print(f'✓ Loaded {psr.name} ({psr.nobs} TOAs) [tim={tim_stem}]')
+
+            except Exception as e:
                 if verbose:
-                    print(f'⚠ Zero TOAs for {par}')
-                failed_pulsars.append(par)
-                continue
- 
-            psrs.append(psr)
-            if verbose:
-                print(f'✓ Loaded {psr.name} ({psr.nobs} TOAs)')
- 
-        except Exception as e:
-            if verbose:
-                print(f'✗ Failed {par}: {e}')
-            failed_pulsars.append(par)
- 
+                    print(f'✗ Failed {load_name}: {e}')
+                failed_pulsars.append(load_name)
+
     # ------------------------------------------------------------------
     # Cache baseline only
     # ------------------------------------------------------------------
@@ -574,10 +925,10 @@ def load_pulsars(
         except Exception as e:
             if verbose:
                 print(f'⚠ Could not save cache: {e}')
- 
+
     if verbose:
         print(f'\n✓ Loaded {len(psrs)} pulsars '
               f'[scenario={scenario}  cadence×{cadence_factor}  err×{toaerr_factor}]')
         print(f'✗ Failed: {len(failed_pulsars)} — {failed_pulsars}')
- 
+
     return psrs

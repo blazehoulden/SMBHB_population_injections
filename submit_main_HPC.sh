@@ -99,7 +99,7 @@ CHUNK_SIZE="${SMBHB_CHUNK_SIZE:-1000000}"
 CGW_FLAG="${SMBHB_CGW_FLAG:---cgw}"
 SYNTHETIC_PTAS_FLAG=""          # empty = disabled
 SYNTHETIC_PTA_CONFIG=""         # empty = use defaults when --synthetic-ptas set
-NOISE_SEED_BASE=0
+NOISE_SEED_BASE=26072001
 MAX_RETRIES=2
 DRY_RUN=0
 PROXY_ONLY_FLAG=""
@@ -295,6 +295,7 @@ submit_attempt() {
 # =============================================================================
 # SUMMARY
 # =============================================================================
+CHUNK_SIZE_NUM="${CHUNK_SIZE//_/}"
 log "============================================================"
 log "SMBHB Slurm pipeline"
 log "  Repo          : ${REPO_DIR}"
@@ -303,7 +304,7 @@ log "  Config        : ${CONFIG}"
 log "  Target SNR    : ${TARGET_SNR}  range=[${SNR_LOW}, ${SNR_HIGH}]"
 log "  Simulations   : ${N_SIMS}"
 log "  Chunks/sim    : ${N_CHUNKS}  ×  ${CHUNK_SIZE} binaries"
-log "  Total pop/sim : $(( N_CHUNKS * CHUNK_SIZE )) binaries"
+log "  Total pop/sim : $(( N_CHUNKS * CHUNK_SIZE_NUM )) binaries"
 log "  S1 tasks/sim  : ${N_CHUNKS}  (one array per sim)"
 log "  S2 jobs       : ${N_SIMS}  (one per sim, independent)"
 log "  CGW           : $([[ -n "${CGW_FLAG}" ]] && echo on || echo off)"

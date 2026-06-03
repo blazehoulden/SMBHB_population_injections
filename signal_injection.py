@@ -931,39 +931,51 @@ def get_base_name(psrname):
 
 import matplotlib.pyplot as plt
 
-def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=False):
+def _zero_jumps(psr):
+    """
+    Zero all JUMP parameter values after make_ideal_nofit has absorbed
+    their offsets into stoas. Prevents tempo2 C-level JUMP flag-matching
+    from accessing memory beyond the original TOA allocation on augmented tims.
+    """
+    try:
+        pars = psr.pars()
+    except Exception:
+        return
+    for par in pars:
+        if par.startswith('JUMP'):
+            try:
+                psr[par].val = 0.0
+                psr[par].fit = False
+            except Exception:
+                pass
+
+            
+def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=False, seed=None):
     psrname = psr.name
-    basename = get_base_name(psrname)  # use this for noise dict lookups
-    if plot:
-        print(f"  [{psrname}] plotting original residuals...", flush=True)
-        # plot_residuals_raw(psr)
-        LP.plotres(psr)
-        plt.show()
+    basename = get_base_name(psrname)
+
+    # Step 1: zero residuals WITH jumps active (absorbs jump offsets into stoas)
     print(f"  [{psrname}] zeroing residuals...", flush=True)
     make_ideal_nofit(psr)
-    if plot:
-        print(f"  [{psrname}] plotting ideal residuals...", flush=True)
-        # plot_residuals_raw(psr, title="Ideal Residuals")
-        LP.plotres(psr)
-        plt.show()
+
+    # Step 2: NOW zero jump parameters — residuals are already flat,
+    # so zeroing jumps won't reintroduce offsets. This defuses the
+    # heap corruption: subsequent libstempo noise calls won't trigger
+    # tempo2's JUMP flag-matching routines on the augmented TOA arrays.
+    _zero_jumps(psr)
+
+    # Step 3: add red noise, white noise as before
+    psr_keys = {k: v for k, v in noise_dict.items() if k.startswith(basename)}
     
     if add_RN:
-        psr_keys = {k: v for k, v in noise_dict.items() if k.startswith(basename)}
-
         rn_log10_A_key = f"{basename}_red_noise_log10_A"
         rn_gamma_key   = f"{basename}_red_noise_gamma"
-
         if rn_log10_A_key in psr_keys and rn_gamma_key in psr_keys:
             log10_A = psr_keys[rn_log10_A_key]
             gamma   = psr_keys[rn_gamma_key]
             print(f"  [{psrname}] adding red noise...", flush=True)
             LT.add_rednoise(psr, 10**log10_A, gamma, components=30)
-        if plot:
-            print(f"  [{psrname}] plotting red noise added residuals...", flush=True)
-            # plot_residuals_raw(psr, title="Residuals with Red Noise")
-            LP.plotres(psr)
-            plt.show()
-        
+
     if add_WN:
         systems = set()
         for k in psr_keys:
@@ -980,16 +992,15 @@ def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=
             try:
                 flag_vals = psr.flagvals('f')
                 mask = np.array([sys in fv for fv in flag_vals])
-            except:
+            except Exception:
                 mask = np.ones(psr.nobs, dtype=bool)
 
             if mask.sum() == 0:
                 continue
             print(f"  [{psrname}] white noise for {sys} ({mask.sum()} TOAs)...", flush=True)
-            LT.add_efac(psr, efac, flagid='f', flags=sys)
-            LT.add_equad(psr, equad, flagid='f', flags=sys)
-            LT.add_jitter(psr, ecorr, flagid='f', flags=sys)
-    
+            LT.add_efac(psr, efac, flagid='f', flags=sys, seed=seed)
+            LT.add_equad(psr, equad, flagid='f', flags=sys, seed=seed)
+            LT.add_jitter(psr, ecorr, flagid='f', flags=sys, seed=seed)
     if plot:
         print(f"[{psrname}] plotting final residuals with all noise...", flush=True)
         # plot_residuals_raw(psr, title="Final Residuals with All Noise")
@@ -1359,9 +1370,17 @@ def _rewrite_tim_and_reload(psr, new_stoas_mjd, new_errs_us, new_flags, tmpdir='
             freq = 1400.0   # MHz — placeholder, fine for noise simulations
             f.write(f'{psr.name}  {freq:.4f}  {toa:.15f}  {err:.4f}  @  -f {flag}\n')
 
-    psr.readtim(tim_path)
+    maxobs = max(60000, len(new_stoas_mjd) + 1000)
+    new_psr = T.tempopulsar(
+        parfile=psr.parfile,
+        timfile=tim_path,
+        maxobs=maxobs,
+        dofit=False,
+    )
     # re-zero residuals after reload since the timing model still applies
-    make_ideal_nofit(psr)
+    make_ideal_nofit(new_psr)
+    return new_psr
+
 
 
 def simulate_psr_modified(
@@ -1390,8 +1409,8 @@ def simulate_psr_modified(
     if cadence_factor > 1 or toaerr_factor != 1.0:
         print(f"  [{psrname}] augmenting: cadence×{cadence_factor}, "
               f"err×{toaerr_factor:.2f} ({psr.nobs} → ", end='', flush=True)
-        augment_psr_cadence(psr, cadence_factor=cadence_factor,
-                            toaerr_factor=toaerr_factor)
+        psr = augment_psr_cadence(psr, cadence_factor=cadence_factor,
+                                  toaerr_factor=toaerr_factor)
         print(f"{psr.nobs} TOAs)", flush=True)
 
     if plot:
@@ -1441,3 +1460,144 @@ def simulate_psr_modified(
 
     return psr
 
+
+
+import math
+import numpy as np
+
+day  = 86400.0
+year = 3.15581498e7
+
+def make_ideal_nofit(psr):
+    res = psr.residuals(updatebats=True, formresiduals=True)
+    psr.stoas[:] -= res / day
+
+def get_base_name(psrname):
+    for suffix in ['ao', 'gbt', 'vla', 'fast']:
+        if psrname.endswith(suffix):
+            return psrname[:-len(suffix)]
+    return psrname
+
+def _quantize_fast(times, flags=None, dt=1.0):
+    """Exact copy of libstempo's quantize_fast."""
+    isort = np.argsort(times)
+    bucket_ref = [times[isort[0]]]
+    bucket_ind = [[isort[0]]]
+    for i in isort[1:]:
+        if times[i] - bucket_ref[-1] < dt:
+            bucket_ind[-1].append(i)
+        else:
+            bucket_ref.append(times[i])
+            bucket_ind.append([i])
+    avetoas = np.array([np.mean(times[ind]) for ind in bucket_ind], 'd')
+    if flags is not None:
+        aveflags = np.array([flags[ind[0]] for ind in bucket_ind])
+    U = np.zeros((len(times), len(bucket_ind)), 'd')
+    for i, l in enumerate(bucket_ind):
+        U[l, i] = 1
+    if flags is not None:
+        return avetoas, aveflags, U
+    else:
+        return avetoas, U
+
+def _add_efac(psr, efac, flagid, flags, seed=None):
+    """Exact reimplementation of LT.add_efac."""
+    if seed is not None:
+        np.random.seed(seed)
+    efacvec = np.ones(psr.nobs)
+    ind = np.array([flags in fv for fv in psr.flagvals(flagid)])
+    efacvec[ind] = efac
+    psr.stoas[:] += efacvec * psr.toaerrs * (1e-6 / day) * np.random.randn(psr.nobs)
+
+def _add_equad(psr, equad, flagid, flags, seed=None):
+    """Exact reimplementation of LT.add_equad."""
+    if seed is not None:
+        np.random.seed(seed)
+    equadvec = np.zeros(psr.nobs)
+    ind = np.array([flags in fv for fv in psr.flagvals(flagid)])
+    equadvec[ind] = equad
+    psr.stoas[:] += (equadvec / day) * np.random.randn(psr.nobs)
+
+def _add_jitter(psr, ecorr, flagid, flags, coarsegrain=0.1, seed=None):
+    """Exact reimplementation of LT.add_jitter."""
+    if seed is not None:
+        np.random.seed(seed)
+    t = psr.toas()
+    f = np.array(psr.flagvals(flagid))
+    _, aveflags, U = _quantize_fast(t, flags=f, dt=coarsegrain)
+    ecorrvec = np.zeros(U.shape[1])
+    ind = aveflags == flags
+    ecorrvec[ind] = ecorr
+    psr.stoas[:] += (1 / day) * np.dot(U * ecorrvec, np.random.randn(U.shape[1]))
+
+def _add_rednoise(psr, A, gamma, components=10, tspan=None, seed=None):
+    """Exact reimplementation of LT.add_rednoise."""
+    if seed is not None:
+        np.random.seed(seed)
+    t = psr.toas()
+    minx, maxx = np.min(t), np.max(t)
+    if tspan is None:
+        x = (t - minx) / (maxx - minx)
+        T = (day / year) * (maxx - minx)
+    else:
+        x = (t - minx) / tspan
+        T = (day / year) * tspan
+    size = 2 * components
+    F = np.zeros((psr.nobs, size), 'd')
+    f = np.zeros(size, 'd')
+    for i in range(components):
+        F[:, 2*i]   = np.cos(2 * math.pi * (i+1) * x)
+        F[:, 2*i+1] = np.sin(2 * math.pi * (i+1) * x)
+        f[2*i] = f[2*i+1] = (i+1) / T
+    norm  = A**2 * year**2 / (12 * math.pi**2 * T)
+    prior = norm * f**(-gamma)
+    y = np.sqrt(prior) * np.random.randn(size)
+    psr.stoas[:] += (1.0 / day) * np.dot(F, y)
+
+
+def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True,
+                 add_GWB=False, plot=False, seed=None):
+    psrname  = psr.name
+    basename = get_base_name(psrname)
+    psr_keys = {k: v for k, v in noise_dict.items() if k.startswith(basename)}
+
+    print(f"  [{psrname}] zeroing residuals...", flush=True)
+    make_ideal_nofit(psr)
+
+    if add_RN:
+        rn_log10_A_key = f"{basename}_red_noise_log10_A"
+        rn_gamma_key   = f"{basename}_red_noise_gamma"
+        if rn_log10_A_key in psr_keys and rn_gamma_key in psr_keys:
+            log10_A = psr_keys[rn_log10_A_key]
+            gamma   = psr_keys[rn_gamma_key]
+            print(f"  [{psrname}] adding red noise...", flush=True)
+            _add_rednoise(psr, 10**log10_A, gamma, components=30, seed=seed)
+
+    if add_WN:
+        try:
+            flag_vals = np.array(psr.flagvals('f'))
+        except Exception:
+            flag_vals = np.array([''] * psr.nobs)
+
+        systems = set()
+        for k in psr_keys:
+            middle = k.replace(f"{basename}_", "")
+            for suffix in ['_efac', '_log10_ecorr', '_log10_t2equad']:
+                if middle.endswith(suffix):
+                    systems.add(middle.replace(suffix, ""))
+
+        for sys in systems:
+            efac  = psr_keys.get(f"{basename}_{sys}_efac",          1.0)
+            equad = 10**psr_keys.get(f"{basename}_{sys}_log10_t2equad", -100.0)
+            ecorr = 10**psr_keys.get(f"{basename}_{sys}_log10_ecorr",   -100.0)
+
+            mask = np.array([sys in fv for fv in flag_vals])
+            if mask.sum() == 0:
+                continue
+
+            print(f"  [{psrname}] white noise for {sys} ({mask.sum()} TOAs)...", flush=True)
+            _add_efac(  psr, efac,  flagid='f', flags=sys, seed=seed)
+            _add_equad( psr, equad, flagid='f', flags=sys, seed=seed)
+            _add_jitter(psr, ecorr, flagid='f', flags=sys, seed=seed)
+
+    return psr

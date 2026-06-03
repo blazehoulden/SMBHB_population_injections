@@ -17,11 +17,25 @@ only the PTA sensitivity changes between scenarios.
 
 Memory strategy
 ───────────────
-PTAs are built, used, and explicitly deleted one at a time so only one
-Enterprise PTA object lives in memory at any point.  The baseline CGW SNR
-ranking is computed once and reused by all synthetic scenarios (top-N by
-actual baseline SNR) — no repeated proxy scans.  Per-chunk Δstoa files are
-deleted after residuals are saved.
+Each phase (baseline + one per synthetic scenario) runs in its own subprocess
+so that libstempo/tempo2's C-level global state is fully cleared between
+phases.  free()-level heap corruption (the OOM-kill cause) cannot occur
+because each subprocess exits completely before the next starts.
+
+Within each subprocess only one Enterprise PTA is alive at a time.  The
+baseline CGW SNR ranking is computed once and reused by synthetic scenarios
+(top-N by actual baseline inner-product SNR) — no repeated proxy scans.
+Per-chunk Δstoa files are deleted after residuals are saved.
+
+Subprocess handoff
+──────────────────
+The baseline subprocess writes metadata/phase_handoff.json containing:
+  cumulative_scale    float
+  Tspan_seconds       float
+  baseline_candidates list of [chunk_id, local_idx, proxy]
+  baseline_snrs       list of float
+Scenario subprocesses read this file; the parent orchestrator reads only
+cumulative_scale from it for the completion sentinel.
 """
 
 import argparse
@@ -32,6 +46,7 @@ import heapq
 import json
 import os
 import pickle
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -48,13 +63,9 @@ from data_loader import (
     SCENARIOS as DEFAULT_SCENARIOS,
 )
 from signal_injection import simulate_psr
-from SMBHB_pop_synth import PopulationArrays
 from CGW_SNR import compute_cgw_snr_optimal_population_fast
 from debug.test_cgw_proxy import validate_cgw_proxy, validate_proxy_filtering_ratio
 
-# Import helpers that are defined inline in stage1; if stage1_setup exists as
-# a separate module (refactored layout) prefer it, otherwise fall back to the
-# local definitions below.
 try:
     from stage1_setup import (
         ShardedPickleStore,
@@ -71,17 +82,23 @@ except ImportError:
 from enterprise.pulsar import Pulsar as EnterprisePulsar
 from pta_builder import build_pta_and_params
 
-N_PRE_FILTER_PER_CHUNK    = 12_500
-N_GLOBAL_CGW_CANDIDATES   = 12_500   # baseline: proxy pre-filter budget
-N_SCENARIO_CGW_CANDIDATES = 1_000    # synthetic PTAs: top-N by BASELINE cgw_snr
-N_RESCUE                  = 500      # per frequency regime
+# N_PRE_FILTER_PER_CHUNK    = 12_500
+# N_GLOBAL_CGW_CANDIDATES   = 12_500   # baseline: proxy pre-filter budget
+# N_SCENARIO_CGW_CANDIDATES = 1_000    # synthetic PTAs: top-N by BASELINE cgw_snr
+# N_RESCUE                  = 500      # per frequency regime
+# N_TOP_SOURCES             = 50
+# MAX_SCALE_ITER            = 20
+N_PRE_FILTER_PER_CHUNK    = 500
+N_GLOBAL_CGW_CANDIDATES   = 500   # baseline: proxy pre-filter budget
+N_SCENARIO_CGW_CANDIDATES = 500    # synthetic PTAs: top-N by BASELINE cgw_snr
+N_RESCUE                  = 50      # per frequency regime
 N_TOP_SOURCES             = 50
 MAX_SCALE_ITER            = 20
+HANDOFF_FILENAME          = 'phase_handoff.json'
 
 
 # =============================================================================
-# ShardedPickleStore (defined here so the file is self-contained even if
-# stage1_setup is not importable)
+# ShardedPickleStore (self-contained fallback if stage1_setup not importable)
 # =============================================================================
 
 if not _STAGE1_SETUP_IMPORTED:
@@ -205,12 +222,11 @@ def _simulate_noise(
     """
     Simulate white + red noise for a list of pulsars with a fixed numpy seed.
     Returns dict: psr_name -> stoas_after_noise (days).
-    Using the same seed across scenarios ensures that noise realisations are
-    comparable (only the PTA sensitivity differs).
+    Using the same seed across scenarios ensures noise realisations are
+    comparable — only PTA sensitivity differs.
     """
-    np.random.seed(seed)
     for psr in psrs_clean:
-        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True)
+        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True, seed=seed)
     return {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
 
 
@@ -221,8 +237,7 @@ def _simulate_noise(
 def _build_pta(psrs_libstempo, raw_noise_params, Tspan):
     """
     Build an Enterprise PTA from libstempo pulsar objects.
-    Returns (pta, enterprise_psrs).  Caller is responsible for deleting both
-    when done to free memory.
+    Returns (pta, enterprise_psrs).  Caller is responsible for deleting both.
     """
     enterprise_psrs = [
         EnterprisePulsar(psr, ephem='DE440', backend='tempo2')
@@ -256,8 +271,7 @@ def _scale_and_iterate(
 ) -> Tuple[float, object, list]:
     """
     Iteratively scale the combined GW TOA signal until the OS SNR falls in
-    [snr_low, snr_high].  Uses an analytic first step then log-midpoint
-    bisection for subsequent steps.
+    [snr_low, snr_high].  Uses analytic first step then log-midpoint bisection.
 
     Returns (cumulative_scale, pta, enterprise_psrs).
     delta_stoas is updated in-place to contain the final scaled signal.
@@ -299,9 +313,9 @@ def _scale_and_iterate(
               f'→ mid={cum_target:.4f}×  incr={incremental:.4f}')
         return incremental
 
-    cumulative_scale   = 1.0
-    history            = []
-    original_delta     = {n: delta_stoas[n].copy() for n in delta_stoas}
+    cumulative_scale = 1.0
+    history          = []
+    original_delta   = {n: delta_stoas[n].copy() for n in delta_stoas}
 
     for iteration in range(max_iterations):
         scaled_delta = {n: original_delta[n] / cumulative_scale for n in original_delta}
@@ -459,11 +473,11 @@ def _print_top_sources(
     for (chunk_id, _, _), _ in ranked[:n_show]:
         if chunk_id not in by_chunk:
             by_chunk[chunk_id] = store.read(chunk_id)
-    print(f'\n  Top {n_show} [{snr_field}]:')
     proxy_rank_map = {
         (chunk_id, local_idx): rank
         for rank, (chunk_id, local_idx, _) in enumerate(candidates, start=1)
     }
+    print(f'\n  Top {n_show} [{snr_field}]:')
     for rank, ((chunk_id, local_idx, proxy), snr_val) in enumerate(
             ranked[:n_show], start=1):
         pop        = by_chunk[chunk_id]
@@ -491,7 +505,7 @@ def _compute_cgw_snrs_baseline(
     Full two-pass CGW SNR for the baseline PTA.
 
     Pass 1: analytic proxy pre-filter + regime rescue → global_candidates.
-    Pass 2: full Enterprise SNR on all candidates.
+    Pass 2: full Enterprise inner-product SNR on all candidates.
 
     Writes top-5 breakdown records to metadata/top_cgw_breakdowns.json.
     Returns (global_candidates, top_snrs) for reuse by synthetic scenarios.
@@ -516,7 +530,7 @@ def _compute_cgw_snrs_baseline(
     del top_binaries; gc.collect()
 
     _write_snrs_to_shards(store, global_candidates, top_snrs, chunk_ids, 'cgw_snr')
-    _print_top_sources(store, global_candidates, top_snrs, 'cgw_snr')
+    _print_top_sources(store, global_candidates, np.asarray(top_snrs), 'cgw_snr')
 
     # Persist top-5 per-pulsar breakdowns for the summary builder
     ranked = sorted(zip(global_candidates, top_snrs), key=lambda x: x[1], reverse=True)
@@ -564,11 +578,9 @@ def _compute_cgw_snrs_scenario(
     """
     Lightweight CGW SNR pass for a synthetic PTA scenario.
 
-    Instead of repeating the expensive proxy scan, picks the top
-    `n_candidates` binaries ranked by their BASELINE cgw_snr (the actual
-    full inner-product result, not the proxy).  This is the correct set to
-    evaluate: if a source is loud in the baseline PTA it is at least a
-    plausible candidate in an improved PTA.
+    Picks the top `n_candidates` by BASELINE cgw_snr (actual inner-product,
+    not the proxy) — no expensive proxy scan required.  If a source is loud
+    in the baseline PTA it is a plausible candidate for an improved PTA.
     """
     ranked_by_snr = sorted(
         zip(baseline_candidates, baseline_snrs),
@@ -582,7 +594,7 @@ def _compute_cgw_snrs_scenario(
     top_binaries = _assemble_binaries(store, candidates_for_scenario)
 
     print(f'  [{snr_field}] Computing CGW SNR for {len(top_binaries)} candidates...')
-    top_snrs, _ = compute_cgw_snr_optimal_population_fast(
+    top_snrs = compute_cgw_snr_optimal_population_fast(
         psrs=enterprise_psrs,
         pta=pta,
         population=top_binaries,
@@ -631,8 +643,8 @@ def _apply_scaling_to_all_chunks(
 ) -> None:
     print(f'\n  Applying scale 1/{cumulative_scale:.6f} to {len(chunk_ids)} chunks...')
     for chunk_id in chunk_ids:
-        pop         = store.read(chunk_id)
-        new_h0      = pop.h0 / cumulative_scale
+        pop          = store.read(chunk_id)
+        new_h0       = pop.h0 / cumulative_scale
         new_D, new_z = _comov_redshift_from_scaling(
             pop.D_comov, pop.z, 1.0 / cumulative_scale)
         store.update(chunk_id, h0=new_h0, D_comov=new_D, z=new_z)
@@ -664,12 +676,12 @@ def _cleanup_chunk_stoas(
 
 
 def _save_toa_residuals(
-    sim_out_dir:     str,
+    sim_out_dir:      str,
     psrs_clean,
-    noise_stoas:     Dict[str, np.ndarray],
-    combined_delta:  Dict[str, np.ndarray],
+    noise_stoas:      Dict[str, np.ndarray],
+    combined_delta:   Dict[str, np.ndarray],
     cumulative_scale: float,
-    scenario:        Optional[str] = None,
+    scenario:         Optional[str] = None,
 ) -> None:
     suffix = f'_{scenario}' if scenario else ''
     base   = os.path.join(sim_out_dir, f'residuals{suffix}')
@@ -706,45 +718,38 @@ def _save_toa_residuals(
 
 
 # =============================================================================
-# Per-simulation processor
+# Subprocess phase runner
 # =============================================================================
 
-def process_sim(
-    sim_id:              int,
-    args,
-    psrs_baseline_clean: list,
-    raw_noise_params:    dict,
-    parsed_noise_params: dict,
-    syn_scenarios:       dict,
-    combined_scenarios:  dict,
-    noise_seed:          int,
-) -> bool:
-    """
-    Run the full stage-2 pipeline for a single sim_id.
+def _run_phase(extra_argv: list, label: str) -> None:
+    """Launch this same script as a subprocess with extra_argv appended."""
+    cmd = [sys.executable, os.path.abspath(__file__)] + extra_argv
+    print(f'\n  ▶ Subprocess: {label}', flush=True)
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f'Subprocess phase "{label}" exited with code {result.returncode}')
+    print(f'  ✓ Subprocess complete: {label}', flush=True)
 
-    Memory high-water marks (approximate):
-      - During scaling:     one PTA (baseline libstempo + enterprise) + Δstoa arrays
-      - During baseline CGW: one Enterprise PTA + candidate binary objects
-      - During each synthetic scenario: one Enterprise PTA + 1000 binary objects;
-        everything else deleted before the next scenario loads.
+
+# =============================================================================
+# Phase entry points — called inside subprocesses
+# =============================================================================
+
+def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     """
-    t_sim       = time.time()
-    sim_out_dir = os.path.join(args.output_dir, f'sim{sim_id:03d}')
+    Baseline phase (subprocess):
+      - load + filter baseline pulsars
+      - simulate noise; scale GW signal to target OS SNR
+      - save residuals; update shards with scale factor
+      - optionally validate proxy
+      - compute baseline CGW SNR (proxy-only mode: skip scaling, just validate)
+      - write phase_handoff.json for scenario subprocesses
+    """
+    sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
 
-    print(f'\n{"="*60}')
-    print(f'Stage 2 — sim_id={sim_id}')
-    print(f'  Dir        : {sim_out_dir}')
-    print(f'  Target SNR : {args.target_snr}  range={args.snr_range}')
-    print(f'  CGW        : {"enabled" if args.cgw else "disabled"}')
-    print(f'  Scenarios  : baseline + {list(syn_scenarios.keys())}')
-    print(f'{"="*60}')
-
-    config_path = os.path.join(meta_dir, 'config.json')
-    if not os.path.isfile(config_path):
-        print(f'ERROR: config.json not found at {config_path}', file=sys.stderr)
-        return False
-    with open(config_path) as fh:
+    with open(os.path.join(meta_dir, 'config.json')) as fh:
         run_config = json.load(fh)
     Tspan_seconds = run_config['Tspan_seconds']
 
@@ -752,128 +757,111 @@ def process_sim(
     store     = ShardedPickleStore(pop_dir)
     chunk_ids = store.available()
     if not chunk_ids:
-        print(f'ERROR: no shards in {pop_dir}', file=sys.stderr)
-        return False
-    print(f'\n📦 Found {len(chunk_ids)} chunks: {chunk_ids}')
+        sys.exit(f'ERROR: no shards in {pop_dir}')
 
-    psr_names_baseline = [p.name for p in psrs_baseline_clean]
-    snr_low, snr_high  = args.snr_range
+    snr_low, snr_high = args.snr_range
+
+    print('\n📡 [baseline] Loading pulsars...')
+    psrs_unfiltered = load_pulsars(verbose=True, scenario='baseline',
+                                   scenarios=combined_scenarios)
+    with suppress_enterprise_warnings():
+        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
+            psrs_unfiltered, verbose=True)
+    del psrs_unfiltered; gc.collect()
+    psr_names = [p.name for p in psrs_clean]
+
+    parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
 
     # ── proxy-only mode ───────────────────────────────────────────────────────
-    # Validate the analytic proxy without running the full SNR pipeline.
     if args.proxy_only:
         print(f'\n{"="*60}')
-        print(f'Proxy-only mode — sim_id={sim_id}')
-        print(f'  Skipping noise simulation and SNR scaling.')
+        print('Proxy-only mode — skipping noise simulation and SNR scaling.')
         print(f'{"="*60}')
 
         print('\n🔊 Simulating noise (for PTA structure only)...')
-        noise_stoas = _simulate_noise(
-            psrs_baseline_clean, raw_noise_params, seed=noise_seed)
+        noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
 
         _, pta, enterprise_psrs = compute_population_snr(
-            psrs_clean=psrs_baseline_clean,
+            psrs_clean=psrs_clean,
             population=None,
             raw_noise_params=raw_noise_params,
             Tspan=Tspan_seconds,
             current_stoas=noise_stoas,
             return_psrs_pta=True,
         )
-
         validate_cgw_proxy(
-            store=store,
-            chunk_ids=chunk_ids,
-            pta=pta,
+            store=store, chunk_ids=chunk_ids, pta=pta,
             enterprise_psrs=enterprise_psrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
-            Tspan_seconds=Tspan_seconds,
-            n_test=args.n_test,
+            Tspan_seconds=Tspan_seconds, n_test=args.n_test,
         )
         validate_proxy_filtering_ratio(
-            store=store,
-            chunk_ids=chunk_ids,
-            pta=pta,
+            store=store, chunk_ids=chunk_ids, pta=pta,
             enterprise_psrs=enterprise_psrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
-            Tspan_seconds=Tspan_seconds,
-            n_keep=N_PRE_FILTER_PER_CHUNK,
+            Tspan_seconds=Tspan_seconds, n_keep=N_PRE_FILTER_PER_CHUNK,
         )
-
         sentinel = os.path.join(meta_dir, 'stage2_complete.json')
         with open(sentinel, 'w') as fh:
-            json.dump({
-                'sim_id':       sim_id,
-                'proxy_only':   True,
-                'completed_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-            }, fh, indent=2)
-        return True
+            json.dump({'sim_id': args.sim_id, 'proxy_only': True,
+                       'completed_at': time.strftime('%Y-%m-%dT%H:%M:%S')}, fh, indent=2)
+        # write minimal handoff so orchestrator doesn't error
+        with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
+            json.dump({'cumulative_scale': 1.0, 'Tspan_seconds': Tspan_seconds,
+                       'baseline_candidates': [], 'baseline_snrs': []}, fh)
+        return
 
-    # ── 1. Sum baseline Δstoas ────────────────────────────────────────────────
-    print('\n📂 Summing baseline Δstoas...')
-    combined_delta_baseline = _load_and_sum_toa_deltas(
-        sim_out_dir, chunk_ids, psr_names_baseline, scenario=None)
+    # ── full pipeline ─────────────────────────────────────────────────────────
+    print('\n📂 [baseline] Summing Δstoas...')
+    combined_delta = _load_and_sum_toa_deltas(
+        sim_out_dir, chunk_ids, psr_names, scenario=None)
 
-    # ── 2. Simulate baseline noise ────────────────────────────────────────────
-    print('\n🔊 Simulating baseline noise...')
-    noise_stoas_baseline = _simulate_noise(
-        psrs_baseline_clean, raw_noise_params, seed=noise_seed)
+    print('\n🔊 [baseline] Simulating noise...')
+    noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
 
-    # ── 3. Scale GW signal → build baseline PTA ───────────────────────────────
-    print('\n📐 Scaling GW signal to target OS SNR (baseline)...')
+    print('\n📐 [baseline] Scaling GW signal...')
     try:
-        cumulative_scale, pta_baseline, epsrs_baseline = _scale_and_iterate(
-            psrs_clean=psrs_baseline_clean,
-            delta_stoas=combined_delta_baseline,
-            noise_stoas=noise_stoas_baseline,
+        cumulative_scale, pta, epsrs = _scale_and_iterate(
+            psrs_clean=psrs_clean,
+            delta_stoas=combined_delta,
+            noise_stoas=noise_stoas,
             target_snr=args.target_snr,
-            snr_low=snr_low,
-            snr_high=snr_high,
+            snr_low=snr_low, snr_high=snr_high,
             Tspan_seconds=Tspan_seconds,
             raw_noise_params=raw_noise_params,
         )
     except RuntimeError as e:
-        print(f'ERROR: {e}', file=sys.stderr)
-        return False
-    print(f'✓ Converged — scale factor: {cumulative_scale:.6f}')
+        sys.exit(f'ERROR: {e}')
+    print(f'✓ Converged — scale={cumulative_scale:.6f}')
 
-    # ── 4. Save baseline TOA residuals + clean up chunk files ─────────────────
-    _save_toa_residuals(
-        sim_out_dir, psrs_baseline_clean,
-        noise_stoas_baseline, combined_delta_baseline,
-        cumulative_scale, scenario=None)
+    _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
+                        combined_delta, cumulative_scale, scenario=None)
     _cleanup_chunk_stoas(sim_out_dir, chunk_ids, scenario=None)
-    del noise_stoas_baseline, combined_delta_baseline; gc.collect()
+    del noise_stoas, combined_delta, psrs_clean; gc.collect()
 
-    # ── 5. Apply scale factor to all shards ───────────────────────────────────
-    print('\n💾 Updating shards with scale factor...')
+    print('\n💾 [baseline] Updating shards...')
     _apply_scaling_to_all_chunks(store, chunk_ids, cumulative_scale)
 
-    # ── 6. Baseline CGW SNR ───────────────────────────────────────────────────
-    baseline_candidates: Optional[List[Tuple[int, int, float]]] = None
-    baseline_snrs:       Optional[np.ndarray]                   = None
+    baseline_candidates: Optional[List] = None
+    baseline_snrs:       Optional[np.ndarray] = None
 
     if args.cgw:
         if args.validate_proxy:
             print('\n🔍 Validating CGW proxy...')
             validate_cgw_proxy(
-                store=store,
-                chunk_ids=chunk_ids,
-                pta=pta_baseline,
-                enterprise_psrs=epsrs_baseline,
+                store=store, chunk_ids=chunk_ids, pta=pta,
+                enterprise_psrs=epsrs,
                 raw_noise_params=raw_noise_params,
                 parsed_noise_params=parsed_noise_params,
-                Tspan_seconds=Tspan_seconds,
-                n_test=args.n_test,
+                Tspan_seconds=Tspan_seconds, n_test=args.n_test,
             )
 
-        print('\n🔭 Computing baseline CGW SNRs...')
+        print('\n🔭 [baseline] Computing CGW SNRs...')
         baseline_candidates, baseline_snrs = _compute_cgw_snrs_baseline(
-            store=store,
-            chunk_ids=chunk_ids,
-            pta=pta_baseline,
-            enterprise_psrs=epsrs_baseline,
+            store=store, chunk_ids=chunk_ids,
+            pta=pta, enterprise_psrs=epsrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
             Tspan_seconds=Tspan_seconds,
@@ -883,87 +871,188 @@ def process_sim(
     else:
         print('\n(CGW skipped — use --cgw to enable)')
 
-    # Delete baseline PTA before loading any synthetic PTA
-    del pta_baseline, epsrs_baseline; gc.collect()
-    print('\n  Baseline PTA deleted from memory.')
+    del pta, epsrs; gc.collect()
 
-    # ── 7. Synthetic PTA scenarios — one at a time ────────────────────────────
-    for scenario_label in syn_scenarios:
-        print(f'\n{"─"*50}')
-        print(f'Scenario: {scenario_label}')
-        print(f'{"─"*50}')
+    # write handoff for scenario subprocesses
+    handoff = {
+        'cumulative_scale':    float(cumulative_scale),
+        'Tspan_seconds':       Tspan_seconds,
+        'baseline_candidates': [[c, i, float(p)]
+                                for c, i, p in (baseline_candidates or [])],
+        'baseline_snrs':       (baseline_snrs.tolist()
+                                if baseline_snrs is not None else []),
+    }
+    with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
+        json.dump(handoff, fh)
+    print(f'✓ [baseline] Wrote {HANDOFF_FILENAME}')
 
-        # Load scenario pulsars
-        psrs_scen_unfiltered = load_pulsars(
-            verbose=False,
-            scenario=scenario_label,
-            scenarios=combined_scenarios,
+
+def _phase_scenario(args, scenario_label, combined_scenarios, noise_seed):
+    """
+    Scenario phase (subprocess, one per scenario):
+      - read handoff (cumulative_scale, baseline candidate ranking)
+      - load + filter scenario pulsars
+      - simulate noise with same seed as baseline
+      - save residuals; clean chunk files
+      - build Enterprise PTA
+      - compute CGW SNR for top-N by baseline SNR; write to shards
+    """
+    sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
+    meta_dir    = os.path.join(sim_out_dir, 'metadata')
+
+    handoff_path = os.path.join(meta_dir, HANDOFF_FILENAME)
+    if not os.path.isfile(handoff_path):
+        sys.exit(f'ERROR: handoff file not found: {handoff_path}')
+    with open(handoff_path) as fh:
+        handoff = json.load(fh)
+
+    cumulative_scale    = handoff['cumulative_scale']
+    Tspan_seconds       = handoff['Tspan_seconds']
+    baseline_candidates = [(c, i, p) for c, i, p in handoff['baseline_candidates']]
+    baseline_snrs       = np.array(handoff['baseline_snrs'], dtype=np.float64)
+
+    pop_dir   = os.path.join(sim_out_dir, 'populations')
+    store     = ShardedPickleStore(pop_dir)
+    chunk_ids = store.available()
+
+    parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
+
+    print(f'\n📡 [{scenario_label}] Loading pulsars...')
+    psrs_unfiltered = load_pulsars(verbose=True, scenario=scenario_label,
+                                   scenarios=combined_scenarios)
+    with suppress_enterprise_warnings():
+        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
+            psrs_unfiltered, verbose=False)
+    del psrs_unfiltered; gc.collect()
+    psr_names = [p.name for p in psrs_clean]
+
+    print(f'\n📂 [{scenario_label}] Summing Δstoas...')
+    combined_delta = _load_and_sum_toa_deltas(
+        sim_out_dir, chunk_ids, psr_names, scenario=scenario_label)
+
+    print(f'\n🔊 [{scenario_label}] Simulating noise (seed={noise_seed})...')
+    noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
+
+    _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
+                        combined_delta, cumulative_scale, scenario=scenario_label)
+    _cleanup_chunk_stoas(sim_out_dir, chunk_ids, scenario=scenario_label)
+    del noise_stoas, combined_delta; gc.collect()
+
+    print(f'\n🔧 [{scenario_label}] Building Enterprise PTA...')
+    pta, epsrs = _build_pta(psrs_clean, raw_noise_params, Tspan_seconds)
+    del psrs_clean; gc.collect()
+
+    if args.cgw and len(baseline_candidates) > 0:
+        _compute_cgw_snrs_scenario(
+            store=store, chunk_ids=chunk_ids,
+            pta=pta, enterprise_psrs=epsrs,
+            raw_noise_params=raw_noise_params,
+            parsed_noise_params=parsed_noise_params,
+            Tspan_seconds=Tspan_seconds,
+            snr_field=f'cgw_snr_{scenario_label}',
+            baseline_candidates=baseline_candidates,
+            baseline_snrs=baseline_snrs,
+            n_candidates=N_SCENARIO_CGW_CANDIDATES,
         )
-        with suppress_enterprise_warnings():
-            psrs_scen_clean, _, _ = filter_pulsars_15yr(
-                psrs_scen_unfiltered, verbose=False)
-        del psrs_scen_unfiltered; gc.collect()
-        psr_names_scen = [p.name for p in psrs_scen_clean]
+    elif args.cgw:
+        print(f'  WARNING: no baseline candidates, skipping CGW for {scenario_label}')
 
-        # Sum scenario Δstoas + save residuals
-        print(f'  Summing {scenario_label} Δstoas...')
-        combined_delta_scen = _load_and_sum_toa_deltas(
-            sim_out_dir, chunk_ids, psr_names_scen, scenario=scenario_label)
+    del pta, epsrs; gc.collect()
+    print(f'✓ [{scenario_label}] Phase complete')
 
-        print(f'  Simulating {scenario_label} noise (seed={noise_seed})...')
-        noise_stoas_scen = _simulate_noise(
-            psrs_scen_clean, raw_noise_params, seed=noise_seed)
 
-        _save_toa_residuals(
-            sim_out_dir, psrs_scen_clean,
-            noise_stoas_scen, combined_delta_scen,
-            cumulative_scale, scenario=scenario_label)
-        _cleanup_chunk_stoas(sim_out_dir, chunk_ids, scenario=scenario_label)
-        del noise_stoas_scen, combined_delta_scen; gc.collect()
+# =============================================================================
+# Per-simulation orchestrator
+# =============================================================================
 
-        # Build this scenario's Enterprise PTA — only one alive at a time
-        print(f'  Building Enterprise PTA for {scenario_label}...')
-        pta_scen, epsrs_scen = _build_pta(
-            psrs_scen_clean, raw_noise_params, Tspan_seconds)
-        del psrs_scen_clean; gc.collect()
+def process_sim(
+    sim_id:            int,
+    args,
+    syn_scenarios:     dict,
+    combined_scenarios: dict,
+    noise_seed:        int,
+) -> bool:
+    """
+    Orchestrate the per-simulation pipeline by launching each phase in a
+    clean subprocess.  The parent process holds only the argument namespace;
+    all pulsars and PTA objects live exclusively inside subprocesses.
 
-        # CGW SNR: top-N by baseline SNR, no proxy re-scan
-        if args.cgw and baseline_candidates is not None:
-            _compute_cgw_snrs_scenario(
-                store=store,
-                chunk_ids=chunk_ids,
-                pta=pta_scen,
-                enterprise_psrs=epsrs_scen,
-                raw_noise_params=raw_noise_params,
-                parsed_noise_params=parsed_noise_params,
-                Tspan_seconds=Tspan_seconds,
-                snr_field=f'cgw_snr_{scenario_label}',
-                baseline_candidates=baseline_candidates,
-                baseline_snrs=baseline_snrs,
-                n_candidates=N_SCENARIO_CGW_CANDIDATES,
+    Each subprocess exits completely before the next starts, so libstempo/
+    tempo2's C-level global state is guaranteed to be cleared between phases.
+    """
+    t_sim       = time.time()
+    sim_out_dir = os.path.join(args.output_dir, f'sim{sim_id:03d}')
+
+    print(f'\n{"="*60}')
+    print(f'Stage 2 orchestrator — sim_id={sim_id}')
+    print(f'  Scenarios : baseline + {list(syn_scenarios.keys())}')
+    print(f'  Each phase runs in its own subprocess (clean C heap)')
+    print(f'{"="*60}')
+
+    config_path = os.path.join(sim_out_dir, 'metadata', 'config.json')
+    if not os.path.isfile(config_path):
+        print(f'ERROR: config.json not found at {config_path}', file=sys.stderr)
+        return False
+
+    def _common_argv():
+        argv = [
+            '--output-dir',  args.output_dir,
+            '--config',      args.config,
+            '--target-snr',  str(args.target_snr),
+            '--snr-range',   str(args.snr_range[0]), str(args.snr_range[1]),
+            '--sim-id',      str(sim_id),
+            '--n-chunks',    str(args.n_chunks),
+            '--noise-seed',  str(noise_seed),
+            '--n-test',      str(args.n_test),
+        ]
+        if args.cgw:              argv.append('--cgw')
+        if args.validate_proxy:   argv.append('--validate-proxy')
+        if args.proxy_only:       argv.append('--proxy-only')
+        if args.synthetic_ptas:   argv.append('--synthetic-ptas')
+        if args.synthetic_pta_config:
+            argv += ['--synthetic-pta-config', args.synthetic_pta_config]
+        return argv
+
+    # Phase 1: baseline
+    try:
+        _run_phase(_common_argv() + ['--phase', 'baseline'],
+                   label=f'sim{sim_id:03d}/baseline')
+    except RuntimeError as e:
+        print(f'ERROR: {e}', file=sys.stderr)
+        return False
+
+    # Phase 2: one subprocess per synthetic scenario
+    for scenario_label in syn_scenarios:
+        try:
+            _run_phase(
+                _common_argv() + ['--phase', 'scenario',
+                                  '--phase-scenario', scenario_label],
+                label=f'sim{sim_id:03d}/{scenario_label}',
             )
-        elif args.cgw:
-            print(f'  WARNING: no baseline candidates available, '
-                  f'skipping CGW for {scenario_label}')
+        except RuntimeError as e:
+            print(f'ERROR: {e}', file=sys.stderr)
+            return False
 
-        del pta_scen, epsrs_scen; gc.collect()
-        print(f'  {scenario_label} PTA deleted from memory.')
+    # Write completion sentinel (read cumulative_scale from handoff)
+    handoff_path = os.path.join(sim_out_dir, 'metadata', HANDOFF_FILENAME)
+    cumulative_scale = 1.0
+    if os.path.isfile(handoff_path):
+        with open(handoff_path) as fh:
+            cumulative_scale = json.load(fh).get('cumulative_scale', 1.0)
 
-    # ── 8. Write completion sentinel ──────────────────────────────────────────
-    sentinel = os.path.join(meta_dir, 'stage2_complete.json')
+    sentinel = os.path.join(sim_out_dir, 'metadata', 'stage2_complete.json')
     with open(sentinel, 'w') as fh:
         json.dump({
-            'sim_id':             sim_id,
-            'cumulative_scale':   float(cumulative_scale),
-            'scenarios':          ['baseline'] + list(syn_scenarios.keys()),
-            'n_cgw_baseline':     N_GLOBAL_CGW_CANDIDATES,
-            'n_cgw_scenario':     N_SCENARIO_CGW_CANDIDATES,
-            'completed_at':       time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'sim_id':           sim_id,
+            'cumulative_scale': float(cumulative_scale),
+            'scenarios':        ['baseline'] + list(syn_scenarios.keys()),
+            'n_cgw_baseline':   N_GLOBAL_CGW_CANDIDATES,
+            'n_cgw_scenario':   N_SCENARIO_CGW_CANDIDATES,
+            'completed_at':     time.strftime('%Y-%m-%dT%H:%M:%S'),
         }, fh, indent=2)
 
     elapsed = time.time() - t_sim
     print(f'\n✅ Stage 2 sim_id={sim_id} complete in {elapsed/60:.1f} min')
-    print(f'   Output: {sim_out_dir}/populations/')
     return True
 
 
@@ -980,11 +1069,10 @@ def _build_summary_object(
     Build a compact summary object covering all population shards for a sim.
 
     Discovers all SNR fields (any attribute starting with 'cgw_snr') from the
-    first shard and includes top-N for each in the category index.  Also
-    preserves the heap-based parameter-extreme categories from the original
-    implementation for downstream analysis.
+    first shard automatically.  Category indices are built with heapq so the
+    full population array never needs to be held in memory at once.
 
-    Writes summary.pkl.gz with:
+    Writes summary.pkl.gz:
         d['arrays']  — dict of np.ndarray, all same length (one entry per binary)
         d['meta']    — category_indices, top_cgw_breakdowns, snr_fields, etc.
     """
@@ -1001,15 +1089,14 @@ def _build_summary_object(
 
     # Discover field layout from first shard
     first_pop  = store.read(chunk_ids[0])
-    snr_fields = [attr for attr in vars(first_pop)
-                  if attr.startswith('cgw_snr')]
+    snr_fields = [attr for attr in vars(first_pop) if attr.startswith('cgw_snr')]
     all_fields = [attr for attr in vars(first_pop)
                   if isinstance(getattr(first_pop, attr), np.ndarray)]
     print(f'  SNR fields  : {snr_fields}')
     print(f'  All fields  : {all_fields}')
     del first_pop
 
-    # Standard heap categories (parameter extremes)
+    # Heap-based category tracking (never loads whole population into RAM)
     _param_categories: Dict[str, Tuple[list, bool, str]] = {
         'D_comov_near': ([], False, 'D_comov'),
         'D_comov_far':  ([], True,  'D_comov'),
@@ -1023,7 +1110,6 @@ def _build_summary_object(
         'z_low':        ([], False, 'z'),
         'z_high':       ([], True,  'z'),
     }
-    # Add a top-SNR heap for every discovered SNR field
     for sf in snr_fields:
         _param_categories[f'{sf}_high'] = ([], True, sf)
 
@@ -1052,7 +1138,8 @@ def _build_summary_object(
             vals = {
                 field: float(getattr(pop, field)[local_i])
                 for field in all_fields
-                if hasattr(pop, field)
+                if hasattr(pop, field) and
+                   isinstance(getattr(pop, field), np.ndarray)
             }
             for cat_name, (heap, is_max, field) in _param_categories.items():
                 if field in vals:
@@ -1078,7 +1165,7 @@ def _build_summary_object(
     }
     arrays['global_idx'] = np.arange(total_scanned, dtype=np.int64)
 
-    # Load top-5 CGW breakdowns written by _compute_cgw_snrs_baseline
+    # Top-5 CGW breakdowns written by _compute_cgw_snrs_baseline
     top_cgw_breakdowns = []
     breakdown_path = os.path.join(sim_out_dir, 'metadata', 'top_cgw_breakdowns.json')
     if os.path.isfile(breakdown_path):
@@ -1108,8 +1195,8 @@ def _build_summary_object(
     print(f'     import gzip, pickle')
     print(f"     with gzip.open('{out_path}', 'rb') as f:")
     print(f'         d = pickle.load(f)')
-    print(f"     arrays = d['arrays']   # dict of np.ndarray, all same length")
-    print(f"     meta   = d['meta']     # category_indices, top_cgw_breakdowns, etc.")
+    print(f"     arrays = d['arrays']")
+    print(f"     meta   = d['meta']")
 
 
 # =============================================================================
@@ -1123,24 +1210,22 @@ def parse_args():
                    choices=list(config.POPULATION_CONFIGS.keys()))
     p.add_argument('--target-snr',           type=float, default=4.0)
     p.add_argument('--snr-range',            nargs=2, type=float, default=[3.5, 4.25])
-    p.add_argument('--n-chunks',             type=int, required=True,
-                   help='Number of chunks per simulation (used for logging)')
+    p.add_argument('--n-chunks',             type=int, required=True)
     p.add_argument('--sim-id',               type=int, required=True)
     p.add_argument('--cgw',                  action='store_true')
-    p.add_argument('--validate-proxy',       action='store_true',
-                   help='Validate CGW proxy vs true SNR before full computation')
-    p.add_argument('--proxy-only',           action='store_true',
-                   help='Skip noise/scaling — just validate the CGW proxy')
-    p.add_argument('--n-test',               type=int, default=1_000,
-                   help='Binaries to sample for proxy validation (default: 1000)')
-    p.add_argument('--clean-failed',         action='store_true',
-                   help='Remove incomplete sim dirs so stage1 can regenerate')
-    p.add_argument('--noise-seed',           type=int, default=None,
-                   help='Base random seed; defaults to sim_id * 1000')
-    p.add_argument('--synthetic-ptas',       action='store_true', default=False,
-                   help='Enable synthetic PTA scenarios alongside baseline')
-    p.add_argument('--synthetic-pta-config', type=str, default=None,
-                   help='JSON dict of synthetic PTA scenario definitions')
+    p.add_argument('--validate-proxy',       action='store_true')
+    p.add_argument('--proxy-only',           action='store_true')
+    p.add_argument('--n-test',               type=int, default=1_000)
+    p.add_argument('--clean-failed',         action='store_true')
+    p.add_argument('--noise-seed',           type=int, default=None)
+    p.add_argument('--synthetic-ptas',       action='store_true', default=False)
+    p.add_argument('--synthetic-pta-config', type=str, default=None)
+    # Internal subprocess dispatch flags — not used by sbatch scripts directly
+    p.add_argument('--phase',                type=str, default=None,
+                   choices=['baseline', 'scenario'],
+                   help=argparse.SUPPRESS)
+    p.add_argument('--phase-scenario',       type=str, default=None,
+                   help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -1173,19 +1258,29 @@ def main():
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
         else:
-            syn_scenarios = {
-                k: v for k, v in DEFAULT_SCENARIOS.items()
-                if k != 'baseline'
-            }
+            syn_scenarios = {k: v for k, v in DEFAULT_SCENARIOS.items()
+                             if k != 'baseline'}
     else:
         syn_scenarios = {}
 
     combined_scenarios = dict(DEFAULT_SCENARIOS)
     combined_scenarios.update(syn_scenarios)
 
-    noise_seed = args.noise_seed if args.noise_seed is not None \
-                 else args.sim_id * 1000
+    noise_seed = (args.noise_seed + args.sim_id**2 * 100) if args.noise_seed is not None else args.sim_id * 1000
 
+    # ── Subprocess phase dispatch ─────────────────────────────────────────────
+    # These branches are only entered when this script is called by _run_phase.
+    if args.phase == 'baseline':
+        _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed)
+        sys.exit(0)
+
+    if args.phase == 'scenario':
+        if not args.phase_scenario:
+            sys.exit('ERROR: --phase scenario requires --phase-scenario <label>')
+        _phase_scenario(args, args.phase_scenario, combined_scenarios, noise_seed)
+        sys.exit(0)
+
+    # ── Top-level orchestrator ────────────────────────────────────────────────
     print(f'\n{"="*60}')
     print(f'Stage 2 — sim_id={args.sim_id}')
     print(f'  Output dir    : {args.output_dir}')
@@ -1197,24 +1292,9 @@ def main():
     print(f'  Syn scenarios : {list(syn_scenarios.keys()) or "none"}')
     print(f'{"="*60}\n')
 
-    # Load baseline pulsars once; scenario pulsars loaded inside process_sim
-    print('📡 Loading baseline pulsars...')
-    psrs_unfiltered = load_pulsars(verbose=True, scenario='baseline',
-                                   scenarios=combined_scenarios)
-    with suppress_enterprise_warnings():
-        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
-            psrs_unfiltered, verbose=True)
-    del psrs_unfiltered; gc.collect()
-    print(f'✓ {len(psrs_clean)} baseline pulsars\n')
-
-    parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
-
     success = process_sim(
         sim_id=args.sim_id,
         args=args,
-        psrs_baseline_clean=psrs_clean,
-        raw_noise_params=raw_noise_params,
-        parsed_noise_params=parsed_noise_params,
         syn_scenarios=syn_scenarios,
         combined_scenarios=combined_scenarios,
         noise_seed=noise_seed,

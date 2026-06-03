@@ -14,8 +14,8 @@ POPULATION_CONFIGS = {
     'test': {
         'n_binaries': 20_000,
         'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(8.0),
-        'z_max': 1.0,
+        'mass_cutoff_0': 10**(12.0),
+        'z_max': 0.5,
         'description': 'Tiny population for local testing'
     },
     'pessimistic': {
@@ -49,7 +49,7 @@ if NANOGRAV_PULSARS:
     # TIM_DIR = "./psars_narrowband/alternate/tim/initial"
     PAR_DIR = "./psars_narrowband/par/"
     TIM_DIR = "./psars_narrowband/tim/"
-    USE_PULSAR_CACHE = True
+    USE_PULSAR_CACHE = False
     NANOGRAV_PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
 else:
     PAR_DIR = "pulsars/"

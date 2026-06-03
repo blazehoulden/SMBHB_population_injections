@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from consistent_pop_synth import suppress_enterprise_warnings
-from data_loader import load_pulsars, filter_pulsars_15yr, SCENARIOS as DEFAULT_SCENARIOS
+from data_loader import load_pulsars, load_single_pulsar, filter_pulsars_15yr, SCENARIOS as DEFAULT_SCENARIOS
 from signal_injection import change_in_TOAs_days_population_nufft, _antenna_response_vec, _get_psr_radec
 from SMBHB_pop_synth import PopulationArrays
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
@@ -64,7 +64,8 @@ FIELD_DTYPES: Dict[str, type] = {
     "cgw_snr":  np.float16,
 }
 SCALAR_FIELDS = list(FIELD_DTYPES.keys())
-N_PRE_FILTER_PER_CHUNK = 12_500
+# N_PRE_FILTER_PER_CHUNK = 12_500
+N_PRE_FILTER_PER_CHUNK = 500
 
 
 class ShardedPickleStore:
@@ -541,6 +542,8 @@ def main():
 
     all_scenario_labels: List[str] = ['baseline'] + list(syn_scenarios.keys())
 
+    parfiles = sorted([f for f in os.listdir(config.PAR_DIR) if f.endswith('.par')])
+
     # Combined scenarios dict for load_pulsars resolution
     combined_scenarios = dict(DEFAULT_SCENARIOS)
     combined_scenarios.update(syn_scenarios)
@@ -574,46 +577,80 @@ def main():
         is_baseline = (scenario_label == 'baseline')
         print(f'\n  ── Scenario: {scenario_label} {"(baseline)" if is_baseline else ""} ──')
 
-        # Load pulsars
-        t_l0 = time.time()
-        print(f'  📡 Loading pulsars...')
-        psrs_unfiltered = load_pulsars(
-            verbose=True,
-            scenario=scenario_label,
-            scenarios=combined_scenarios,
-        )
-        with suppress_enterprise_warnings():
-            psrs_clean, _, T_span = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
-        del psrs_unfiltered
-        gc.collect()
-        t_load_total += time.time() - t_l0
-        print(f'  ✓ {len(psrs_clean)} pulsars, Tspan={T_span / (365.25*86400):.1f} yr')
-
-        # Retain baseline info for population filter
         if is_baseline:
+            # Baseline can stay list-based because it is the reference PTA.
+            t_l0 = time.time()
+            print(f'  📡 Loading pulsars...')
+            psrs_unfiltered = load_pulsars(
+                verbose=True,
+                scenario=scenario_label,
+                scenarios=combined_scenarios,
+            )
+            with suppress_enterprise_warnings():
+                psrs_clean, _, T_span = filter_pulsars_15yr(psrs_unfiltered, verbose=True)
+            del psrs_unfiltered
+            gc.collect()
+            t_load_total += time.time() - t_l0
+            print(f'  ✓ {len(psrs_clean)} pulsars, Tspan={T_span / (365.25*86400):.1f} yr')
+
             psrs_baseline = psrs_clean
             Tspan_seconds = T_span
 
-        # Compute TOA deltas
-        t_n0 = time.time()
-        print(f'  ⚡ Computing TOA Δs via NUFFT...')
-        delta_stoas = change_in_TOAs_days_population_nufft(
-            psrs_clean, population_batch, verbose=True)
-        t_nufft_total += time.time() - t_n0
-        print(f'  ✓ Computed Δstoas for {len(delta_stoas)} pulsars')
+            t_n0 = time.time()
+            print(f'  ⚡ Computing TOA Δs via NUFFT...')
+            delta_stoas = change_in_TOAs_days_population_nufft(
+                psrs_clean, population_batch, verbose=True)
+            t_nufft_total += time.time() - t_n0
+            print(f'  ✓ Computed Δstoas for {len(delta_stoas)} pulsars')
 
-        # Save TOA deltas (baseline has no suffix)
-        _save_toa_deltas(
-            delta_stoas, sim_out_dir, chunk_id,
-            scenario=None if is_baseline else scenario_label,
-        )
+            _save_toa_deltas(
+                delta_stoas, sim_out_dir, chunk_id,
+                scenario=None if is_baseline else scenario_label,
+            )
 
-        # Free memory immediately
-        del delta_stoas
-        if not is_baseline:
-            # Non-baseline pulsars are no longer needed after this point
-            del psrs_clean
-        gc.collect()
+            del delta_stoas, psrs_clean
+            gc.collect()
+        else:
+            # Stream synthetic scenarios one pulsar at a time to avoid keeping
+            # the augmented TOA sets for all pulsars in memory simultaneously.
+            t_l0 = time.time()
+            print(f'  📡 Loading pulsars (streaming)...')
+            delta_stoas = []
+            n_kept = 0
+            for par in parfiles:
+                psr_variants = load_single_pulsar(
+                    par,
+                    verbose=True,
+                    scenario=scenario_label,
+                    scenarios=combined_scenarios,
+                )
+                for psr in psr_variants:
+                    with suppress_enterprise_warnings():
+                        kept, _, _ = filter_pulsars_15yr([psr], verbose=False)
+                    if not kept:
+                        del psr
+                        gc.collect()
+                        continue
+
+                    t_n0 = time.time()
+                    delta_one = change_in_TOAs_days_population_nufft(
+                        [psr], population_batch, verbose=True)
+                    t_nufft_total += time.time() - t_n0
+                    delta_stoas.extend(delta_one)
+                    n_kept += 1
+                    del psr, delta_one
+                    gc.collect()
+
+            t_load_total += time.time() - t_l0
+            print(f'  ✓ Computed Δstoas for {n_kept} pulsars')
+
+            _save_toa_deltas(
+                delta_stoas, sim_out_dir, chunk_id,
+                scenario=scenario_label,
+            )
+
+            del delta_stoas
+            gc.collect()
 
         elapsed_scen = time.time() - t_scen
         print(f'  ✓ Scenario {scenario_label} done in {elapsed_scen/60:.1f} min')
