@@ -82,18 +82,13 @@ except ImportError:
 from enterprise.pulsar import Pulsar as EnterprisePulsar
 from pta_builder import build_pta_and_params
 
-# N_PRE_FILTER_PER_CHUNK    = 12_500
-# N_GLOBAL_CGW_CANDIDATES   = 12_500   # baseline: proxy pre-filter budget
-# N_SCENARIO_CGW_CANDIDATES = 1_000    # synthetic PTAs: top-N by BASELINE cgw_snr
-# N_RESCUE                  = 500      # per frequency regime
-# N_TOP_SOURCES             = 50
-# MAX_SCALE_ITER            = 20
-N_PRE_FILTER_PER_CHUNK    = 500
-N_GLOBAL_CGW_CANDIDATES   = 500   # baseline: proxy pre-filter budget
-N_SCENARIO_CGW_CANDIDATES = 500    # synthetic PTAs: top-N by BASELINE cgw_snr
-N_RESCUE                  = 50      # per frequency regime
+N_PRE_FILTER_PER_CHUNK    = 12_500
+N_GLOBAL_CGW_CANDIDATES   = 12_500   # baseline: proxy pre-filter budget
+N_SCENARIO_CGW_CANDIDATES = 1_000    # synthetic PTAs: top-N by BASELINE cgw_snr
+N_RESCUE                  = 500      # per frequency regime
 N_TOP_SOURCES             = 50
 MAX_SCALE_ITER            = 20
+
 HANDOFF_FILENAME          = 'phase_handoff.json'
 
 
@@ -287,7 +282,17 @@ def _scale_and_iterate(
         rn_components=rn_components,
     )
     print(f'  Noise-only OS SNR: {noise_only_snr:.4f}')
-
+    # ── guard: target must be reachable above the noise floor ────────────────
+    if target_snr <= noise_only_snr:
+        raise ValueError(
+            f'Target SNR ({target_snr:.4f}) is at or below the noise-only '
+            f'SNR ({noise_only_snr:.4f}). No GW scaling can reach this target. '
+            f'Increase target_snr or check your noise model.')
+    if snr_high <= noise_only_snr:
+        raise ValueError(
+            f'SNR band ceiling ({snr_high:.4f}) is at or below the noise-only '
+            f'SNR ({noise_only_snr:.4f}). Widen the target band upward.')
+    
     def _analytic_factor(snr_cur, snr_tgt, snr_noise):
         sig_cur = snr_cur - snr_noise
         sig_tgt = snr_tgt - snr_noise

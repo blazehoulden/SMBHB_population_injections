@@ -64,9 +64,7 @@ FIELD_DTYPES: Dict[str, type] = {
     "cgw_snr":  np.float16,
 }
 SCALAR_FIELDS = list(FIELD_DTYPES.keys())
-# N_PRE_FILTER_PER_CHUNK = 12_500
-N_PRE_FILTER_PER_CHUNK = 500
-
+N_PRE_FILTER_PER_CHUNK = 12_500
 
 class ShardedPickleStore:
     """One pkl.gz per chunk stored in a single directory."""
@@ -472,6 +470,7 @@ def parse_args():
     p.add_argument('--task-id',     type=int, default=None,
                    help='Flat array task ID (overrides $SLURM_ARRAY_TASK_ID)')
     p.add_argument('--sim-id',      type=int, required=True)
+    p.add_argument('--noise-seed',           type=int, default=None)
     # JSON string defining synthetic PTA scenarios.
     # Keys are scenario labels; values match data_loader.SCENARIOS format.
     # Example: '{"5x_cadence": {"cadence_factor": 5, "toaerr_factor": 1.0, "best_only": true}}'
@@ -556,6 +555,7 @@ def main():
         config=selected_config,
         smbhb_module=smbhb_module,
         n_binaries=args.chunk_size,
+        seed=args.noise_seed + sim_id * 1234 + chunk_id * 1234 if args.noise_seed is not None else None,
     )
     print(f'✓ Generated {len(population_batch):,} binaries')
 

@@ -167,20 +167,20 @@ Results appear in each `pop_{NNNN}_result.json` under the `"cgw"` key.
 
 ### Optimistic settings
 #### new settings
-sbatch submit_main_HPC.sh --config optimistic --simulations 1 --chunk-size 5_000_000 --n-chunks 1 --cgw --s1-time "00:25:00" --s1-mem "12G" --s2-time "03:40:00" --s2-mem "36G" --synthetic-ptas
+sbatch submit_main_HPC.sh --config optimistic --simulations 50 --chunk-size 5_000_000 --n-chunks 1 --cgw --s1-time "00:45:00" --s1-mem "15G" --s2-time "04:40:00" --s2-mem "40G" --synthetic-ptas --snr-range 3.5 4.0
 
 sbatch submit_main_HPC.sh --config optimistic --simulations 355 --chunk-size 10_000_000 --n-chunks 1 --cgw --s1-time "00:25:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G"
 
 ### Pessimistic settings
 ### new settings
-sbatch submit_main_HPC.sh --config pessimistic --simulations 250 --chunk-size 50_000_000 --n-chunks 8  --cgw --s1-time "01:20:00" --s1-mem "30G" --s2-time "02:40:00" --s2-mem "26G"
+sbatch submit_main_HPC.sh --config pessimistic --simulations 50 --chunk-size 50_000_000 --n-chunks 8  --cgw --s1-time "02:20:00" --s1-mem "30G" --s2-time "04:40:00" --s2-mem "44G" --synthetic-ptas --snr-range 3.5 4.0
 
 
 sbatch submit_main_HPC.sh --config pessimistic --simulations 1 --chunk-size 50_000_000 --n-chunks 1  --cgw --s1-time "00:50:00" --s1-mem "28G" --s2-time "02:00:00" --s2-mem "36G"
 
 ### Realistic settings
 #### new settings
-sbatch submit_main_HPC.sh --config realistic --simulations 69 --chunk-size 20_000_000 --n-chunks 1 --cgw --s1-time "00:45:00" --s1-mem "20G" --s2-time "02:40:00" --s2-mem "24G"
+sbatch submit_main_HPC.sh --config realistic --simulations 50 --chunk-size 20_000_000 --n-chunks 1 --cgw --s1-time "01:15:00" --s1-mem "20G" --s2-time "04:40:00" --s2-mem "44G" --synthetic-ptas --snr-range 3.5 4.0
 
 sbatch submit_main_HPC.sh --config realistic --simulations 1 --chunk-size 50_000_000 --n-chunks 10 --cgw --s1-time "00:50:00" --s1-mem "28G" --s2-time "02:00:00" --s2-mem "36G"
 

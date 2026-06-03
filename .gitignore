@@ -32,4 +32,5 @@ logs/
 runs/
 old_successful_run_logs/
 psars_narrowband/
+scenario_tims/
 previous_run_old_configurations/

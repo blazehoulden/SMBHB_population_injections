@@ -258,18 +258,23 @@ def sample_masses_power_law(n_binaries: int,
                             alpha_0: float = 1.21,
                             alpha_z: float = 0.0,
                             mass_min: float = 10**(7.5),
-                            mass_max: float = 10**(12.5)) -> np.ndarray:
+                            mass_max: float = 10**(12.5),
+                            rng: Optional[np.random.Generator] = None  # ← added
+                            ) -> np.ndarray:
     """
     Sample primary masses from p(M) ∝ M^(-α) via vectorised inverse-CDF.
  
     Pure numpy — one call, no loop.  For redshift-independent α this is
     exact; redshift-dependent α is handled per-binary using broadcasting.
     """
-    alpha    = alpha_0 + alpha_z * redshift_array          # (N,)
-    exp      = 1.0 - alpha                                  # (N,)
+    if rng is None:
+        rng = np.random.default_rng()
+
+    alpha    = alpha_0 + alpha_z * redshift_array
+    exp      = 1.0 - alpha
     cdf_min  = mass_min ** exp
     cdf_max  = mass_max ** exp
-    u        = np.random.rand(n_binaries)
+    u        = rng.random(n_binaries)                      # ← was np.random.rand()
     return (cdf_min + (cdf_max - cdf_min) * u) ** (1.0 / exp)
  
  
@@ -318,16 +323,20 @@ def sample_masses_exponential_damping(n_binaries, redshift_array,
                                       mass_cutoff_0=1e9, mass_cutoff_z=0.0,
                                       alpha_0=1.21, alpha_z=0.0,
                                       mass_min=10**(7.5), mass_max=10**(12.5),
-                                      use_pure_power_law=False):
-    alpha      = alpha_0
+                                      use_pure_power_law=False,
+                                      rng: Optional[np.random.Generator] = None):
+    if rng is None:
+        rng = np.random.default_rng()
+    alpha       = alpha_0
     mass_cutoff = mass_cutoff_0
     if use_pure_power_law:
-        mass_grid, cdf_grid = build_cdf_exponential_damping.__wrapped__\
-            if hasattr(build_cdf_exponential_damping, '__wrapped__') else \
-            _build_cdf_power_law_numpy(mass_min, mass_max, alpha)
+        mass_grid, cdf_grid = _build_cdf_power_law_numpy(mass_min, mass_max, alpha)
     else:
         mass_grid, cdf_grid = build_cdf_exponential_damping(
             mass_min, mass_max, alpha, mass_cutoff)
+
+    # sample_from_precomputed_cdf uses Numba's global RNG; seed it here
+    np.random.seed(rng.integers(0, 2**32 - 1))            # ← bridge to Numba RNG
     return sample_from_precomputed_cdf(n_binaries, mass_grid, cdf_grid)
  
  
@@ -495,18 +504,19 @@ def generate_smbhb_population(
     All sampling and computation is vectorised — no Python loops over binaries.
     """
     rng = np.random.default_rng(random_seed)
-    if random_seed is not None:
-        np.random.seed(random_seed)       # also seed the global state for Numba
+    np.random.seed(
+        rng.integers(0, 2**32 - 1) if random_seed is not None else None
+    )
  
     # ── frequencies ─────────────────────────────────────────────────────────
     n_threads    = nb.get_num_threads()
     thread_seeds = rng.integers(0, 2**32 - 1, size=n_threads)
     f = sample_gw_frequencies(n_binaries, thread_seeds, t_obs_max=T_obs_seconds)
- 
+
     # ── distances & redshifts ────────────────────────────────────────────────
-    D_max               = float(_CHI_FN(z_max))
-    D_comov, D_lum, z   = sample_comoving_distances(n_binaries, D_max, rng=rng)
- 
+    D_max             = float(_CHI_FN(z_max))
+    D_comov, D_lum, z = sample_comoving_distances(n_binaries, D_max, rng=rng)
+
     # ── masses ───────────────────────────────────────────────────────────────
     if mass_distribution == 'exponential_damping':
         M1 = sample_masses_exponential_damping(
@@ -514,16 +524,18 @@ def generate_smbhb_population(
             mass_cutoff_0=mass_cutoff_0, mass_cutoff_z=mass_cutoff_z,
             alpha_0=alpha_0, alpha_z=alpha_z,
             mass_min=mass_min, mass_max=mass_max,
+            rng=rng,                                       # ← pass rng through
         )
     else:
         M1 = sample_masses_power_law(
             n_binaries, z,
             alpha_0=alpha_0, alpha_z=alpha_z,
             mass_min=mass_min, mass_max=mass_max,
+            rng=rng,                                       # ← pass rng through
         )
- 
-    Mtot, Mc = compute_chirp_mass(M1, rng=rng)     # solar masses
- 
+
+    Mtot, Mc = compute_chirp_mass(M1, rng=rng)
+
     # ── sky positions & orientations ─────────────────────────────────────────
     ra   = rng.uniform(0,       2*np.pi, n_binaries)
     dec  = np.arcsin(rng.uniform(-1, 1,  n_binaries))

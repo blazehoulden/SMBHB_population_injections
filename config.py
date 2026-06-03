@@ -89,7 +89,7 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, n_binaries = None, compute_strain=False, T_obs_seconds=16.03 * 365.25 * 86400):
+def generate_population(config, smbhb_module, n_binaries = None, compute_strain=False, T_obs_seconds=16.03 * 365.25 * 86400, seed=None):
     """Generate SMBHB population with given configuration."""
     if compute_strain:
 
@@ -105,7 +105,7 @@ def generate_population(config, smbhb_module, n_binaries = None, compute_strain=
             mass_cutoff_z=0.0,
             compute_strain=compute_strain,
             # n_freq_bins=50,
-            random_seed=None,
+            random_seed=seed,
             T_obs_seconds=T_obs_seconds
         )
         # Convert masses if needed
@@ -125,7 +125,7 @@ def generate_population(config, smbhb_module, n_binaries = None, compute_strain=
             mass_cutoff_z=0.0,
             compute_strain=compute_strain,
             # n_freq_bins=50,
-            random_seed=None,
+            random_seed=seed,
             T_obs_seconds=T_obs_seconds
         )
         strain_data = None

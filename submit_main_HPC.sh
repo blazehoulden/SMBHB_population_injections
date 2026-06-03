@@ -211,6 +211,7 @@ submit_attempt() {
                 --config ${CONFIG} \
                 --target-snr ${TARGET_SNR} \
                 --snr-range ${SNR_LOW} ${SNR_HIGH} \
+                --noise-seed ${noise_seed} \
                 --clean-failed"
         )
         CLEAN_JOB=$(echo "$CLEAN_JOB" | tr -d '[:space:]')
@@ -250,6 +251,7 @@ submit_attempt() {
                 --output-dir ${OUTPUT_DIR} \
                 --sim-id ${sim_id} \
                 --task-id \$SLURM_ARRAY_TASK_ID \
+                --noise-seed ${noise_seed} \
                 ${SYNTHETIC_PTAS_FLAG} \
                 ${SYN_CONFIG_ARG}"
         )

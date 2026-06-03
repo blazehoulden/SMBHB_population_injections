@@ -931,26 +931,8 @@ def get_base_name(psrname):
 
 import matplotlib.pyplot as plt
 
-def _zero_jumps(psr):
-    """
-    Zero all JUMP parameter values after make_ideal_nofit has absorbed
-    their offsets into stoas. Prevents tempo2 C-level JUMP flag-matching
-    from accessing memory beyond the original TOA allocation on augmented tims.
-    """
-    try:
-        pars = psr.pars()
-    except Exception:
-        return
-    for par in pars:
-        if par.startswith('JUMP'):
-            try:
-                psr[par].val = 0.0
-                psr[par].fit = False
-            except Exception:
-                pass
-
             
-def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=False, seed=None):
+def simulate_psr_old(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=False, seed=None):
     psrname = psr.name
     basename = get_base_name(psrname)
 
@@ -958,13 +940,8 @@ def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, add_GWB=False, plot=
     print(f"  [{psrname}] zeroing residuals...", flush=True)
     make_ideal_nofit(psr)
 
-    # Step 2: NOW zero jump parameters — residuals are already flat,
-    # so zeroing jumps won't reintroduce offsets. This defuses the
-    # heap corruption: subsequent libstempo noise calls won't trigger
-    # tempo2's JUMP flag-matching routines on the augmented TOA arrays.
-    _zero_jumps(psr)
 
-    # Step 3: add red noise, white noise as before
+    # Step 2: add red noise, white noise as before
     psr_keys = {k: v for k, v in noise_dict.items() if k.startswith(basename)}
     
     if add_RN:
@@ -1505,7 +1482,7 @@ def _add_efac(psr, efac, flagid, flags, seed=None):
     if seed is not None:
         np.random.seed(seed)
     efacvec = np.ones(psr.nobs)
-    ind = np.array([flags in fv for fv in psr.flagvals(flagid)])
+    ind = np.array([fv == flags for fv in psr.flagvals(flagid)]) 
     efacvec[ind] = efac
     psr.stoas[:] += efacvec * psr.toaerrs * (1e-6 / day) * np.random.randn(psr.nobs)
 
@@ -1514,7 +1491,7 @@ def _add_equad(psr, equad, flagid, flags, seed=None):
     if seed is not None:
         np.random.seed(seed)
     equadvec = np.zeros(psr.nobs)
-    ind = np.array([flags in fv for fv in psr.flagvals(flagid)])
+    ind = np.array([fv == flags for fv in psr.flagvals(flagid)])
     equadvec[ind] = equad
     psr.stoas[:] += (equadvec / day) * np.random.randn(psr.nobs)
 
@@ -1601,3 +1578,65 @@ def simulate_psr(psr, noise_dict, add_WN=True, add_RN=True,
             _add_jitter(psr, ecorr, flagid='f', flags=sys, seed=seed)
 
     return psr
+
+import numpy as np
+import libstempo as LT
+
+def test_simulator_consistency(psr_path, par_path, noise_dict, seed=42, tol_frac=0.05):
+    """
+    Compare old (libstempo) vs new (reimplemented) simulate_psr.
+
+    Checks that per-component and total residual RMS agree within tol_frac
+    (default 5%) for a single pulsar.
+
+    Parameters
+    ----------
+    psr_path : str   path to .tim file
+    par_path : str   path to .par file
+    noise_dict : dict noise parameters
+    seed : int       RNG seed (same for both)
+    tol_frac : float fractional tolerance on RMS comparison
+    """
+    def load_fresh():
+        return LT.tempopulsar(parfile=par_path, timfile=psr_path, maxobs=30000)
+
+    results = {}
+    for label, use_lt in [('libstempo', True), ('reimplemented', False)]:
+        psr = load_fresh()
+        if use_lt:
+            simulate_psr_old(psr, noise_dict, add_WN=True, add_RN=True, seed=seed)
+        else:
+            simulate_psr(psr, noise_dict, add_WN=True, add_RN=True, seed=seed)
+        res_s = psr.residuals() * 86400.0          # days → seconds
+        results[label] = res_s
+        print(f"[{label}] RMS = {np.std(res_s)*1e6:.3f} µs")
+
+    rms_lt  = np.std(results['libstempo'])
+    rms_new = np.std(results['reimplemented'])
+    frac    = abs(rms_lt - rms_new) / rms_lt
+
+    print(f"\nRMS fractional difference: {frac*100:.2f}%  (tolerance: {tol_frac*100:.0f}%)")
+
+    # ── per-component checks ─────────────────────────────────────────────────
+    def _rms_component(add_WN, add_RN, label_suffix):
+        psr_lt  = load_fresh()
+        psr_new = load_fresh()
+        simulate_psr_old(psr_lt,  noise_dict, add_WN=add_WN, add_RN=add_RN, seed=seed)
+        simulate_psr(psr_new, noise_dict, add_WN=add_WN, add_RN=add_RN, seed=seed)
+        rms_lt  = np.std(psr_lt.residuals()  * 86400.0)
+        rms_new = np.std(psr_new.residuals() * 86400.0)
+        frac    = abs(rms_lt - rms_new) / (rms_lt + 1e-30)
+        print(f"  {label_suffix:20s}  LT={rms_lt*1e6:.3f} µs  "
+              f"new={rms_new*1e6:.3f} µs  diff={frac*100:.2f}%")
+        return frac
+
+    print("\nPer-component breakdown:")
+    f_rn = _rms_component(add_WN=False, add_RN=True,  label_suffix="red noise only")
+    f_wn = _rms_component(add_WN=True,  add_RN=False, label_suffix="white noise only")
+
+    assert f_rn < tol_frac, f"Red noise RMS differs by {f_rn*100:.1f}% > {tol_frac*100:.0f}%"
+    assert f_wn < tol_frac, f"White noise RMS differs by {f_wn*100:.1f}% > {tol_frac*100:.0f}%"
+    assert frac  < tol_frac, f"Total RMS differs by {frac*100:.1f}% > {tol_frac*100:.0f}%"
+
+    print("\n✓ All components within tolerance.")
+    return results
