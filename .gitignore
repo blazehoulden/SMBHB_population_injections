@@ -33,4 +33,6 @@ runs/
 old_successful_run_logs/
 psars_narrowband/
 scenario_tims/
+pre_synth_ptas_runs/
+tables/
 previous_run_old_configurations/

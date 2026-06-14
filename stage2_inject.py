@@ -101,7 +101,7 @@ if not _STAGE1_SETUP_IMPORTED:
         "f":        np.float32,
         "Mc":       np.float32,
         "Mtot":     np.float32,
-        "D_comov":  np.float32,
+        "D_comov":  np.float64,
         "z":        np.float32,
         "h0":       np.float32,
         "ra":       np.float16,
@@ -745,11 +745,12 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     """
     Baseline phase (subprocess):
       - load + filter baseline pulsars
-      - simulate noise; scale GW signal to target OS SNR
+      - simulate noise; retry with shifted seed if noise-only SNR too high
+      - scale GW signal to target OS SNR
       - save residuals; update shards with scale factor
       - optionally validate proxy
       - compute baseline CGW SNR (proxy-only mode: skip scaling, just validate)
-      - write phase_handoff.json for scenario subprocesses
+      - write phase_handoff.json (including winning noise_seed) for scenario subprocesses
     """
     sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
@@ -812,9 +813,9 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
         with open(sentinel, 'w') as fh:
             json.dump({'sim_id': args.sim_id, 'proxy_only': True,
                        'completed_at': time.strftime('%Y-%m-%dT%H:%M:%S')}, fh, indent=2)
-        # write minimal handoff so orchestrator doesn't error
         with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
             json.dump({'cumulative_scale': 1.0, 'Tspan_seconds': Tspan_seconds,
+                       'noise_seed': noise_seed,
                        'baseline_candidates': [], 'baseline_snrs': []}, fh)
         return
 
@@ -823,23 +824,48 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     combined_delta = _load_and_sum_toa_deltas(
         sim_out_dir, chunk_ids, psr_names, scenario=None)
 
-    print('\n🔊 [baseline] Simulating noise...')
-    noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
+    # ── noise simulation with retry on high noise-only SNR ───────────────────
+    max_noise_retries = 10
+    cumulative_scale  = None
+    pta               = None
+    epsrs             = None
+    winning_seed      = noise_seed
 
-    print('\n📐 [baseline] Scaling GW signal...')
-    try:
-        cumulative_scale, pta, epsrs = _scale_and_iterate(
-            psrs_clean=psrs_clean,
-            delta_stoas=combined_delta,
-            noise_stoas=noise_stoas,
-            target_snr=args.target_snr,
-            snr_low=snr_low, snr_high=snr_high,
-            Tspan_seconds=Tspan_seconds,
-            raw_noise_params=raw_noise_params,
-        )
-    except RuntimeError as e:
-        sys.exit(f'ERROR: {e}')
-    print(f'✓ Converged — scale={cumulative_scale:.6f}')
+    for noise_attempt in range(max_noise_retries):
+        attempt_seed = noise_seed + noise_attempt
+        if noise_attempt == 0:
+            print(f'\n🔊 [baseline] Simulating noise (seed={attempt_seed})...')
+        else:
+            print(f'\n🔁 [baseline] Retrying noise simulation '
+                  f'(attempt {noise_attempt + 1}/{max_noise_retries}, '
+                  f'seed={attempt_seed})...')
+        noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=attempt_seed)
+
+        print('\n📐 [baseline] Scaling GW signal...')
+        try:
+            cumulative_scale, pta, epsrs = _scale_and_iterate(
+                psrs_clean=psrs_clean,
+                delta_stoas=combined_delta,
+                noise_stoas=noise_stoas,
+                target_snr=args.target_snr,
+                snr_low=snr_low, snr_high=snr_high,
+                Tspan_seconds=Tspan_seconds,
+                raw_noise_params=raw_noise_params,
+            )
+            winning_seed = attempt_seed
+            print(f'✓ Converged — scale={cumulative_scale:.6f}  '
+                  f'noise_seed={winning_seed}')
+            break
+        except ValueError as e:
+            if 'noise-only SNR' in str(e) or 'SNR band ceiling' in str(e):
+                print(f'  ⚠️  {e}')
+                if noise_attempt == max_noise_retries - 1:
+                    sys.exit(f'ERROR: noise-only SNR too high after '
+                             f'{max_noise_retries} attempts — giving up')
+                continue
+            sys.exit(f'ERROR: {e}')
+        except RuntimeError as e:
+            sys.exit(f'ERROR: {e}')
 
     _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
                         combined_delta, cumulative_scale, scenario=None)
@@ -878,10 +904,10 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
 
     del pta, epsrs; gc.collect()
 
-    # write handoff for scenario subprocesses
     handoff = {
         'cumulative_scale':    float(cumulative_scale),
         'Tspan_seconds':       Tspan_seconds,
+        'noise_seed':          winning_seed,
         'baseline_candidates': [[c, i, float(p)]
                                 for c, i, p in (baseline_candidates or [])],
         'baseline_snrs':       (baseline_snrs.tolist()
@@ -889,15 +915,15 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     }
     with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
         json.dump(handoff, fh)
-    print(f'✓ [baseline] Wrote {HANDOFF_FILENAME}')
+    print(f'✓ [baseline] Wrote {HANDOFF_FILENAME} (noise_seed={winning_seed})')
 
 
-def _phase_scenario(args, scenario_label, combined_scenarios, noise_seed):
+def _phase_scenario(args, scenario_label, combined_scenarios):
     """
     Scenario phase (subprocess, one per scenario):
-      - read handoff (cumulative_scale, baseline candidate ranking)
+      - read handoff (cumulative_scale, baseline candidate ranking, noise_seed)
       - load + filter scenario pulsars
-      - simulate noise with same seed as baseline
+      - simulate noise with same seed as baseline (from handoff)
       - save residuals; clean chunk files
       - build Enterprise PTA
       - compute CGW SNR for top-N by baseline SNR; write to shards
@@ -913,6 +939,9 @@ def _phase_scenario(args, scenario_label, combined_scenarios, noise_seed):
 
     cumulative_scale    = handoff['cumulative_scale']
     Tspan_seconds       = handoff['Tspan_seconds']
+    noise_seed          = handoff.get('noise_seed', args.noise_seed_base + args.sim_id**2 * 100
+                                  if args.noise_seed_base is not None
+                                  else args.sim_id * 1000)
     baseline_candidates = [(c, i, p) for c, i, p in handoff['baseline_candidates']]
     baseline_snrs       = np.array(handoff['baseline_snrs'], dtype=np.float64)
 
@@ -1001,14 +1030,14 @@ def process_sim(
 
     def _common_argv():
         argv = [
-            '--output-dir',  args.output_dir,
-            '--config',      args.config,
-            '--target-snr',  str(args.target_snr),
-            '--snr-range',   str(args.snr_range[0]), str(args.snr_range[1]),
-            '--sim-id',      str(sim_id),
-            '--n-chunks',    str(args.n_chunks),
-            '--noise-seed',  str(noise_seed),
-            '--n-test',      str(args.n_test),
+            '--output-dir',      args.output_dir,
+            '--config',          args.config,
+            '--target-snr',      str(args.target_snr),
+            '--snr-range',       str(args.snr_range[0]), str(args.snr_range[1]),
+            '--sim-id',          str(sim_id),
+            '--n-chunks',        str(args.n_chunks),
+            '--noise-seed-base', str(args.noise_seed_base),  # ← was --noise-seed
+            '--n-test',          str(args.n_test),
         ]
         if args.cgw:              argv.append('--cgw')
         if args.validate_proxy:   argv.append('--validate-proxy')
@@ -1222,7 +1251,8 @@ def parse_args():
     p.add_argument('--proxy-only',           action='store_true')
     p.add_argument('--n-test',               type=int, default=1_000)
     p.add_argument('--clean-failed',         action='store_true')
-    p.add_argument('--noise-seed',           type=int, default=None)
+    p.add_argument('--noise-seed-base',           type=int, default=None)
+    p.add_argument('--n-sims', type=int, default=1, help='Total number of simulations (for seeding purposes)')
     p.add_argument('--synthetic-ptas',       action='store_true', default=False)
     p.add_argument('--synthetic-pta-config', type=str, default=None)
     # Internal subprocess dispatch flags — not used by sbatch scripts directly
@@ -1258,6 +1288,12 @@ def main():
     if args.sim_id is None:
         print('ERROR: --sim-id required', file=sys.stderr); sys.exit(1)
 
+    root_sq = np.random.SeedSequence(args.noise_seed_base)
+    sim_seq = root_sq.spawn(10000)[args.sim_id]
+
+    rng = np.random.default_rng(sim_seq)
+    seed_int = rng.integers(2**31).item()
+
     # Resolve synthetic scenarios
     if args.synthetic_ptas:
         if args.synthetic_pta_config:
@@ -1271,7 +1307,7 @@ def main():
     combined_scenarios = dict(DEFAULT_SCENARIOS)
     combined_scenarios.update(syn_scenarios)
 
-    noise_seed = (args.noise_seed + args.sim_id**2 * 100) if args.noise_seed is not None else args.sim_id * 1000
+    noise_seed = (args.noise_seed_base + args.sim_id**2 * 100) if args.noise_seed_base is not None else args.sim_id * 1000
 
     # ── Subprocess phase dispatch ─────────────────────────────────────────────
     # These branches are only entered when this script is called by _run_phase.
@@ -1282,8 +1318,8 @@ def main():
     if args.phase == 'scenario':
         if not args.phase_scenario:
             sys.exit('ERROR: --phase scenario requires --phase-scenario <label>')
-        _phase_scenario(args, args.phase_scenario, combined_scenarios, noise_seed)
-        sys.exit(0)
+        _phase_scenario(args, args.phase_scenario, combined_scenarios)  # ← indented
+        sys.exit(0)                                                      # ← indented
 
     # ── Top-level orchestrator ────────────────────────────────────────────────
     print(f'\n{"="*60}')

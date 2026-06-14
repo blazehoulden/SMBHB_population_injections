@@ -470,11 +470,12 @@ def parse_args():
     p.add_argument('--task-id',     type=int, default=None,
                    help='Flat array task ID (overrides $SLURM_ARRAY_TASK_ID)')
     p.add_argument('--sim-id',      type=int, required=True)
-    p.add_argument('--noise-seed',           type=int, default=None)
+    p.add_argument('--noise-seed-base',           type=int, default=None)
     # JSON string defining synthetic PTA scenarios.
     # Keys are scenario labels; values match data_loader.SCENARIOS format.
     # Example: '{"5x_cadence": {"cadence_factor": 5, "toaerr_factor": 1.0, "best_only": true}}'
     # Pass '{}' or omit to run baseline only.
+    p.add_argument('--n-sims', type=int, default=1, help='Total number of simulations (for seeding purposes)')
     p.add_argument(
         '--synthetic-pta-config',
         type=str,
@@ -510,6 +511,13 @@ def main():
 
     sim_id   = args.sim_id
     chunk_id = task_id   # task_id is now directly the chunk_id (0..N_CHUNKS-1)
+
+    root_sq = np.random.SeedSequence(args.noise_seed_base)
+    sim_seq = root_sq.spawn(max(args.n_sims, args.sim_id + 1))[args.sim_id]
+    chunk_seq = sim_seq.spawn(args.n_chunks)[args.task_id]
+
+    rng = np.random.default_rng(chunk_seq)
+    seed_int = rng.integers(2**31).item()
 
     # Per-simulation output directory
     sim_out_dir = os.path.join(args.output_dir, f'sim{sim_id:03d}')
@@ -555,7 +563,7 @@ def main():
         config=selected_config,
         smbhb_module=smbhb_module,
         n_binaries=args.chunk_size,
-        seed=args.noise_seed + sim_id * 1234 + chunk_id * 1234 if args.noise_seed is not None else None,
+        seed=seed_int,
     )
     print(f'✓ Generated {len(population_batch):,} binaries')
 

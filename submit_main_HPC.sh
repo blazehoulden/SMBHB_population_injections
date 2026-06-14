@@ -104,6 +104,8 @@ MAX_RETRIES=2
 DRY_RUN=0
 PROXY_ONLY_FLAG=""
 N_TEST="${SMBHB_N_TEST:-1000}"
+SIM_START=0
+SIM_END=""   # empty = N_SIMS - 1
 
 # Stage 1: pop synthesis + NUFFT (all scenarios done inside one task).
 # Time is higher than the old script to account for synthetic scenario NUFFTs.
@@ -144,6 +146,8 @@ while [[ $# -gt 0 ]]; do
         --s2-cpus)               S2_CPUS="$2";                     shift 2 ;;
         --proxy-only)            PROXY_ONLY_FLAG="--proxy-only";   shift   ;;
         --n-test)                N_TEST="$2";                      shift 2 ;;
+        --sim-start)  SIM_START="$2";  shift 2 ;;
+        --sim-end)    SIM_END="$2";    shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -160,6 +164,10 @@ mkdir -p "${OUTPUT_DIR}/logs"
 SYN_CONFIG_ARG=""
 if [[ -n "$SYNTHETIC_PTA_CONFIG" ]]; then
     SYN_CONFIG_ARG="--synthetic-pta-config '${SYNTHETIC_PTA_CONFIG}'"
+fi
+
+if [[ -z "${SIM_END:-}" ]]; then
+    SIM_END=$(( SIM_START + N_SIMS - 1 ))
 fi
 
 # =============================================================================
@@ -211,7 +219,8 @@ submit_attempt() {
                 --config ${CONFIG} \
                 --target-snr ${TARGET_SNR} \
                 --snr-range ${SNR_LOW} ${SNR_HIGH} \
-                --noise-seed ${noise_seed} \
+                --noise-seed-base ${NOISE_SEED_BASE} \
+                --n-sims ${N_SIMS} \
                 --clean-failed"
         )
         CLEAN_JOB=$(echo "$CLEAN_JOB" | tr -d '[:space:]')
@@ -223,9 +232,8 @@ submit_attempt() {
     # Each stage-2 depends only on its own sim's stage-1 array, so sims
     # pipeline independently (sim001's stage-2 doesn't wait for sim099's
     # stage-1 to finish).
-    for sim_id in $(seq 0 $(( N_SIMS - 1 ))); do
+    for sim_id in $(seq $SIM_START $SIM_END); do
         sim_id_padded=$(printf '%03d' "$sim_id")
-        noise_seed=$(( NOISE_SEED_BASE + sim_id * 1000 ))
 
         local s1_dep_flag=""
         [[ -n "$clean_dep_flag" ]] && s1_dep_flag="--dependency=${clean_dep_flag}"
@@ -251,7 +259,8 @@ submit_attempt() {
                 --output-dir ${OUTPUT_DIR} \
                 --sim-id ${sim_id} \
                 --task-id \$SLURM_ARRAY_TASK_ID \
-                --noise-seed ${noise_seed} \
+                --noise-seed-base ${NOISE_SEED_BASE} \
+                --n-sims ${N_SIMS} \
                 ${SYNTHETIC_PTAS_FLAG} \
                 ${SYN_CONFIG_ARG}"
         )
@@ -276,7 +285,8 @@ submit_attempt() {
                 --sim-id ${sim_id} \
                 --n-chunks ${N_CHUNKS} \
                 --n-test ${N_TEST} \
-                --noise-seed ${noise_seed} \
+                --noise-seed-base ${NOISE_SEED_BASE} \
+                --n-sims ${N_SIMS} \
                 ${CGW_FLAG} \
                 ${PROXY_ONLY_FLAG} \
                 ${SYNTHETIC_PTAS_FLAG} \
@@ -285,7 +295,7 @@ submit_attempt() {
         S2_JOB=$(echo "$S2_JOB" | tr -d '[:space:]')
         ALL_S2_JOBS+=("$S2_JOB")
 
-        log "  sim${sim_id_padded}: s1=${S1_JOB}  s2=${S2_JOB}  noise_seed=${noise_seed}"
+        log "  sim${sim_id_padded}: s1=${S1_JOB}  s2=${S2_JOB}  noise_seed_base=${NOISE_SEED_BASE}"
     done
 
     # Return colon-separated list of all s2 job IDs for the retry dependency
@@ -312,7 +322,7 @@ log "  S2 jobs       : ${N_SIMS}  (one per sim, independent)"
 log "  CGW           : $([[ -n "${CGW_FLAG}" ]] && echo on || echo off)"
 log "  Synthetic PTAs: $([[ -n "${SYNTHETIC_PTAS_FLAG}" ]] && echo on || echo off)"
 [[ -n "$SYNTHETIC_PTA_CONFIG" ]] && log "  Syn config    : ${SYNTHETIC_PTA_CONFIG}"
-log "  Noise seed    : base=${NOISE_SEED_BASE}  (per sim: base + sim_id × 1000)"
+log "  Noise seed    : base=${NOISE_SEED_BASE}  (per sim: base)"
 log "  Proxy only    : $([[ -n "${PROXY_ONLY_FLAG}" ]] && echo on || echo off)"
 log "  N test        : ${N_TEST}"
 log "  Max retries   : ${MAX_RETRIES}"

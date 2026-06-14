@@ -166,23 +166,19 @@ bash submit_pipeline.sh --cgw --output-dir /scratch/$USER/run_cgw
 Results appear in each `pop_{NNNN}_result.json` under the `"cgw"` key.
 
 ### Optimistic settings
-#### new settings
-sbatch submit_main_HPC.sh --config optimistic --simulations 50 --chunk-size 5_000_000 --n-chunks 1 --cgw --s1-time "00:45:00" --s1-mem "15G" --s2-time "04:40:00" --s2-mem "40G" --synthetic-ptas --snr-range 3.5 4.0
-
-sbatch submit_main_HPC.sh --config optimistic --simulations 355 --chunk-size 10_000_000 --n-chunks 1 --cgw --s1-time "00:25:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G"
+```bash
+sbatch submit_main_HPC.sh --config optimistic --simulations 2 --chunk-size 5_000_000 --n-chunks 1 --cgw --s1-time "00:55:00" --s1-mem "15G" --s2-time "04:40:00" --s2-mem "38G" --synthetic-ptas --snr-range 3.5 4.0 --sim-start 471
+```
 
 ### Pessimistic settings
-### new settings
-sbatch submit_main_HPC.sh --config pessimistic --simulations 50 --chunk-size 50_000_000 --n-chunks 8  --cgw --s1-time "02:20:00" --s1-mem "30G" --s2-time "04:40:00" --s2-mem "44G" --synthetic-ptas --snr-range 3.5 4.0
-
-
-sbatch submit_main_HPC.sh --config pessimistic --simulations 1 --chunk-size 50_000_000 --n-chunks 1  --cgw --s1-time "00:50:00" --s1-mem "28G" --s2-time "02:00:00" --s2-mem "36G"
+```bash
+sbatch submit_main_HPC.sh --config pessimistic --simulations 2 --chunk-size 50_000_000 --n-chunks 8  --cgw --s1-time "03:35:00" --s1-mem "30G" --s2-time "04:50:00" --s2-mem "38G" --synthetic-ptas --snr-range 3.5 4.0 --sim-start 547
+```
 
 ### Realistic settings
-#### new settings
-sbatch submit_main_HPC.sh --config realistic --simulations 50 --chunk-size 20_000_000 --n-chunks 1 --cgw --s1-time "01:15:00" --s1-mem "20G" --s2-time "04:40:00" --s2-mem "44G" --synthetic-ptas --snr-range 3.5 4.0
-
-sbatch submit_main_HPC.sh --config realistic --simulations 1 --chunk-size 50_000_000 --n-chunks 10 --cgw --s1-time "00:50:00" --s1-mem "28G" --s2-time "02:00:00" --s2-mem "36G"
+```bash
+sbatch submit_main_HPC.sh --config realistic --simulations 3 --chunk-size 20_000_000 --n-chunks 1 --cgw --s1-time "01:35:00" --s1-mem "20G" --s2-time "04:40:00" --s2-mem "38G" --synthetic-ptas --snr-range 3.5 4.0 --sim-start 508
+```
 
 ### Test settings
 sbatch submit_main_HPC.sh --config test --simulations 1 --chunk-size 20_000 --n-chunks 1 --cgw --s1-time "00:10:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G" --proxy-only --n-test 20_000

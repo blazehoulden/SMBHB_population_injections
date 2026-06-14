@@ -214,10 +214,14 @@ def parse_pulsar_parameters(json_file_path):
 
 #### Adapting to simulate pulsars with different cadences and errors
 
+# BEST_PSRS = (
+#     'J0437-4715', 'J1909-3744', 'J1713+0747',
+#     'J0030+0451', 'J1744-1134',
+# )
 
 BEST_PSRS = (
-    'J0437-4715', 'J1909-3744', 'J1713+0747',
-    'J0030+0451', 'J1744-1134',
+    'J1713+0747', 'J1909-3744', 'J2043+1711',
+    'J1741+1351', 'J1600-3053',
 )
  
 # Each scenario entry:
