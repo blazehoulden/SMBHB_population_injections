@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
 """
-Stage 2 — Noise simulation, SNR scaling, and CGW analysis.
+Stage 2 — Noise simulation, SNR scaling (via chunk selection), and CGW analysis.
 
-For each simulation:
-  1. Load baseline pulsars; sum Δstoa chunks; simulate noise; scale GW
-     signal to target OS SNR.
-  2. For each synthetic PTA scenario: load scenario pulsars; sum scenario
-     Δstoa chunks; simulate noise with the SAME seed; reuse the baseline
-     scale factor; compute CGW SNRs; write results into the same shard under
-     a scenario-specific field (e.g. cgw_snr_5x_cadence).
-  3. Write per-sim summary object.
+Key change from previous version
+─────────────────────────────────
+The old design rescaled GW signal amplitudes (h0, D_comov, z) to hit the
+target OS SNR.  This is physically incorrect — it changes the source population
+rather than modelling a real observational outcome.
 
-The baseline scale factor is applied to all scenarios so that the injected
-GW population is drawn at the same physical distance / strain in every case —
-only the PTA sensitivity changes between scenarios.
+The new design exploits the fact that the OS SNR scales as √N_binaries:
 
-Memory strategy
-───────────────
+  SNR(k sub-chunks) ≈ SNR(N_total sub-chunks) × √(k / N_total)
+
+We find the integer k ∈ [1, N_total_sub_chunks] such that including exactly k
+sub-chunks gives an OS SNR inside [snr_low, snr_high].  All source parameters
+(h0, D_comov, z) remain at their physical values — nothing is rescaled.
+
+The same k is used for all synthetic PTA scenarios so that every scenario sees
+the same injected GW population (physically consistent).
+
+Subprocess architecture
+───────────────────────
 Each phase (baseline + one per synthetic scenario) runs in its own subprocess
-so that libstempo/tempo2's C-level global state is fully cleared between
-phases.  free()-level heap corruption (the OOM-kill cause) cannot occur
-because each subprocess exits completely before the next starts.
+so that libstempo/tempo2 C-level global state is fully cleared between phases.
 
-Within each subprocess only one Enterprise PTA is alive at a time.  The
-baseline CGW SNR ranking is computed once and reused by synthetic scenarios
-(top-N by actual baseline inner-product SNR) — no repeated proxy scans.
-Per-chunk Δstoa files are deleted after residuals are saved.
+Phase handoff (metadata/phase_handoff.json)
+───────────────────────────────────────────
+  n_active_sub_chunks   int    — number of sub-chunks included (the "k")
+  active_shard_ids      list   — list of [chunk_id, sub_id] pairs actually used
+  Tspan_seconds         float
+  noise_seed            int
+  baseline_candidates   list   — [[chunk_id, sub_id, local_idx, proxy], ...]
+  baseline_snrs         list   — floats
 
-Subprocess handoff
-──────────────────
-The baseline subprocess writes metadata/phase_handoff.json containing:
-  cumulative_scale    float
-  Tspan_seconds       float
-  baseline_candidates list of [chunk_id, local_idx, proxy]
-  baseline_snrs       list of float
-Scenario subprocesses read this file; the parent orchestrator reads only
-cumulative_scale from it for the completion sentinel.
+Output layout (per sim)
+───────────────────────
+  populations/     subpop_{chunk:03d}_{sub:03d}.pkl.gz  (all shards, unchanged)
+  stoas/           chunk_{chunk:04d}_{sub:04d}[_<scenario>].npz  (deleted after use)
+  residuals/       noise/ population/ combined/    (baseline, active sub-chunks only)
+  residuals_<scen>/                                (synthetic scenarios)
+  metadata/        config.json  phase_handoff.json  stage2_complete.json
 """
 
 import argparse
@@ -46,10 +50,12 @@ import heapq
 import json
 import os
 import pickle
+import re
 import subprocess
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -83,17 +89,18 @@ from enterprise.pulsar import Pulsar as EnterprisePulsar
 from pta_builder import build_pta_and_params
 
 N_PRE_FILTER_PER_CHUNK    = 12_500
-N_GLOBAL_CGW_CANDIDATES   = 12_500   # baseline: proxy pre-filter budget
-N_SCENARIO_CGW_CANDIDATES = 1_000    # synthetic PTAs: top-N by BASELINE cgw_snr
-N_RESCUE                  = 500      # per frequency regime
+N_GLOBAL_CGW_CANDIDATES   = 12_500
+N_SCENARIO_CGW_CANDIDATES = 1_000
+N_RESCUE                  = 500
 N_TOP_SOURCES             = 50
-MAX_SCALE_ITER            = 20
+MAX_SCALE_ITER            = 20       # max bisection steps for chunk-count search
 
-HANDOFF_FILENAME          = 'phase_handoff.json'
+HANDOFF_FILENAME = 'phase_handoff.json'
 
 
 # =============================================================================
-# ShardedPickleStore (self-contained fallback if stage1_setup not importable)
+# ShardedPickleStore  (two-index: chunk × sub-chunk)
+# self-contained fallback if stage1_setup not importable
 # =============================================================================
 
 if not _STAGE1_SETUP_IMPORTED:
@@ -101,7 +108,7 @@ if not _STAGE1_SETUP_IMPORTED:
         "f":        np.float32,
         "Mc":       np.float32,
         "Mtot":     np.float32,
-        "D_comov":  np.float64,
+        "D_comov":  np.float32,
         "z":        np.float32,
         "h0":       np.float32,
         "ra":       np.float16,
@@ -114,24 +121,30 @@ if not _STAGE1_SETUP_IMPORTED:
     SCALAR_FIELDS = list(FIELD_DTYPES.keys())
 
     class ShardedPickleStore:
-        """One pkl.gz per chunk stored in a single directory."""
+        """
+        One pkl.gz per (chunk_id, sub_id) pair.
+
+        File pattern:  subpop_{chunk_id:03d}_{sub_id:03d}.pkl.gz
+        available() → sorted list of (chunk_id, sub_id) int tuples.
+        """
 
         def __init__(self, directory: str, compress_level: int = 6):
-            from pathlib import Path
             self.dir = Path(directory)
             self.dir.mkdir(parents=True, exist_ok=True)
             self.compress_level = compress_level
 
-        def write(self, idx: int, pop) -> None:
-            self._dump(self._path(idx), self._downcast(pop))
+        def write(self, chunk_id: int, sub_id: int, pop) -> None:
+            self._dump(self._path(chunk_id, sub_id), self._downcast(pop))
 
-        def read(self, idx: int):
-            with gzip.open(self._path(idx), "rb") as f:
+        def read(self, chunk_id: int, sub_id: int):
+            with gzip.open(self._path(chunk_id, sub_id), "rb") as f:
                 return pickle.load(f)
 
-        def update(self, idx: int, h0=None, D_comov=None, z=None,
-                   cgw_snr=None, cgw_proxy=None, amp_A=None, amp_B=None) -> None:
-            pop = self.read(idx)
+        def update(self, chunk_id: int, sub_id: int,
+                   h0=None, D_comov=None, z=None,
+                   cgw_snr=None, cgw_proxy=None,
+                   amp_A=None, amp_B=None) -> None:
+            pop = self.read(chunk_id, sub_id)
             if h0        is not None: pop.h0        = h0.astype(np.float32)
             if D_comov   is not None: pop.D_comov   = D_comov.astype(np.float32)
             if z         is not None: pop.z         = z.astype(np.float32)
@@ -143,16 +156,21 @@ if not _STAGE1_SETUP_IMPORTED:
             if amp_B is not None:
                 for psr, arr in amp_B.items():
                     pop.amp_B[psr] = arr.astype(np.float32)
-            self._dump(self._path(idx), pop)
+            self._dump(self._path(chunk_id, sub_id), pop)
 
-        def available(self) -> list:
-            return sorted(
-                int(p.name.split("_")[1].split(".")[0])
-                for p in self.dir.glob("subpop_*.pkl.gz")
-            )
+        def available(self):
+            results = []
+            pattern = re.compile(r"subpop_(\d{3})_(\d{3})\.pkl\.gz$")
 
-        def _path(self, idx: int):
-            return self.dir / f"subpop_{idx:03d}.pkl.gz"
+            for p in self.dir.glob("subpop_*.pkl.gz"):
+                m = pattern.match(p.name)
+                if m:
+                    results.append((int(m.group(1)), int(m.group(2))))
+
+            return sorted(results)
+
+        def _path(self, chunk_id: int, sub_id: int) -> Path:
+            return self.dir / f"subpop_{chunk_id:03d}_{sub_id:03d}.pkl.gz"
 
         def _dump(self, path, obj) -> None:
             with gzip.open(path, "wb", compresslevel=self.compress_level) as f:
@@ -171,25 +189,30 @@ if not _STAGE1_SETUP_IMPORTED:
 
 
 # =============================================================================
-# TOA delta loading
+# TOA delta loading  (two-index naming: chunk × sub)
 # =============================================================================
 
-def _delta_filename(chunk_id: int, scenario: Optional[str] = None) -> str:
+def _delta_filename(chunk_id: int, sub_id: int,
+                    scenario: Optional[str] = None) -> str:
+    """chunk_{chunk:04d}_{sub:04d}[_<scenario>].npz"""
     suffix = f'_{scenario}' if scenario else ''
-    return f'chunk_{chunk_id:04d}{suffix}.npz'
+    return f'chunk_{chunk_id:04d}_{sub_id:04d}{suffix}.npz'
 
 
 def _load_and_sum_toa_deltas(
-    sim_out_dir: str,
-    chunk_ids:   List[int],
-    psr_names:   List[str],
-    scenario:    Optional[str] = None,
+    sim_out_dir:  str,
+    shard_ids:    List[Tuple[int, int]],   # (chunk_id, sub_id) pairs to include
+    psr_names:    List[str],
+    scenario:     Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
-    """Sum per-chunk Δstoa .npz files for a given scenario across all chunks."""
+    """
+    Sum per-shard Δstoa .npz files for a given scenario across all active shards.
+    shard_ids is the ACTIVE subset (the k chosen by chunk-count selection).
+    """
     combined: Dict[str, Optional[np.ndarray]] = {n: None for n in psr_names}
 
-    for chunk_id in chunk_ids:
-        fname = _delta_filename(chunk_id, scenario)
+    for chunk_id, sub_id in shard_ids:
+        fname = _delta_filename(chunk_id, sub_id, scenario)
         fpath = os.path.join(sim_out_dir, 'stoas', fname)
         if not os.path.isfile(fpath):
             sys.exit(f'ERROR: missing delta file: {fpath}')
@@ -200,10 +223,52 @@ def _load_and_sum_toa_deltas(
                 arr = data[name].astype(np.float64)
                 combined[name] = arr if combined[name] is None else combined[name] + arr
 
-    print(f'  Summed Δstoas across {len(chunk_ids)} chunks '
+    print(f'  Summed Δstoas across {len(shard_ids)} shards '
           f'[scenario={scenario or "baseline"}] for {len(combined)} pulsars')
     return combined  # type: ignore[return-value]
 
+
+def _cleanup_shard_stoas(
+    sim_out_dir: str,
+    shard_ids:   List[Tuple[int, int]],
+    scenario:    Optional[str] = None,
+) -> None:
+    """Delete .npz files for the given shard_ids and scenario."""
+    stoa_dir = os.path.join(sim_out_dir, 'stoas')
+    removed, freed_bytes = 0, 0
+    for chunk_id, sub_id in shard_ids:
+        fpath = os.path.join(stoa_dir, _delta_filename(chunk_id, sub_id, scenario))
+        if os.path.isfile(fpath):
+            freed_bytes += os.path.getsize(fpath)
+            os.remove(fpath)
+            removed += 1
+    try:
+        os.rmdir(stoa_dir)
+        dir_note = '  — stoas/ dir removed'
+    except OSError:
+        dir_note = ''
+    print(f'  🗑️  Cleaned {removed} shard files '
+          f'[scenario={scenario or "baseline"}]  '
+          f'({freed_bytes / 1e6:.1f} MB freed){dir_note}')
+
+def _cleanup_inactive_population_shards(
+    store:         ShardedPickleStore,
+    all_shards:    List[Tuple[int, int]],
+    active_shards: List[Tuple[int, int]],
+) -> None:
+    """Delete population shard pkl.gz files that are not in active_shards."""
+    active_set = set(active_shards)
+    inactive   = [s for s in all_shards if s not in active_set]
+    removed, freed_bytes = 0, 0
+    for chunk_id, sub_id in inactive:
+        path = store._path(chunk_id, sub_id)
+        if path.is_file():
+            freed_bytes += path.stat().st_size
+            path.unlink()
+            removed += 1
+    print(f'  🗑️  Removed {removed} inactive population shards '
+          f'({freed_bytes / 1e6:.1f} MB freed)  '
+          f'({len(active_set)} active shards retained)')
 
 # =============================================================================
 # Noise simulation (seeded)
@@ -220,8 +285,9 @@ def _simulate_noise(
     Using the same seed across scenarios ensures noise realisations are
     comparable — only PTA sensitivity differs.
     """
-    for psr in psrs_clean:
-        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True, seed=seed)
+    for i, psr in enumerate(psrs_clean):
+        psr_seed = seed + i * 13579 if seed is not None else None
+        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True, seed=psr_seed)
     return {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
 
 
@@ -230,17 +296,13 @@ def _simulate_noise(
 # =============================================================================
 
 def _build_pta(psrs_libstempo, raw_noise_params, Tspan):
-    """
-    Build an Enterprise PTA from libstempo pulsar objects.
-    Returns (pta, enterprise_psrs).  Caller is responsible for deleting both.
-    """
     enterprise_psrs = [
         EnterprisePulsar(psr, ephem='DE440', backend='tempo2')
         for psr in psrs_libstempo
     ]
     pta, _, _ = build_pta_and_params(
         psrs=enterprise_psrs,
-        noise_params_15yr=raw_noise_params,
+        noise_params=raw_noise_params,
         Tspan=Tspan,
     )
     gc.collect()
@@ -248,117 +310,293 @@ def _build_pta(psrs_libstempo, raw_noise_params, Tspan):
 
 
 # =============================================================================
-# SNR scaling
+# Chunk-count SNR selection
 # =============================================================================
-
-def _scale_and_iterate(
+#
+# Physical motivation
+# ───────────────────
+# The GW background from N_total independent binaries produces an OS signal
+# that grows as √N (central limit theorem in the quadratic OS estimator).
+# Therefore:
+#
+#   SNR(k) ≈ SNR(N_total) × √(k / N_total)
+#
+# We want SNR(k) ∈ [snr_low, snr_high].  The analytic estimate gives a first
+# guess; we then verify with actual OS evaluations and bisect if needed.
+#
+# Source amplitudes h0, D_comov, z are NEVER modified — the population stays
+# at its physical values.  Only the number of included sub-chunks changes.
+#
+# The sub-chunks to include are selected in a fixed order (shard_ids[:k]) so
+# the selection is deterministic and reproducible.
+def _snr_for_shard_subset(
+    shard_ids:       List[Tuple[int, int]],
+    sim_out_dir:     str,
+    psr_names:       List[str],
+    noise_stoas:     Dict[str, np.ndarray],
     psrs_clean,
-    delta_stoas:     Dict[str, np.ndarray],
+    raw_noise_params,
+    Tspan_seconds:   float,
+    curn_components: int = 120,
+    rn_components:   int  = 120,
+) -> float:
+    """Evaluate OS SNR for an arbitrary subset of shards (helper)."""
+    combined_delta = _load_and_sum_toa_deltas(
+        sim_out_dir, shard_ids, psr_names, scenario=None)
+    signal_stoas = {n: noise_stoas[n] + combined_delta[n] for n in noise_stoas}
+    snr, _, _ = compute_population_snr(
+        psrs_clean=psrs_clean,
+        population=None,
+        raw_noise_params=raw_noise_params,
+        Tspan=Tspan_seconds,
+        current_stoas=signal_stoas,
+        curn_components=curn_components,
+        rn_components=rn_components,
+    )
+    return float(snr)
+
+
+def _select_active_shards(
+    all_shard_ids:   List[Tuple[int, int]],
+    psrs_clean,
+    raw_noise_params,
+    sim_out_dir:     str,
+    psr_names:       List[str],
     noise_stoas:     Dict[str, np.ndarray],
     target_snr:      float,
     snr_low:         float,
     snr_high:        float,
     Tspan_seconds:   float,
-    raw_noise_params,
     max_iterations:  int = MAX_SCALE_ITER,
-    curn_components: int = 14,
-    rn_components:   int = 30,
-) -> Tuple[float, object, list]:
+    curn_components: int = 120,
+    rn_components:   int = 120,
+) -> Tuple[List[Tuple[int, int]], float]:
     """
-    Iteratively scale the combined GW TOA signal until the OS SNR falls in
-    [snr_low, snr_high].  Uses analytic first step then log-midpoint bisection.
+    Find a subset of all_shard_ids giving OS SNR ∈ [snr_low, snr_high].
 
-    Returns (cumulative_scale, pta, enterprise_psrs).
-    delta_stoas is updated in-place to contain the final scaled signal.
+    Primary strategy: bisect on the prefix all_shard_ids[:k].
+    Fallback strategy: when the prefix-bisection bracket collapses without
+    a valid k (happens when individual chunks contain unusually loud sources
+    that break the √k scaling assumption), we:
+
+      1. Find the largest valid prefix k* where SNR < snr_low  (the "floor").
+      2. Scan every remaining chunk individually and evaluate SNR(floor_shards
+         + [candidate_chunk]).
+      3. Accept the first candidate that lands in [snr_low, snr_high].
+         If multiple would overshoot, take the one that overshoots least
+         (closest to target from above) rather than giving up.
+
+    This way we never fail just because the population happens to be lumpy.
     """
-    noise_only_snr = compute_population_snr(
-        psrs_clean=psrs_clean,
-        population=None,
-        raw_noise_params=raw_noise_params,
-        Tspan=Tspan_seconds,
-        current_stoas=noise_stoas,
-        return_psrs_pta=False,
-        curn_components=curn_components,
-        rn_components=rn_components,
+    N_total = len(all_shard_ids)
+    if N_total == 0:
+        raise ValueError('No shard IDs provided to _select_active_shards.')
+
+    def _snr_for_k(k: int) -> float:
+        k = max(1, min(k, N_total))
+        return _snr_for_shard_subset(
+            all_shard_ids[:k], sim_out_dir, psr_names,
+            noise_stoas, psrs_clean, raw_noise_params, Tspan_seconds,
+            curn_components, rn_components,
+        )
+
+    # ── noise floor ───────────────────────────────────────────────────────────
+    snr_noise, _, _ = compute_population_snr(
+        psrs_clean=psrs_clean, population=None,
+        raw_noise_params=raw_noise_params, Tspan=Tspan_seconds,
+        current_stoas={n: noise_stoas[n] for n in noise_stoas},
+        curn_components=curn_components, rn_components=rn_components,
     )
-    print(f'  Noise-only OS SNR: {noise_only_snr:.4f}')
-    # ── guard: target must be reachable above the noise floor ────────────────
-    if target_snr <= noise_only_snr:
+    print(f'  Noise-only OS SNR: {snr_noise:.4f}')
+    if snr_high <= snr_noise:
         raise ValueError(
-            f'Target SNR ({target_snr:.4f}) is at or below the noise-only '
-            f'SNR ({noise_only_snr:.4f}). No GW scaling can reach this target. '
-            f'Increase target_snr or check your noise model.')
-    if snr_high <= noise_only_snr:
+            f'SNR band ceiling ({snr_high:.4f}) ≤ noise-only SNR '
+            f'({snr_noise:.4f}). Widen target band or use a different seed.')
+
+    # ── full-population SNR ───────────────────────────────────────────────────
+    print(f'  Evaluating SNR with all {N_total} sub-chunks...')
+    snr_total = _snr_for_k(N_total)
+    print(f'  SNR (all {N_total} sub-chunks): {snr_total:.4f}  '
+          f'target=[{snr_low}, {snr_high}]')
+
+    if snr_low <= snr_total <= snr_high:
+        print(f'  ✓ Full population in target range — using all {N_total} sub-chunks')
+        return all_shard_ids[:N_total], snr_total
+
+    if snr_total < snr_low:
+        print("  Full population below target. Testing fractional populations...")
+
+        trial_fracs = [
+            1/2,
+            1/4,
+            3/4,
+            1/8,
+            3/8,
+            5/8,
+            7/8,
+            1/16,
+            3/16,
+            5/16,
+            7/16,
+            9/16,
+            11/16,
+            13/16,
+            15/16,
+        ]
+
+        best_k = N_total
+        best_snr = snr_total
+        best_dist = abs(snr_total - target_snr)
+
+        for frac in trial_fracs:
+
+            k = max(1, int(round(frac * N_total)))
+
+            print(f"    Testing k={k} ({frac:.1%})")
+
+            snr_k = _snr_for_k(k)
+
+            print(f"      SNR={snr_k:.4f}")
+
+            dist = abs(snr_k - target_snr)
+
+            if dist < best_dist:
+                best_dist = dist
+                best_k = k
+                best_snr = snr_k
+
+            if snr_low <= snr_k <= snr_high:
+                print(
+                    f"  ✓ Fractional population works: "
+                    f"k={k}, SNR={snr_k:.4f}"
+                )
+                return all_shard_ids[:k], snr_k
+
+        print(
+            f"  ⚠ No fractional population reached target. "
+            f"Using closest: k={best_k}, SNR={best_snr:.4f}"
+        )
+
+        return all_shard_ids[:best_k], best_snr
+
+    # ── analytic first guess ──────────────────────────────────────────────────
+    sig_total  = snr_total - snr_noise
+    sig_target = target_snr - snr_noise
+    if sig_total <= 0 or sig_target <= 0:
         raise ValueError(
-            f'SNR band ceiling ({snr_high:.4f}) is at or below the noise-only '
-            f'SNR ({noise_only_snr:.4f}). Widen the target band upward.')
-    
-    def _analytic_factor(snr_cur, snr_tgt, snr_noise):
-        sig_cur = snr_cur - snr_noise
-        sig_tgt = snr_tgt - snr_noise
-        if sig_cur <= 0 or sig_tgt <= 0:
-            raise ValueError(
-                f'Signal-only SNR non-positive '
-                f'(cur={sig_cur:.4f}, tgt={sig_tgt:.4f})')
-        return np.sqrt(sig_cur / sig_tgt)
+            f'Signal-only SNR non-positive '
+            f'(sig_total={sig_total:.4f}, sig_target={sig_target:.4f}).')
 
-    def _bisect_factor(history, cumulative_scale):
-        above = [(h['cs'], h['snr']) for h in history if h['snr'] >= target_snr]
-        below = [(h['cs'], h['snr']) for h in history if h['snr'] <  target_snr]
-        if not (above and below):
-            return None
-        best_above = max(above, key=lambda p: p[0])
-        best_below = min(below, key=lambda p: p[0])
-        if abs(best_above[0] - best_below[0]) < 1e-10:
-            return None
-        cum_target  = np.exp(0.5 * (np.log(best_above[0]) + np.log(best_below[0])))
-        incremental = cum_target / cumulative_scale
-        print(f'  [bisection] below=({best_below[0]:.4f}×,{best_below[1]:.4f}) '
-              f'above=({best_above[0]:.4f}×,{best_above[1]:.4f}) '
-              f'→ mid={cum_target:.4f}×  incr={incremental:.4f}')
-        return incremental
+    k_guess = int(round(N_total * (sig_target / sig_total) ** 2))
+    k_guess = max(1, min(k_guess, N_total))
+    print(f'  Analytic first guess: k={k_guess}')
 
-    cumulative_scale = 1.0
-    history          = []
-    original_delta   = {n: delta_stoas[n].copy() for n in delta_stoas}
+    # ── bisection on prefix all_shard_ids[:k] ────────────────────────────────
+    k_lo, k_hi = 1, N_total
+    history    = []   # (k, snr)
 
     for iteration in range(max_iterations):
-        scaled_delta = {n: original_delta[n] / cumulative_scale for n in original_delta}
-        signal_stoas = {n: noise_stoas[n] + scaled_delta[n]     for n in noise_stoas}
+        snr_k = _snr_for_k(k_guess)
+        print(f'  Iter {iteration+1:2d}: k={k_guess:4d}/{N_total}  '
+              f'OS SNR={snr_k:.4f}  target=[{snr_low},{snr_high}]')
+        history.append((k_guess, snr_k))
 
-        snr, pta, enterprise_psrs = compute_population_snr(
-            psrs_clean=psrs_clean,
-            population=None,
-            raw_noise_params=raw_noise_params,
-            Tspan=Tspan_seconds,
-            current_stoas=signal_stoas,
-            curn_components=curn_components,
-            rn_components=rn_components,
-        )
-        print(f'  Iter {iteration+1:2d}: OS SNR={snr:.4f}  '
-              f'target=[{snr_low},{snr_high}]  scale={cumulative_scale:.4f}×')
+        if snr_low <= snr_k <= snr_high:
+            print(f'  ✓ Converged at k={k_guess} in {iteration+1} iterations')
+            return all_shard_ids[:k_guess], snr_k
 
-        if snr_low <= snr <= snr_high:
-            print(f'  ✓ Converged at iteration {iteration+1}')
-            for n in delta_stoas:
-                delta_stoas[n] = scaled_delta[n]
-            return cumulative_scale, pta, enterprise_psrs
-
-        history.append({'cs': cumulative_scale, 'snr': snr})
-        if len(history) == 1:
-            factor = _analytic_factor(snr, target_snr, noise_only_snr)
-            print(f'  [analytic] factor={factor:.4f}')
+        if snr_k < snr_low:
+            k_lo = k_guess
         else:
-            factor = _bisect_factor(history, cumulative_scale)
-            if factor is None:
-                factor = _analytic_factor(snr, target_snr, noise_only_snr)
-                print(f'  [analytic fallback] factor={factor:.4f}')
-        cumulative_scale *= float(np.clip(factor, 0.1, 10.0))
+            k_hi = k_guess
 
+        if k_hi - k_lo <= 1:
+            # Bracket collapsed — check history first
+            valid = [(k, s) for k, s in history if snr_low <= s <= snr_high]
+            if valid:
+                best_k, best_snr = max(valid, key=lambda x: x[1])
+                print(f'  ✓ Bracket collapsed — using k={best_k} '
+                      f'(SNR={best_snr:.4f}) from history')
+                return all_shard_ids[:best_k], best_snr
+
+            # ── fallback: chunk-addition scan ─────────────────────────────────
+            # Find the largest prefix that is safely below snr_low, then try
+            # adding each remaining chunk one at a time.
+            print(f'\n  ⚠️  Bracket collapsed without valid k. '
+                  f'Switching to chunk-addition scan...')
+
+            # Identify floor: largest k in history with SNR < snr_low
+            below = [(k, s) for k, s in history if s < snr_low]
+            if below:
+                k_floor, snr_floor = max(below, key=lambda x: x[0])
+            else:
+                # No prefix gave SNR < snr_low — use k=0 (noise only) as floor
+                k_floor, snr_floor = 0, snr_noise
+
+            floor_shards = all_shard_ids[:k_floor]
+            print(f'  Floor: k={k_floor} shards, SNR={snr_floor:.4f}')
+
+            # Candidate chunks: everything not already in the floor prefix
+            candidate_chunks = all_shard_ids[k_floor:]
+            print(f'  Scanning {len(candidate_chunks)} candidate chunks...')
+
+            # We want floor_shards + [one extra chunk] to land in [snr_low, snr_high]
+            hits   = []   # (snr, chunk_id, sub_id) — landed in band
+            near   = []   # (snr, chunk_id, sub_id) — overshot but closest
+
+            for cid, sid in candidate_chunks:
+                trial_shards = floor_shards + [(cid, sid)]
+                snr_trial = _snr_for_shard_subset(
+                    trial_shards, sim_out_dir, psr_names,
+                    noise_stoas, psrs_clean, raw_noise_params, Tspan_seconds,
+                    curn_components, rn_components,
+                )
+                print(f'    chunk=({cid},{sid})  SNR={snr_trial:.4f}')
+
+                if snr_low <= snr_trial <= snr_high:
+                    hits.append((snr_trial, cid, sid))
+                elif snr_trial > snr_high:
+                    near.append((snr_trial, cid, sid))
+
+                # Take the first hit we find — no need to scan all chunks
+                if hits:
+                    best_snr, best_c, best_s = hits[0]
+                    active = floor_shards + [(best_c, best_s)]
+                    print(f'  ✓ Chunk-addition found: floor({k_floor}) + '
+                          f'chunk({best_c},{best_s}) → SNR={best_snr:.4f}')
+                    return active, best_snr
+
+            # All candidates either undershot or overshot — take closest overshoot
+            if near:
+                near.sort(key=lambda x: x[0])   # ascending SNR — smallest overshoot first
+                best_snr, best_c, best_s = near[0]
+                active = floor_shards + [(best_c, best_s)]
+                print(f'  ⚠️  No chunk landed in band. '
+                      f'Taking closest overshoot: chunk({best_c},{best_s}) '
+                      f'SNR={best_snr:.4f} (target=[{snr_low},{snr_high}])')
+                return active, best_snr
+
+            # Every candidate undershot even when added to the floor — give up
+            raise RuntimeError(
+                f'Chunk-addition scan exhausted: no single chunk raises '
+                f'SNR from {snr_floor:.4f} (floor k={k_floor}) into or above '
+                f'[{snr_low},{snr_high}]. '
+                f'Consider generating more sub-chunks or widening the target band.')
+
+        # Continue bisection
+        k_guess = int(round(np.exp(0.5 * (np.log(k_lo + 1) + np.log(k_hi)))))
+        k_guess = max(k_lo + 1, min(k_guess, k_hi - 1))
+
+    # Ran out of iterations — check history
+    valid = [(k, s) for k, s in history if snr_low <= s <= snr_high]
+    if valid:
+        best_k, best_snr = max(valid, key=lambda x: x[1])
+        return all_shard_ids[:best_k], best_snr
+
+    last_k, last_snr = history[-1]
     raise RuntimeError(
-        f'SNR scaling failed in {max_iterations} iterations. '
-        f'Last SNR={snr:.4f}, target=[{snr_low},{snr_high}].')
-
+        f'Chunk-count SNR selection failed in {max_iterations} iterations. '
+        f'Last: k={last_k}, SNR={last_snr:.4f}, target=[{snr_low},{snr_high}].')
 
 # =============================================================================
 # CGW SNR infrastructure
@@ -366,21 +604,21 @@ def _scale_and_iterate(
 
 def _build_candidate_list(
     store:         ShardedPickleStore,
-    chunk_ids:     List[int],
+    active_shards: List[Tuple[int, int]],
     enterprise_psrs,
     Tspan_seconds: float,
-) -> List[Tuple[int, int, float]]:
+) -> List[Tuple[int, int, int, float]]:
     """
-    Pass 1 (baseline only): scan all shards using the analytic proxy to
-    build a ranked global candidate list, then rescue low/mid-f regimes.
+    Pass 1 (baseline only): scan active shards using analytic proxy to build
+    a ranked global candidate list, then rescue low/mid-f regimes.
 
-    Returns list of (chunk_id, local_idx, proxy_score), sorted descending.
+    Returns list of (chunk_id, sub_id, local_idx, proxy_score), sorted desc.
     """
-    print(f'  Pre-filtering {len(chunk_ids)} chunks via analytic proxy...')
+    print(f'  Pre-filtering {len(active_shards)} active shards via analytic proxy...')
     candidate_list = []
 
-    for chunk_id in chunk_ids:
-        pop    = store.read(chunk_id)
+    for chunk_id, sub_id in active_shards:
+        pop    = store.read(chunk_id, sub_id)
         n      = len(pop)
         n_keep = min(N_PRE_FILTER_PER_CHUNK, n)
 
@@ -394,16 +632,16 @@ def _build_candidate_list(
                      else np.argpartition(proxies, -n_keep)[-n_keep:])
         for local_idx in top_local:
             candidate_list.append(
-                (chunk_id, int(local_idx), float(proxies[local_idx])))
+                (chunk_id, sub_id, int(local_idx), float(proxies[local_idx])))
         del pop; gc.collect()
 
-    candidate_list.sort(key=lambda x: x[2], reverse=True)
+    candidate_list.sort(key=lambda x: x[3], reverse=True)
     global_candidates = candidate_list[:N_GLOBAL_CGW_CANDIDATES]
 
     # rescue low/mid-f proxy failure regimes
-    existing = {(c, i) for c, i, _ in global_candidates}
-    for chunk_id in chunk_ids:
-        pop = store.read(chunk_id)
+    existing = {(c, s, i) for c, s, i, _ in global_candidates}
+    for chunk_id, sub_id in active_shards:
+        pop = store.read(chunk_id, sub_id)
         f_T = np.asarray(pop.f, dtype=np.float64) * Tspan_seconds
         for mask in [f_T < 10.0, (f_T >= 10.0) & (f_T < 50.0)]:
             if mask.sum() == 0:
@@ -411,32 +649,32 @@ def _build_candidate_list(
             regime_idx   = np.where(mask)[0]
             top_h0_local = regime_idx[np.argsort(pop.h0[regime_idx])[-N_RESCUE:]]
             for local_idx in top_h0_local:
-                key = (chunk_id, int(local_idx))
+                key = (chunk_id, sub_id, int(local_idx))
                 if key not in existing:
                     global_candidates.append(
-                        (chunk_id, int(local_idx), float(pop.h0[local_idx])))
+                        (chunk_id, sub_id, int(local_idx), float(pop.h0[local_idx])))
                     existing.add(key)
         del pop; gc.collect()
 
     n_rescued = len(global_candidates) - N_GLOBAL_CGW_CANDIDATES
     print(f'  {len(global_candidates)} total candidates '
-          f'(top-{N_GLOBAL_CGW_CANDIDATES} proxy + {n_rescued} rescued from '
-          f'low/mid-f regimes)')
+          f'(top-{N_GLOBAL_CGW_CANDIDATES} proxy + {n_rescued} rescued)')
     return global_candidates
 
 
 def _assemble_binaries(
     store:      ShardedPickleStore,
-    candidates: List[Tuple[int, int, float]],
+    candidates: List[Tuple[int, int, int, float]],
 ) -> List:
-    """Load binary objects for a candidate list, grouped by chunk to minimise reads."""
-    by_chunk: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
-    for global_rank, (chunk_id, local_idx, _) in enumerate(candidates):
-        by_chunk[chunk_id].append((global_rank, local_idx))
+    """Load binary objects for a candidate list, grouped by shard to minimise reads."""
+    # group by (chunk_id, sub_id)
+    by_shard: Dict[Tuple[int, int], List[Tuple[int, int]]] = defaultdict(list)
+    for global_rank, (chunk_id, sub_id, local_idx, _) in enumerate(candidates):
+        by_shard[(chunk_id, sub_id)].append((global_rank, local_idx))
 
     binaries = [None] * len(candidates)
-    for chunk_id, entries in by_chunk.items():
-        pop = store.read(chunk_id)
+    for (chunk_id, sub_id), entries in by_shard.items():
+        pop = store.read(chunk_id, sub_id)
         for global_rank, local_idx in entries:
             binaries[global_rank] = pop[local_idx]
         del pop; gc.collect()
@@ -445,79 +683,77 @@ def _assemble_binaries(
 
 def _write_snrs_to_shards(
     store:      ShardedPickleStore,
-    candidates: List[Tuple[int, int, float]],
+    candidates: List[Tuple[int, int, int, float]],
     snrs:       np.ndarray,
-    chunk_ids:  List[int],
+    active_shards: List[Tuple[int, int]],
     snr_field:  str,
 ) -> None:
-    """Write a per-binary SNR array into each shard under snr_field."""
-    chunk_snr_maps: Dict[int, Dict[int, float]] = defaultdict(dict)
-    for global_rank, (chunk_id, local_idx, _) in enumerate(candidates):
-        chunk_snr_maps[chunk_id][local_idx] = float(snrs[global_rank])
+    """Write per-binary SNR into each active shard under snr_field."""
+    # Map (chunk_id, sub_id, local_idx) → snr
+    shard_snr_maps: Dict[Tuple[int, int], Dict[int, float]] = defaultdict(dict)
+    for global_rank, (chunk_id, sub_id, local_idx, _) in enumerate(candidates):
+        shard_snr_maps[(chunk_id, sub_id)][local_idx] = float(snrs[global_rank])
 
-    for chunk_id in chunk_ids:
-        pop         = store.read(chunk_id)
+    for chunk_id, sub_id in active_shards:
+        pop         = store.read(chunk_id, sub_id)
         cgw_snr_arr = np.zeros(len(pop), dtype=np.float32)
-        for local_idx, snr_val in chunk_snr_maps.get(chunk_id, {}).items():
+        for local_idx, snr_val in shard_snr_maps.get((chunk_id, sub_id), {}).items():
             cgw_snr_arr[local_idx] = snr_val
         setattr(pop, snr_field, cgw_snr_arr)
-        store._dump(store._path(chunk_id), pop)
+        store._dump(store._path(chunk_id, sub_id), pop)
         del pop; gc.collect()
 
 
 def _print_top_sources(
     store:      ShardedPickleStore,
-    candidates: List[Tuple[int, int, float]],
+    candidates: List[Tuple[int, int, int, float]],
     snrs:       np.ndarray,
     snr_field:  str,
     n_show:     int = N_TOP_SOURCES,
 ) -> None:
     ranked = sorted(zip(candidates, snrs), key=lambda x: x[1], reverse=True)
     n_show = min(n_show, len(ranked))
-    by_chunk: Dict[int, object] = {}
-    for (chunk_id, _, _), _ in ranked[:n_show]:
-        if chunk_id not in by_chunk:
-            by_chunk[chunk_id] = store.read(chunk_id)
+    by_shard: Dict[Tuple[int, int], object] = {}
+    for (chunk_id, sub_id, _, _), _ in ranked[:n_show]:
+        key = (chunk_id, sub_id)
+        if key not in by_shard:
+            by_shard[key] = store.read(chunk_id, sub_id)
     proxy_rank_map = {
-        (chunk_id, local_idx): rank
-        for rank, (chunk_id, local_idx, _) in enumerate(candidates, start=1)
+        (c, s, i): rank
+        for rank, (c, s, i, _) in enumerate(candidates, start=1)
     }
     print(f'\n  Top {n_show} [{snr_field}]:')
-    for rank, ((chunk_id, local_idx, proxy), snr_val) in enumerate(
+    for rank, ((chunk_id, sub_id, local_idx, proxy), snr_val) in enumerate(
             ranked[:n_show], start=1):
-        pop        = by_chunk[chunk_id]
-        proxy_rank = proxy_rank_map.get((chunk_id, local_idx), -1)
-        print(f'    {rank:2d}.  chunk={chunk_id:03d}  local_idx={local_idx:7d}  '
+        pop        = by_shard[(chunk_id, sub_id)]
+        proxy_rank = proxy_rank_map.get((chunk_id, sub_id, local_idx), -1)
+        print(f'    {rank:2d}.  chunk={chunk_id:03d}  sub={sub_id:03d}  '
+              f'local_idx={local_idx:7d}  '
               f'f={pop.f[local_idx]:.2e} Hz  '
               f'Mc={pop.Mc[local_idx]:.2e} Msun  '
               f'h0={pop.h0[local_idx]:.2e}  '
               f'proxy={proxy:.4e} (rank #{proxy_rank})  '
               f'{snr_field}={snr_val:.4f}')
-    del by_chunk; gc.collect()
+    del by_shard; gc.collect()
 
 
 def _compute_cgw_snrs_baseline(
     store:               ShardedPickleStore,
-    chunk_ids:           List[int],
+    active_shards:       List[Tuple[int, int]],
     pta,
     enterprise_psrs,
     raw_noise_params:    dict,
     parsed_noise_params: dict,
     Tspan_seconds:       float,
     meta_dir:            str,
-) -> Tuple[List[Tuple[int, int, float]], np.ndarray]:
+) -> Tuple[List[Tuple[int, int, int, float]], np.ndarray]:
     """
-    Full two-pass CGW SNR for the baseline PTA.
-
-    Pass 1: analytic proxy pre-filter + regime rescue → global_candidates.
-    Pass 2: full Enterprise inner-product SNR on all candidates.
-
-    Writes top-5 breakdown records to metadata/top_cgw_breakdowns.json.
-    Returns (global_candidates, top_snrs) for reuse by synthetic scenarios.
+    Two-pass CGW SNR for the baseline PTA over active shards.
+    Returns (global_candidates, top_snrs).
     """
     print('\n  [baseline] Building candidate list...')
     global_candidates = _build_candidate_list(
-        store, chunk_ids, enterprise_psrs, Tspan_seconds)
+        store, active_shards, enterprise_psrs, Tspan_seconds)
 
     top_binaries = _assemble_binaries(store, global_candidates)
 
@@ -534,27 +770,29 @@ def _compute_cgw_snrs_baseline(
     )
     del top_binaries; gc.collect()
 
-    _write_snrs_to_shards(store, global_candidates, top_snrs, chunk_ids, 'cgw_snr')
+    _write_snrs_to_shards(store, global_candidates, top_snrs, active_shards, 'cgw_snr')
     _print_top_sources(store, global_candidates, np.asarray(top_snrs), 'cgw_snr')
 
-    # Persist top-5 per-pulsar breakdowns for the summary builder
+    # Persist top-5 breakdowns
     ranked = sorted(zip(global_candidates, top_snrs), key=lambda x: x[1], reverse=True)
     proxy_rank_map = {
-        (chunk_id, local_idx): rank
-        for rank, (chunk_id, local_idx, _) in enumerate(global_candidates, start=1)
+        (c, s, i): rank
+        for rank, (c, s, i, _) in enumerate(global_candidates, start=1)
     }
-    candidate_breakdown_map = {
-        (chunk_id, local_idx): top_breakdowns[i]
-        for i, (chunk_id, local_idx, _) in enumerate(global_candidates)
+    cand_breakdown = {
+        (c, s, i): top_breakdowns[idx]
+        for idx, (c, s, i, _) in enumerate(global_candidates)
     }
     top_breakdown_records = []
-    for rank, ((chunk_id, local_idx, proxy), snr_val) in enumerate(ranked[:5], start=1):
-        proxy_rank = proxy_rank_map[(chunk_id, local_idx)]
-        per_pulsar = candidate_breakdown_map[(chunk_id, local_idx)]
+    for rank, ((chunk_id, sub_id, local_idx, proxy), snr_val) in enumerate(
+            ranked[:5], start=1):
+        proxy_rank = proxy_rank_map[(chunk_id, sub_id, local_idx)]
+        per_pulsar = cand_breakdown[(chunk_id, sub_id, local_idx)]
         top_breakdown_records.append({
             'rank':              rank,
             'proxy_rank':        proxy_rank,
             'chunk_id':          int(chunk_id),
+            'sub_id':            int(sub_id),
             'local_idx':         int(local_idx),
             'proxy':             float(proxy),
             'cgw_snr':           float(snr_val),
@@ -569,23 +807,20 @@ def _compute_cgw_snrs_baseline(
 
 def _compute_cgw_snrs_scenario(
     store:                ShardedPickleStore,
-    chunk_ids:            List[int],
+    active_shards:        List[Tuple[int, int]],
     pta,
     enterprise_psrs,
     raw_noise_params:     dict,
     parsed_noise_params:  dict,
     Tspan_seconds:        float,
     snr_field:            str,
-    baseline_candidates:  List[Tuple[int, int, float]],
+    baseline_candidates:  List[Tuple[int, int, int, float]],
     baseline_snrs:        np.ndarray,
     n_candidates:         int = N_SCENARIO_CGW_CANDIDATES,
 ) -> None:
     """
-    Lightweight CGW SNR pass for a synthetic PTA scenario.
-
-    Picks the top `n_candidates` by BASELINE cgw_snr (actual inner-product,
-    not the proxy) — no expensive proxy scan required.  If a source is loud
-    in the baseline PTA it is a plausible candidate for an improved PTA.
+    Lightweight CGW pass for a synthetic scenario — uses top-N by baseline SNR.
+    No proxy re-scan needed.
     """
     ranked_by_snr = sorted(
         zip(baseline_candidates, baseline_snrs),
@@ -594,7 +829,7 @@ def _compute_cgw_snrs_scenario(
     candidates_for_scenario = [c for c, _ in ranked_by_snr[:n_candidates]]
 
     print(f'\n  [{snr_field}] Using top-{len(candidates_for_scenario)} '
-          f'by baseline CGW SNR (no proxy re-scan needed)')
+          f'by baseline CGW SNR')
 
     top_binaries = _assemble_binaries(store, candidates_for_scenario)
 
@@ -611,83 +846,27 @@ def _compute_cgw_snrs_scenario(
     )
     del top_binaries; gc.collect()
 
-    _write_snrs_to_shards(store, candidates_for_scenario, top_snrs, chunk_ids, snr_field)
+    _write_snrs_to_shards(store, candidates_for_scenario, top_snrs, active_shards, snr_field)
     _print_top_sources(store, candidates_for_scenario, np.asarray(top_snrs), snr_field)
 
 
 # =============================================================================
-# Scaling helpers
+# Residual saving
 # =============================================================================
 
-def _comov_redshift_from_scaling(
-    D_comov: np.ndarray,
-    z:       np.ndarray,
-    scale:   float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    from SMBHB_pop_synth import _Z_GRID, _CHI_GRID
-    valid      = _CHI_GRID > 0
-    z_grid     = _Z_GRID[valid];  chi_grid = _CHI_GRID[valid]
-    frac_grid  = (1.0 + z_grid) ** (2.0 / 3.0) / chi_grid
-    targets    = (1.0 + z) ** (2.0 / 3.0) / D_comov / scale
-    if frac_grid[0] > frac_grid[-1]:
-        frac_grid = frac_grid[::-1]
-        chi_grid  = chi_grid[::-1]
-        z_grid    = z_grid[::-1]
-    raw = np.clip(np.searchsorted(frac_grid, targets, side='left'),
-                  1, len(frac_grid) - 1)
-    lo  = raw - 1
-    idx = np.where(np.abs(frac_grid[raw] - targets) <=
-                   np.abs(frac_grid[lo]  - targets), raw, lo)
-    return chi_grid[idx].astype(np.float32), z_grid[idx].astype(np.float32)
-
-
-def _apply_scaling_to_all_chunks(
-    store:            ShardedPickleStore,
-    chunk_ids:        List[int],
-    cumulative_scale: float,
-) -> None:
-    print(f'\n  Applying scale 1/{cumulative_scale:.6f} to {len(chunk_ids)} chunks...')
-    for chunk_id in chunk_ids:
-        pop          = store.read(chunk_id)
-        new_h0       = pop.h0 / cumulative_scale
-        new_D, new_z = _comov_redshift_from_scaling(
-            pop.D_comov, pop.z, 1.0 / cumulative_scale)
-        store.update(chunk_id, h0=new_h0, D_comov=new_D, z=new_z)
-        del pop, new_h0, new_D, new_z; gc.collect()
-        print(f'    chunk {chunk_id:03d}: updated', flush=True)
-
-
-def _cleanup_chunk_stoas(
-    sim_out_dir: str,
-    chunk_ids:   List[int],
-    scenario:    Optional[str] = None,
-) -> None:
-    stoa_dir = os.path.join(sim_out_dir, 'stoas')
-    removed, freed_bytes = 0, 0
-    for chunk_id in chunk_ids:
-        fpath = os.path.join(stoa_dir, _delta_filename(chunk_id, scenario))
-        if os.path.isfile(fpath):
-            freed_bytes += os.path.getsize(fpath)
-            os.remove(fpath)
-            removed += 1
-    try:
-        os.rmdir(stoa_dir)
-        dir_note = '  — stoas/ dir removed'
-    except OSError:
-        dir_note = ''
-    print(f'  🗑️  Cleaned {removed} chunk files '
-          f'[scenario={scenario or "baseline"}]  '
-          f'({freed_bytes / 1e6:.1f} MB freed){dir_note}')
-
-
 def _save_toa_residuals(
-    sim_out_dir:      str,
+    sim_out_dir:    str,
     psrs_clean,
-    noise_stoas:      Dict[str, np.ndarray],
-    combined_delta:   Dict[str, np.ndarray],
-    cumulative_scale: float,
-    scenario:         Optional[str] = None,
+    noise_stoas:    Dict[str, np.ndarray],
+    combined_delta: Dict[str, np.ndarray],
+    n_active:       int,
+    n_total:        int,
+    scenario:       Optional[str] = None,
 ) -> None:
+    """
+    Save noise / population / combined residual arrays.
+    combined_delta is already the sum over active shards (no further scaling).
+    """
     suffix = f'_{scenario}' if scenario else ''
     base   = os.path.join(sim_out_dir, f'residuals{suffix}')
     dirs   = {k: os.path.join(base, k)
@@ -699,27 +878,29 @@ def _save_toa_residuals(
     for psr in psrs_clean:
         name    = psr.name
         noise_a = noise_stoas[name]
-        pop_a   = combined_delta[name] / cumulative_scale
+        pop_a   = combined_delta[name]      # physical — no rescaling
         comb_a  = noise_a + pop_a
         np.save(os.path.join(dirs['noise'],      f'{name}.npy'), noise_a.astype(np.float64))
         np.save(os.path.join(dirs['population'], f'{name}.npy'), pop_a.astype(np.float64))
         np.save(os.path.join(dirs['combined'],   f'{name}.npy'), comb_a.astype(np.float64))
 
     manifest = {
-        'cumulative_scale': cumulative_scale,
-        'n_pulsars':        len(psrs_clean),
-        'psr_names':        [p.name for p in psrs_clean],
-        'scenario':         scenario or 'baseline',
+        'n_active_sub_chunks': n_active,
+        'n_total_sub_chunks':  n_total,
+        'fraction_used':       n_active / max(n_total, 1),
+        'n_pulsars':           len(psrs_clean),
+        'psr_names':           [p.name for p in psrs_clean],
+        'scenario':            scenario or 'baseline',
         'description': {
             'noise':      'Simulated noise residuals only (no GW signal)',
-            'population': 'GW TOA contribution from full population, scaled to target SNR',
+            'population': 'GW TOA contribution from active sub-chunks (physical, unscaled)',
             'combined':   'noise + population (what an observer would measure)',
         },
     }
     with open(os.path.join(base, 'manifest.json'), 'w') as fh:
         json.dump(manifest, fh, indent=2)
     print(f'  ✓ Saved residuals for {len(psrs_clean)} pulsars '
-          f'(noise / population / combined)')
+          f'({n_active}/{n_total} sub-chunks, no rescaling)')
 
 
 # =============================================================================
@@ -727,7 +908,6 @@ def _save_toa_residuals(
 # =============================================================================
 
 def _run_phase(extra_argv: list, label: str) -> None:
-    """Launch this same script as a subprocess with extra_argv appended."""
     cmd = [sys.executable, os.path.abspath(__file__)] + extra_argv
     print(f'\n  ▶ Subprocess: {label}', flush=True)
     result = subprocess.run(cmd, check=False)
@@ -738,19 +918,19 @@ def _run_phase(extra_argv: list, label: str) -> None:
 
 
 # =============================================================================
-# Phase entry points — called inside subprocesses
+# Phase entry points
 # =============================================================================
 
 def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     """
     Baseline phase (subprocess):
-      - load + filter baseline pulsars
-      - simulate noise; retry with shifted seed if noise-only SNR too high
-      - scale GW signal to target OS SNR
-      - save residuals; update shards with scale factor
-      - optionally validate proxy
-      - compute baseline CGW SNR (proxy-only mode: skip scaling, just validate)
-      - write phase_handoff.json (including winning noise_seed) for scenario subprocesses
+      1. Load baseline pulsars.
+      2. Simulate noise; retry with shifted seed if noise-only SNR too high.
+      3. Find k = number of sub-chunks giving OS SNR ∈ [snr_low, snr_high].
+         Population parameters are NOT modified.
+      4. Save residuals (active sub-chunks only, unscaled).
+      5. Compute baseline CGW SNRs.
+      6. Write phase_handoff.json.
     """
     sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
@@ -759,10 +939,11 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
         run_config = json.load(fh)
     Tspan_seconds = run_config['Tspan_seconds']
 
-    pop_dir   = os.path.join(sim_out_dir, 'populations')
-    store     = ShardedPickleStore(pop_dir)
-    chunk_ids = store.available()
-    if not chunk_ids:
+    pop_dir      = os.path.join(sim_out_dir, 'populations')
+    store        = ShardedPickleStore(pop_dir)
+    all_shards   = store.available()      # list of (chunk_id, sub_id)
+    N_total      = len(all_shards)
+    if N_total == 0:
         sys.exit(f'ERROR: no shards in {pop_dir}')
 
     snr_low, snr_high = args.snr_range
@@ -780,30 +961,22 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
 
     # ── proxy-only mode ───────────────────────────────────────────────────────
     if args.proxy_only:
-        print(f'\n{"="*60}')
-        print('Proxy-only mode — skipping noise simulation and SNR scaling.')
-        print(f'{"="*60}')
-
-        print('\n🔊 Simulating noise (for PTA structure only)...')
+        print(f'\n{"="*60}\nProxy-only mode\n{"="*60}')
         noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
-
         _, pta, enterprise_psrs = compute_population_snr(
-            psrs_clean=psrs_clean,
-            population=None,
-            raw_noise_params=raw_noise_params,
-            Tspan=Tspan_seconds,
-            current_stoas=noise_stoas,
-            return_psrs_pta=True,
+            psrs_clean=psrs_clean, population=None,
+            raw_noise_params=raw_noise_params, Tspan=Tspan_seconds,
+            current_stoas=noise_stoas, return_psrs_pta=True,
         )
         validate_cgw_proxy(
-            store=store, chunk_ids=chunk_ids, pta=pta,
+            store=store, chunk_ids=all_shards, pta=pta,
             enterprise_psrs=enterprise_psrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
             Tspan_seconds=Tspan_seconds, n_test=args.n_test,
         )
         validate_proxy_filtering_ratio(
-            store=store, chunk_ids=chunk_ids, pta=pta,
+            store=store, chunk_ids=all_shards, pta=pta,
             enterprise_psrs=enterprise_psrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
@@ -814,66 +987,137 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
             json.dump({'sim_id': args.sim_id, 'proxy_only': True,
                        'completed_at': time.strftime('%Y-%m-%dT%H:%M:%S')}, fh, indent=2)
         with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
-            json.dump({'cumulative_scale': 1.0, 'Tspan_seconds': Tspan_seconds,
+            json.dump({'n_active_sub_chunks': N_total,
+                       'active_shard_ids': [[c, s] for c, s in all_shards],
+                       'Tspan_seconds': Tspan_seconds,
                        'noise_seed': noise_seed,
                        'baseline_candidates': [], 'baseline_snrs': []}, fh)
         return
 
-    # ── full pipeline ─────────────────────────────────────────────────────────
-    print('\n📂 [baseline] Summing Δstoas...')
-    combined_delta = _load_and_sum_toa_deltas(
-        sim_out_dir, chunk_ids, psr_names, scenario=None)
-
-    # ── noise simulation with retry on high noise-only SNR ───────────────────
-    max_noise_retries = 10
-    cumulative_scale  = None
-    pta               = None
-    epsrs             = None
+    # ── Noise simulation with retry on high noise floor or NaN SNR ───────────────
+    max_noise_retries = 20
+    active_shards     = None
+    snr_achieved      = None
     winning_seed      = noise_seed
 
     for noise_attempt in range(max_noise_retries):
-        attempt_seed = noise_seed + noise_attempt
+        # Each attempt gets a seed offset by attempt * large_prime to avoid
+        # overlap with other sim_ids (which are spaced by 10000).
+        # Using a prime (97) ensures no two (sim_id, attempt) pairs collide:
+        # seed = base + sim_id^2 * 10000 + attempt * 97
+        # For any two sims i != j and attempts a, b:
+        # i^2 * 10000 + a*97 != j^2 * 10000 + b*97 (for i,j < 100, a,b < 20)
+        attempt_seed = noise_seed + noise_attempt * 97
+
         if noise_attempt == 0:
             print(f'\n🔊 [baseline] Simulating noise (seed={attempt_seed})...')
         else:
-            print(f'\n🔁 [baseline] Retrying noise simulation '
-                  f'(attempt {noise_attempt + 1}/{max_noise_retries}, '
-                  f'seed={attempt_seed})...')
-        noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=attempt_seed)
+            print(f'\n🔁 [baseline] Retrying noise '
+                f'(attempt {noise_attempt + 1}/{max_noise_retries}, '
+                f'seed={attempt_seed})...')
 
-        print('\n📐 [baseline] Scaling GW signal...')
         try:
-            cumulative_scale, pta, epsrs = _scale_and_iterate(
+            noise_stoas = _simulate_noise(psrs_clean, raw_noise_params,
+                                        seed=attempt_seed)
+        except Exception as e:
+            print(f'  ⚠️  Noise simulation failed: {e}, retrying...')
+            continue
+
+        # Quick NaN check on noise-only SNR before attempting full shard selection
+        print('\n📐 [baseline] Checking noise floor...')
+        try:
+            snr_noise, _, _ = compute_population_snr(
                 psrs_clean=psrs_clean,
-                delta_stoas=combined_delta,
+                population=None,
+                raw_noise_params=raw_noise_params,
+                Tspan=Tspan_seconds,
+                current_stoas=noise_stoas,
+                return_psrs_pta=True,
+                verbose=False,
+            )
+        except Exception as e:
+            print(f'  ⚠️  Noise-only SNR computation failed: {e}, retrying...')
+            continue
+
+        if not np.isfinite(snr_noise):
+            print(f'  ⚠️  Noise-only SNR is NaN (seed={attempt_seed}), retrying...')
+            if noise_attempt == max_noise_retries - 1:
+                sys.exit(f'ERROR: noise-only SNR NaN after '
+                        f'{max_noise_retries} attempts — giving up')
+            continue
+
+        if abs(snr_noise) > snr_high:
+            print(f'  ⚠️  Noise-only SNR={snr_noise:.3f} exceeds ceiling '
+                f'{snr_high}, retrying...')
+            if noise_attempt == max_noise_retries - 1:
+                sys.exit(f'ERROR: noise floor too high after '
+                        f'{max_noise_retries} attempts — giving up')
+            continue
+
+        print(f'  ✓ Noise-only SNR={snr_noise:.4f} (seed={attempt_seed})')
+
+        print('\n📐 [baseline] Selecting active sub-chunks (SNR ∝ √N)...')
+        try:
+            active_shards, snr_achieved = _select_active_shards(
+                all_shard_ids=all_shards,
+                psrs_clean=psrs_clean,
+                raw_noise_params=raw_noise_params,
+                sim_out_dir=sim_out_dir,
+                psr_names=psr_names,
                 noise_stoas=noise_stoas,
                 target_snr=args.target_snr,
-                snr_low=snr_low, snr_high=snr_high,
+                snr_low=snr_low,
+                snr_high=snr_high,
                 Tspan_seconds=Tspan_seconds,
-                raw_noise_params=raw_noise_params,
             )
             winning_seed = attempt_seed
-            print(f'✓ Converged — scale={cumulative_scale:.6f}  '
-                  f'noise_seed={winning_seed}')
+            print(f'✓ Converged — k={len(active_shards)}/{N_total} sub-chunks  '
+                f'SNR={snr_achieved:.4f}  noise_seed={winning_seed}')
             break
+
         except ValueError as e:
             if 'noise-only SNR' in str(e) or 'SNR band ceiling' in str(e):
                 print(f'  ⚠️  {e}')
                 if noise_attempt == max_noise_retries - 1:
-                    sys.exit(f'ERROR: noise-only SNR too high after '
-                             f'{max_noise_retries} attempts — giving up')
+                    sys.exit(f'ERROR: noise floor too high after '
+                            f'{max_noise_retries} attempts — giving up')
                 continue
             sys.exit(f'ERROR: {e}')
         except RuntimeError as e:
             sys.exit(f'ERROR: {e}')
 
-    _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
-                        combined_delta, cumulative_scale, scenario=None)
-    _cleanup_chunk_stoas(sim_out_dir, chunk_ids, scenario=None)
-    del noise_stoas, combined_delta, psrs_clean; gc.collect()
+    n_active = len(active_shards)
+    print(f'\n  Active sub-chunks: {n_active}/{N_total} '
+          f'({100 * n_active / N_total:.1f}%)')
 
-    print('\n💾 [baseline] Updating shards...')
-    _apply_scaling_to_all_chunks(store, chunk_ids, cumulative_scale)
+    # ── Sum deltas for active shards and save residuals ───────────────────────
+    print('\n📂 [baseline] Summing Δstoas for active shards...')
+    combined_delta = _load_and_sum_toa_deltas(
+        sim_out_dir, active_shards, psr_names, scenario=None)
+
+    _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
+                        combined_delta, n_active, N_total, scenario=None)
+    _cleanup_shard_stoas(sim_out_dir, all_shards, scenario=None)
+    del combined_delta; gc.collect()
+
+    # delete unused shards
+    _cleanup_inactive_population_shards(store, all_shards, active_shards)
+
+    # Reconstruct signal_stoas from saved residuals
+    resid_base = os.path.join(sim_out_dir, 'residuals', 'combined')
+    signal_stoas = {}
+    for name in psr_names:
+        arr = np.load(os.path.join(resid_base, f'{name}.npy'))
+        signal_stoas[name] = arr
+
+    # Rebuild PTA from combined (noise + signal) stoas
+    _, pta, enterprise_psrs = compute_population_snr(
+        psrs_clean=psrs_clean,
+        population=None,
+        raw_noise_params=raw_noise_params,
+        Tspan=Tspan_seconds,
+        current_stoas=signal_stoas,
+    )
 
     baseline_candidates: Optional[List] = None
     baseline_snrs:       Optional[np.ndarray] = None
@@ -882,8 +1126,8 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
         if args.validate_proxy:
             print('\n🔍 Validating CGW proxy...')
             validate_cgw_proxy(
-                store=store, chunk_ids=chunk_ids, pta=pta,
-                enterprise_psrs=epsrs,
+                store=store, chunk_ids=active_shards, pta=pta,
+                enterprise_psrs=enterprise_psrs,
                 raw_noise_params=raw_noise_params,
                 parsed_noise_params=parsed_noise_params,
                 Tspan_seconds=Tspan_seconds, n_test=args.n_test,
@@ -891,8 +1135,8 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
 
         print('\n🔭 [baseline] Computing CGW SNRs...')
         baseline_candidates, baseline_snrs = _compute_cgw_snrs_baseline(
-            store=store, chunk_ids=chunk_ids,
-            pta=pta, enterprise_psrs=epsrs,
+            store=store, active_shards=active_shards,
+            pta=pta, enterprise_psrs=enterprise_psrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
             Tspan_seconds=Tspan_seconds,
@@ -902,31 +1146,34 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     else:
         print('\n(CGW skipped — use --cgw to enable)')
 
-    del pta, epsrs; gc.collect()
+    del pta, enterprise_psrs, psrs_clean; gc.collect()
 
+    # Serialise candidates as [chunk_id, sub_id, local_idx, proxy]
     handoff = {
-        'cumulative_scale':    float(cumulative_scale),
+        'n_active_sub_chunks': n_active,
+        'n_total_sub_chunks':  N_total,
+        'active_shard_ids':    [[c, s] for c, s in active_shards],
         'Tspan_seconds':       Tspan_seconds,
         'noise_seed':          winning_seed,
-        'baseline_candidates': [[c, i, float(p)]
-                                for c, i, p in (baseline_candidates or [])],
+        'baseline_candidates': [[c, s, i, float(p)]
+                                for c, s, i, p in (baseline_candidates or [])],
         'baseline_snrs':       (baseline_snrs.tolist()
                                 if baseline_snrs is not None else []),
     }
     with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
         json.dump(handoff, fh)
-    print(f'✓ [baseline] Wrote {HANDOFF_FILENAME} (noise_seed={winning_seed})')
+    print(f'✓ [baseline] Wrote {HANDOFF_FILENAME}  '
+          f'(k={n_active}/{N_total}, noise_seed={winning_seed})')
 
 
 def _phase_scenario(args, scenario_label, combined_scenarios):
     """
-    Scenario phase (subprocess, one per scenario):
-      - read handoff (cumulative_scale, baseline candidate ranking, noise_seed)
-      - load + filter scenario pulsars
-      - simulate noise with same seed as baseline (from handoff)
-      - save residuals; clean chunk files
-      - build Enterprise PTA
-      - compute CGW SNR for top-N by baseline SNR; write to shards
+    Scenario phase (subprocess):
+      - Read handoff: active_shard_ids, noise_seed, baseline candidate ranking.
+      - Load scenario pulsars; simulate noise with SAME seed as baseline.
+      - Sum Δstoas for active shards ONLY (same k as baseline).
+      - Save residuals; clean scenario npz files.
+      - Build Enterprise PTA; compute CGW SNRs; write to shards.
     """
     sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
@@ -937,17 +1184,18 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
     with open(handoff_path) as fh:
         handoff = json.load(fh)
 
-    cumulative_scale    = handoff['cumulative_scale']
+    active_shard_ids    = [tuple(x) for x in handoff['active_shard_ids']]
+    n_active            = handoff['n_active_sub_chunks']
+    n_total             = handoff.get('n_total_sub_chunks', n_active)
     Tspan_seconds       = handoff['Tspan_seconds']
-    noise_seed          = handoff.get('noise_seed', args.noise_seed_base + args.sim_id**2 * 100
-                                  if args.noise_seed_base is not None
-                                  else args.sim_id * 1000)
-    baseline_candidates = [(c, i, p) for c, i, p in handoff['baseline_candidates']]
+    noise_seed          = handoff['noise_seed']
+    baseline_candidates = [(c, s, i, p)
+                           for c, s, i, p in handoff['baseline_candidates']]
     baseline_snrs       = np.array(handoff['baseline_snrs'], dtype=np.float64)
 
     pop_dir   = os.path.join(sim_out_dir, 'populations')
     store     = ShardedPickleStore(pop_dir)
-    chunk_ids = store.available()
+    all_shards = store.available()
 
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
 
@@ -960,25 +1208,37 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
     del psrs_unfiltered; gc.collect()
     psr_names = [p.name for p in psrs_clean]
 
-    print(f'\n📂 [{scenario_label}] Summing Δstoas...')
+    # Use the SAME active shard subset as baseline (same k)
+    print(f'\n📂 [{scenario_label}] Summing Δstoas for '
+          f'{n_active}/{n_total} active shards...')
     combined_delta = _load_and_sum_toa_deltas(
-        sim_out_dir, chunk_ids, psr_names, scenario=scenario_label)
+        sim_out_dir, active_shard_ids, psr_names, scenario=scenario_label)
 
     print(f'\n🔊 [{scenario_label}] Simulating noise (seed={noise_seed})...')
     noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
 
     _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
-                        combined_delta, cumulative_scale, scenario=scenario_label)
-    _cleanup_chunk_stoas(sim_out_dir, chunk_ids, scenario=scenario_label)
+                        combined_delta, n_active, n_total, scenario=scenario_label)
+    _cleanup_shard_stoas(sim_out_dir, all_shards, scenario=scenario_label)
     del noise_stoas, combined_delta; gc.collect()
 
     print(f'\n🔧 [{scenario_label}] Building Enterprise PTA...')
+    # Reconstruct signal stoas from saved residuals
+    resid_base   = os.path.join(sim_out_dir, f'residuals_{scenario_label}', 'combined')
+    signal_stoas = {}
+    for name in psr_names:
+        arr = np.load(os.path.join(resid_base, f'{name}.npy'))
+        signal_stoas[name] = arr
+
+    for psr in psrs_clean:
+        psr.stoas[:] = signal_stoas[psr.name]
+
     pta, epsrs = _build_pta(psrs_clean, raw_noise_params, Tspan_seconds)
     del psrs_clean; gc.collect()
 
     if args.cgw and len(baseline_candidates) > 0:
         _compute_cgw_snrs_scenario(
-            store=store, chunk_ids=chunk_ids,
+            store=store, active_shards=active_shard_ids,
             pta=pta, enterprise_psrs=epsrs,
             raw_noise_params=raw_noise_params,
             parsed_noise_params=parsed_noise_params,
@@ -996,24 +1256,16 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
 
 
 # =============================================================================
-# Per-simulation orchestrator
+# Per-sim orchestrator
 # =============================================================================
 
 def process_sim(
-    sim_id:            int,
+    sim_id:             int,
     args,
-    syn_scenarios:     dict,
+    syn_scenarios:      dict,
     combined_scenarios: dict,
-    noise_seed:        int,
+    noise_seed:         int,
 ) -> bool:
-    """
-    Orchestrate the per-simulation pipeline by launching each phase in a
-    clean subprocess.  The parent process holds only the argument namespace;
-    all pulsars and PTA objects live exclusively inside subprocesses.
-
-    Each subprocess exits completely before the next starts, so libstempo/
-    tempo2's C-level global state is guaranteed to be cleared between phases.
-    """
     t_sim       = time.time()
     sim_out_dir = os.path.join(args.output_dir, f'sim{sim_id:03d}')
 
@@ -1036,7 +1288,8 @@ def process_sim(
             '--snr-range',       str(args.snr_range[0]), str(args.snr_range[1]),
             '--sim-id',          str(sim_id),
             '--n-chunks',        str(args.n_chunks),
-            '--noise-seed-base', str(args.noise_seed_base),  # ← was --noise-seed
+            '--n-sub-chunks',    str(args.n_sub_chunks),
+            '--noise-seed-base', str(args.noise_seed_base),
             '--n-test',          str(args.n_test),
         ]
         if args.cgw:              argv.append('--cgw')
@@ -1047,7 +1300,6 @@ def process_sim(
             argv += ['--synthetic-pta-config', args.synthetic_pta_config]
         return argv
 
-    # Phase 1: baseline
     try:
         _run_phase(_common_argv() + ['--phase', 'baseline'],
                    label=f'sim{sim_id:03d}/baseline')
@@ -1055,7 +1307,6 @@ def process_sim(
         print(f'ERROR: {e}', file=sys.stderr)
         return False
 
-    # Phase 2: one subprocess per synthetic scenario
     for scenario_label in syn_scenarios:
         try:
             _run_phase(
@@ -1067,22 +1318,26 @@ def process_sim(
             print(f'ERROR: {e}', file=sys.stderr)
             return False
 
-    # Write completion sentinel (read cumulative_scale from handoff)
+    # Read handoff for summary metadata
     handoff_path = os.path.join(sim_out_dir, 'metadata', HANDOFF_FILENAME)
-    cumulative_scale = 1.0
+    n_active, n_total = 0, 0
     if os.path.isfile(handoff_path):
         with open(handoff_path) as fh:
-            cumulative_scale = json.load(fh).get('cumulative_scale', 1.0)
+            h = json.load(fh)
+            n_active = h.get('n_active_sub_chunks', 0)
+            n_total  = h.get('n_total_sub_chunks', 0)
 
     sentinel = os.path.join(sim_out_dir, 'metadata', 'stage2_complete.json')
     with open(sentinel, 'w') as fh:
         json.dump({
-            'sim_id':           sim_id,
-            'cumulative_scale': float(cumulative_scale),
-            'scenarios':        ['baseline'] + list(syn_scenarios.keys()),
-            'n_cgw_baseline':   N_GLOBAL_CGW_CANDIDATES,
-            'n_cgw_scenario':   N_SCENARIO_CGW_CANDIDATES,
-            'completed_at':     time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'sim_id':              sim_id,
+            'n_active_sub_chunks': n_active,
+            'n_total_sub_chunks':  n_total,
+            'fraction_used':       n_active / max(n_total, 1),
+            'scenarios':           ['baseline'] + list(syn_scenarios.keys()),
+            'n_cgw_baseline':      N_GLOBAL_CGW_CANDIDATES,
+            'n_cgw_scenario':      N_SCENARIO_CGW_CANDIDATES,
+            'completed_at':        time.strftime('%Y-%m-%dT%H:%M:%S'),
         }, fh, indent=2)
 
     elapsed = time.time() - t_sim
@@ -1091,7 +1346,7 @@ def process_sim(
 
 
 # =============================================================================
-# Per-simulation summary builder
+# Summary builder
 # =============================================================================
 
 def _build_summary_object(
@@ -1099,30 +1354,18 @@ def _build_summary_object(
     sim_id:              int,
     n_keep_per_category: int = 200,
 ) -> None:
-    """
-    Build a compact summary object covering all population shards for a sim.
-
-    Discovers all SNR fields (any attribute starting with 'cgw_snr') from the
-    first shard automatically.  Category indices are built with heapq so the
-    full population array never needs to be held in memory at once.
-
-    Writes summary.pkl.gz:
-        d['arrays']  — dict of np.ndarray, all same length (one entry per binary)
-        d['meta']    — category_indices, top_cgw_breakdowns, snr_fields, etc.
-    """
     sim_out_dir = os.path.join(output_dir, f'sim{sim_id:03d}')
     out_path    = os.path.join(sim_out_dir, 'summary.pkl.gz')
     pop_dir     = os.path.join(sim_out_dir, 'populations')
     store       = ShardedPickleStore(pop_dir)
-    chunk_ids   = store.available()
+    all_shards  = store.available()    # list of (chunk_id, sub_id)
 
     print(f'\n{"="*60}')
     print(f'Building summary — sim{sim_id:03d} → {out_path}')
     print(f'  n_keep_per_category = {n_keep_per_category}')
     print(f'{"="*60}')
 
-    # Discover field layout from first shard
-    first_pop  = store.read(chunk_ids[0])
+    first_pop  = store.read(*all_shards[0])
     snr_fields = [attr for attr in vars(first_pop) if attr.startswith('cgw_snr')]
     all_fields = [attr for attr in vars(first_pop)
                   if isinstance(getattr(first_pop, attr), np.ndarray)]
@@ -1130,7 +1373,6 @@ def _build_summary_object(
     print(f'  All fields  : {all_fields}')
     del first_pop
 
-    # Heap-based category tracking (never loads whole population into RAM)
     _param_categories: Dict[str, Tuple[list, bool, str]] = {
         'D_comov_near': ([], False, 'D_comov'),
         'D_comov_far':  ([], True,  'D_comov'),
@@ -1157,8 +1399,8 @@ def _build_summary_object(
     field_buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
     total_scanned = 0
 
-    for chunk_id in chunk_ids:
-        pop = store.read(chunk_id)
+    for chunk_id, sub_id in all_shards:
+        pop = store.read(chunk_id, sub_id)
         n   = len(pop)
 
         for field in all_fields:
@@ -1199,12 +1441,18 @@ def _build_summary_object(
     }
     arrays['global_idx'] = np.arange(total_scanned, dtype=np.int64)
 
-    # Top-5 CGW breakdowns written by _compute_cgw_snrs_baseline
     top_cgw_breakdowns = []
     breakdown_path = os.path.join(sim_out_dir, 'metadata', 'top_cgw_breakdowns.json')
     if os.path.isfile(breakdown_path):
         with open(breakdown_path) as fh:
             top_cgw_breakdowns = json.load(fh)
+
+    # Read handoff metadata for summary
+    handoff_path = os.path.join(sim_out_dir, 'metadata', HANDOFF_FILENAME)
+    handoff_meta = {}
+    if os.path.isfile(handoff_path):
+        with open(handoff_path) as fh:
+            handoff_meta = json.load(fh)
 
     payload = {
         'arrays': arrays,
@@ -1215,7 +1463,11 @@ def _build_summary_object(
             'snr_fields':          snr_fields,
             'category_indices':    category_indices,
             'top_cgw_breakdowns':  top_cgw_breakdowns,
-            'summary_version':     3,
+            'n_active_sub_chunks': handoff_meta.get('n_active_sub_chunks'),
+            'n_total_sub_chunks':  handoff_meta.get('n_total_sub_chunks'),
+            'fraction_used':       handoff_meta.get('n_active_sub_chunks', 0)
+                                   / max(handoff_meta.get('n_total_sub_chunks', 1), 1),
+            'summary_version':     4,
             'full_population':     True,
         },
     }
@@ -1224,13 +1476,6 @@ def _build_summary_object(
 
     size_mb = os.path.getsize(out_path) / 1e6
     print(f'✅ Summary written: {out_path}  ({size_mb:.1f} MB)')
-    print(f'   SNR fields: {snr_fields}')
-    print(f'   Load with:')
-    print(f'     import gzip, pickle')
-    print(f"     with gzip.open('{out_path}', 'rb') as f:")
-    print(f'         d = pickle.load(f)')
-    print(f"     arrays = d['arrays']")
-    print(f"     meta   = d['meta']")
 
 
 # =============================================================================
@@ -1238,24 +1483,25 @@ def _build_summary_object(
 # =============================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description='Stage 2: SNR scaling + CGW')
+    p = argparse.ArgumentParser(description='Stage 2: chunk-count SNR selection + CGW')
     p.add_argument('--output-dir',           type=str, required=True)
     p.add_argument('--config', '-c',         default='optimistic',
                    choices=list(config.POPULATION_CONFIGS.keys()))
     p.add_argument('--target-snr',           type=float, default=4.0)
     p.add_argument('--snr-range',            nargs=2, type=float, default=[3.5, 4.25])
     p.add_argument('--n-chunks',             type=int, required=True)
+    p.add_argument('--n-sub-chunks',         type=int, default=1,
+                   help='Number of sub-chunks per Slurm task (must match stage 1).')
     p.add_argument('--sim-id',               type=int, required=True)
     p.add_argument('--cgw',                  action='store_true')
     p.add_argument('--validate-proxy',       action='store_true')
     p.add_argument('--proxy-only',           action='store_true')
     p.add_argument('--n-test',               type=int, default=1_000)
     p.add_argument('--clean-failed',         action='store_true')
-    p.add_argument('--noise-seed-base',           type=int, default=None)
-    p.add_argument('--n-sims', type=int, default=1, help='Total number of simulations (for seeding purposes)')
+    p.add_argument('--noise-seed-base',      type=int, default=None)
+    p.add_argument('--n-sims',              type=int, default=1)
     p.add_argument('--synthetic-ptas',       action='store_true', default=False)
     p.add_argument('--synthetic-pta-config', type=str, default=None)
-    # Internal subprocess dispatch flags — not used by sbatch scripts directly
     p.add_argument('--phase',                type=str, default=None,
                    choices=['baseline', 'scenario'],
                    help=argparse.SUPPRESS)
@@ -1288,13 +1534,11 @@ def main():
     if args.sim_id is None:
         print('ERROR: --sim-id required', file=sys.stderr); sys.exit(1)
 
-    root_sq = np.random.SeedSequence(args.noise_seed_base)
-    sim_seq = root_sq.spawn(10000)[args.sim_id]
-
-    rng = np.random.default_rng(sim_seq)
+    root_sq  = np.random.SeedSequence(args.noise_seed_base)
+    sim_seq  = root_sq.spawn(10000)[args.sim_id]
+    rng      = np.random.default_rng(sim_seq)
     seed_int = rng.integers(2**31).item()
 
-    # Resolve synthetic scenarios
     if args.synthetic_ptas:
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
@@ -1306,11 +1550,11 @@ def main():
 
     combined_scenarios = dict(DEFAULT_SCENARIOS)
     combined_scenarios.update(syn_scenarios)
-
-    noise_seed = (args.noise_seed_base + args.sim_id**2 * 100) if args.noise_seed_base is not None else args.sim_id * 1000
+    noise_seed = (args.noise_seed_base + args.sim_id**2 * 10000
+                if args.noise_seed_base is not None
+                else args.sim_id * 10000)
 
     # ── Subprocess phase dispatch ─────────────────────────────────────────────
-    # These branches are only entered when this script is called by _run_phase.
     if args.phase == 'baseline':
         _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed)
         sys.exit(0)
@@ -1318,8 +1562,8 @@ def main():
     if args.phase == 'scenario':
         if not args.phase_scenario:
             sys.exit('ERROR: --phase scenario requires --phase-scenario <label>')
-        _phase_scenario(args, args.phase_scenario, combined_scenarios)  # ← indented
-        sys.exit(0)                                                      # ← indented
+        _phase_scenario(args, args.phase_scenario, combined_scenarios)
+        sys.exit(0)
 
     # ── Top-level orchestrator ────────────────────────────────────────────────
     print(f'\n{"="*60}')
@@ -1327,7 +1571,8 @@ def main():
     print(f'  Output dir    : {args.output_dir}')
     print(f'  Config        : {args.config}')
     print(f'  Target SNR    : {args.target_snr}  range={args.snr_range}')
-    print(f'  Chunks/sim    : {args.n_chunks}')
+    print(f'  Chunks/sim    : {args.n_chunks}  ×  {args.n_sub_chunks} sub-chunks')
+    print(f'  Total shards  : {args.n_chunks * args.n_sub_chunks}')
     print(f'  CGW           : {"enabled" if args.cgw else "disabled"}')
     print(f'  Noise seed    : {noise_seed}')
     print(f'  Syn scenarios : {list(syn_scenarios.keys()) or "none"}')

@@ -8,13 +8,13 @@ from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from config import Msun
 
 
-def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
+def compute_single_binary_os(binary, psrs_clean, noise_params, Tspan):
     """Compute OS for single binary with detailed diagnostics."""
     try:
         psrs_single = inject_population_nufft(psrs_clean, [binary], pure_signal=True, verbose=False)
         
         pta_single, _, params = build_pta_and_params(
-            psrs=psrs_single, noise_params_15yr=noise_params_15yr, 
+            psrs=psrs_single, noise_params=noise_params, 
             Tspan=Tspan, crn_name="gw"
         )
         
@@ -61,7 +61,7 @@ def compute_single_binary_os(binary, psrs_clean, noise_params_15yr, Tspan):
         return {'binary': binary, 'success': False, 'error': str(e)}
 
 
-def analyze_individual_binaries(population, psrs_clean, noise_params_15yr, Tspan,
+def analyze_individual_binaries(population, psrs_clean, noise_params, Tspan,
                                 max_binaries=50, sort_by='SNR'):
     """Analyze individual binaries to find loudest sources."""
     N_analyze = min(max_binaries, len(population)) if max_binaries else len(population)
@@ -79,7 +79,7 @@ def analyze_individual_binaries(population, psrs_clean, noise_params_15yr, Tspan
         if (i + 1) % 10 == 0:
             print(f"  Progress: {i+1}/{N_analyze}")
         
-        result = compute_single_binary_os(population[idx], psrs_clean, noise_params_15yr, Tspan)
+        result = compute_single_binary_os(population[idx], psrs_clean, noise_params, Tspan)
 
         if result['success']:
             result['index'] = idx
@@ -101,7 +101,7 @@ def analyze_individual_binaries(population, psrs_clean, noise_params_15yr, Tspan
 """
 # Run the analysis
 df = analyze_individual_binaries(
-    population, psrs_clean, noise_params_15yr, Tspan,
+    population, psrs_clean, noise_params, Tspan,
     max_binaries=50, sort_by='abs_SNR'
 )
 

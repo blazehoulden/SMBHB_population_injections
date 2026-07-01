@@ -4,7 +4,7 @@ from enterprise.signals.gp_bases import createfourierdesignmatrix_red
 from enterprise.signals.utils import create_quantization_matrix
 
 def pulsar_PSD_using_enterprise(psrs, noise_params, Tspan, nmodes=30):
-    pta, model, params = build_pta_and_params(psrs=psrs, noise_params_15yr=noise_params, Tspan=Tspan, include_GW=True)
+    pta, model, params = build_pta_and_params(psrs=psrs, noise_params=noise_params, Tspan=Tspan, include_GW=True)
     pulsar_PSD_total = np.zeros((len(psrs), nmodes))
     pulsar_PSD_red = np.zeros((len(psrs), nmodes))
     pulsar_PSD_white = np.zeros((len(psrs), nmodes))

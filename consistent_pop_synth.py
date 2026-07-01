@@ -44,7 +44,7 @@ def compute_population_snr(
     include_GW=True,
     include_RN=True,
     include_WN=True,
-    nmodes=150,
+    nmodes=120,
     curn_components=None,
     rn_components=None,
 ):
@@ -116,7 +116,7 @@ def compute_population_snr(
         print("Building PTA...")
     pta, _, params_out = build_pta_and_params(
         psrs=enterprise_psrs,
-        noise_params_15yr=raw_noise_params,
+        noise_params=raw_noise_params,
         Tspan=Tspan,
         include_GW=include_GW,
         include_RN=include_RN,
@@ -975,7 +975,7 @@ def generate_snr_consistent_population(
         # so both must be rebuilt after each injection.
         pta, _, params_out = build_pta_and_params(
             psrs              = psrs_clean,
-            noise_params_15yr = detailed_noise_params,
+            noise_params = detailed_noise_params,
             Tspan             = Tspan,
         )
         if verbose:

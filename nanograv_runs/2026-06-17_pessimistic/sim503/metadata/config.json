@@ -1,0 +1,18 @@
+{
+  "config": "pessimistic",
+  "target_snr": 3.75,
+  "snr_range": [
+    3.5,
+    4.0
+  ],
+  "n_chunks": 10,
+  "n_sub_chunks": 10,
+  "chunk_size": 50000000,
+  "sub_chunk_size": 5000000,
+  "Tspan_seconds": 505861299.1402199,
+  "synthetic_scenarios": [
+    "5x_cadence",
+    "5x_cad_2x_prec",
+    "hi_prec"
+  ]
+}

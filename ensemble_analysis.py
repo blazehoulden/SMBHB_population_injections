@@ -32,7 +32,7 @@
 #         if profile:
 #             t0 = time.time()
 #         pta, _, params_out = build_pta_and_params(
-#             psrs=psrs_injected, noise_params_15yr=params, 
+#             psrs=psrs_injected, noise_params=params, 
 #             Tspan=Tspan, use_efac_only=True
 #         )
 #         if profile:
@@ -233,7 +233,7 @@
 #         if profile:
 #             t0 = time.time()
 #         pta, _, params_out = build_pta_and_params(
-#             psrs=psrs_injected, noise_params_15yr=params, 
+#             psrs=psrs_injected, noise_params=params, 
 #             Tspan=Tspan, use_efac_only=True
 #         )
 #         if profile:
@@ -808,7 +808,7 @@
 # #         psrs_temp = inject_population_into_psrs(psrs_clean, pop_subset, pure_signal=True, verbose=False)
         
 # #         pta_temp, _, params_out = build_pta_and_params(
-# #             psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #             psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #         )
         
 # #         ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1037,7 +1037,7 @@
             
 # #             # Build PTA and compute OS
 # #             pta_temp, _, params_out = build_pta_and_params(
-# #                 psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                 psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #             )
             
 # #             ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1081,7 +1081,7 @@
 # #                             )
                             
 # #                             pta_temp, _, params_out = build_pta_and_params(
-# #                                 psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                                 psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #                             )
                             
 # #                             ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1325,7 +1325,7 @@
 # #         )
         
 # #         pta_temp, _, params_out = build_pta_and_params(
-# #             psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #             psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #         )
         
 # #         ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1372,7 +1372,7 @@
 # #                     )
                     
 # #                     pta_temp, _, params_out = build_pta_and_params(
-# #                         psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                         psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #                     )
                     
 # #                     ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1426,7 +1426,7 @@
                     
 # #                     # Compute SNR
 # #                     pta_temp, _, params_out = build_pta_and_params(
-# #                         psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                         psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #                     )
                     
 # #                     ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1482,7 +1482,7 @@
 # #                     )
                 
 # #                 pta_temp, _, params_out = build_pta_and_params(
-# #                     psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                     psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #                 )
                 
 # #                 ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1554,7 +1554,7 @@
 # #             )
             
 # #             pta_temp, _, params_out = build_pta_and_params(
-# #                 psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                 psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #             )
             
 # #             ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')
@@ -1648,7 +1648,7 @@
                 
 # #                 # Build PTA and compute OS
 # #                 pta_temp, _, params_out = build_pta_and_params(
-# #                     psrs=psrs_temp, noise_params_15yr=params, Tspan=Tspan, use_efac_only=True
+# #                     psrs=psrs_temp, noise_params=params, Tspan=Tspan, use_efac_only=True
 # #                 )
                 
 # #                 ostat = opt_stat.OptimalStatistic(psrs_temp, pta=pta_temp, orf='hd')

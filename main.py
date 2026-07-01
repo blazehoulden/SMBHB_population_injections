@@ -486,19 +486,20 @@ def main():
         print("\n" + "="*70)
         print("MAKING SENSITIVITY CURVES")
         print("="*70)
-
+        from data_loader import BEST_PSRS, SCENARIOS
         real_sc, real_dsc, curves = make_pta_sensitivity(
             psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds, thin = 30,
-            synthetic_configs=[
-                dict(label='5× cadence (best 5)', color='magenta',
-                    mode='best_cadence', cadence_factor=5),
-                dict(label='4× precision (best 5)', color='lime',
-                    mode='best_precision', toaerr_factor=0.25),
-                # dict(label='2× cadence (all)', color='gold',
-                #     mode='all_cadence', cadence_factor=2),
-                    dict(label='5× cadence, 4× precision (best 5)', color='navy',
-                    mode='best_both', cadence_factor=5, toaerr_factor=0.25),
-            ]
+            scenarios = SCENARIOS, best_psrs = BEST_PSRS,
+            # synthetic_configs=[
+            #     dict(label='5× cadence (best 5)', color='magenta',
+            #         mode='best_cadence', cadence_factor=5),
+            #     dict(label='4× precision (best 5)', color='lime',
+            #         mode='best_precision', toaerr_factor=0.25),
+            #     # dict(label='2× cadence (all)', color='gold',
+            #     #     mode='all_cadence', cadence_factor=2),
+            #         dict(label='5× cadence, 4× precision (best 5)', color='navy',
+            #         mode='best_both', cadence_factor=5, toaerr_factor=0.25),
+            # ]
         )
 
     if config.OPTIMAL_SNR_POPULATION:
@@ -537,7 +538,7 @@ def main():
         #     pulsars=psrs_clean, binaries=population, pulsar_noise_params=pulsar_noise_params
         # )
         # pta, model, params_complete = build_pta_and_params(
-        #     psrs=psrs_clean, noise_params_15yr=noise_params, Tspan=Tspan_seconds
+        #     psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan_seconds
         # )
         # get_noise_matrix(psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan_seconds)
         # save_results({
@@ -611,7 +612,7 @@ def main():
 
         from optimal_SNR_calc import get_pulsar_noise_psd
         pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_clean, noise_params_15yr=raw_noise_params, Tspan=Tspan_seconds
+            psrs=psrs_clean, noise_params=raw_noise_params, Tspan=Tspan_seconds
         )
         psd_list = []
         for i in range(len(psrs_clean)):
@@ -752,7 +753,7 @@ def main():
         )
         
         pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_injected, noise_params_15yr=raw_noise_params, Tspan=Tspan_seconds
+            psrs=psrs_injected, noise_params=raw_noise_params, Tspan=Tspan_seconds
         )
         
         print(f"✓ PTA built with {len(pta.params)} parameters")

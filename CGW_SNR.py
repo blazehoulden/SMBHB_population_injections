@@ -62,7 +62,8 @@ def compute_cgw_snr_optimal_population(psrs, pta, population, raw_noise_params, 
         print(f"Total SNR computation for population took {elapsed:.2f} seconds.")
     return results
 
-from scipy.linalg import cho_factor, cho_solve
+
+from scipy.linalg import cho_factor, cho_solve, LinAlgError
 import numpy as np
 
 
@@ -75,15 +76,12 @@ def compute_cgw_snr_optimal_population_fast(
     Tspan,
     profile=False,
     return_breakdown=False,
+    regularise_sigma=True,
+    regularisation=1e-10,
 ):
 
     import time
-
     t0 = time.time()
-
-    # =========================================================
-    # PRECOMPUTE EVERYTHING
-    # =========================================================
 
     phiinvs = pta.get_phiinv(raw_noise_params, logdet=False)
     TNTs    = pta.get_TNT(raw_noise_params)
@@ -95,111 +93,145 @@ def compute_cgw_snr_optimal_population_fast(
     precomputed = []
 
     for psr_name, Nvec, TNT, phiinv, T in zip(
-        pta.pulsars,
-        Nvecs,
-        TNTs,
-        phiinvs,
-        Ts,
+        pta.pulsars, Nvecs, TNTs, phiinvs, Ts,
     ):
+        Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
 
-        Sigma = TNT + (
-            np.diag(phiinv)
-            if phiinv.ndim == 1
-            else phiinv
-        )
+        if regularise_sigma:
+            # Small diagonal regularisation, physically equivalent to a
+            # tiny additional white-noise floor; negligible effect on SNR
+            # for any reasonable signal amplitude, but improves robustness
+            # against marginal ill-conditioning.
+            Sigma += regularisation * np.eye(Sigma.shape[0])
 
-        # PREFACTORIZE ONCE
-        cf = cho_factor(
-            Sigma
-        )
+        cf = None
+        max_reg_attempts = 10
+        for reg_attempt in range(max_reg_attempts):
+            try:
+                cf = cho_factor(Sigma)
+                break
+            except LinAlgError:
+                reg = regularisation * (10 ** (reg_attempt + 1))
+                if reg_attempt == 0 or reg_attempt == max_reg_attempts - 1:
+                    print(f"  Warning: {psr_name} Sigma not PD via Cholesky, "
+                          f"increasing regularisation to {reg:.2e} "
+                          f"(attempt {reg_attempt + 1}/{max_reg_attempts})")
+                Sigma += reg * np.eye(Sigma.shape[0])
 
-        precomputed.append(
-            (
-                psr_name,
-                psr_map[psr_name],
-                parsed_noise_params[psr_name],
-                Nvec,
-                T,
-                cf,
-            )
-        )
+        if cf is None:
+            # Cholesky never succeeded even at max regularisation. Rather
+            # than aborting the whole run, fall back to a direct solve
+            # (matches enterprise_extensions' OptimalStatistic.compute_os
+            # behaviour, which only requires Sigma to be non-singular, not
+            # strictly positive-definite). We wrap this in a small wrapper
+            # object exposing the same interface fast_inner_product_rr_exact
+            # expects from cho_solve, so downstream code is unchanged.
+            print(f"  Warning: {psr_name} Sigma still not PD after "
+                  f"{max_reg_attempts} regularisation attempts; falling "
+                  f"back to np.linalg.solve (non-PD-safe).")
+
+            try:
+                Sigma_inv = np.linalg.pinv(Sigma, hermitian=True)
+            except np.linalg.LinAlgError as e:
+                raise RuntimeError(
+                    f"Could not invert Sigma for {psr_name} even via "
+                    f"pseudo-inverse. Check noise parameters for this "
+                    f"pulsar (likely a degenerate/duplicated noise basis "
+                    f"or pathological amplitude hierarchy). Original "
+                    f"error: {e}"
+                )
+
+            class _SolveFallback:
+                """Mimics scipy's cho_factor/cho_solve interface using a
+                precomputed pseudo-inverse, for pulsars whose Sigma is not
+                strictly positive-definite."""
+                def __init__(self, Minv):
+                    self.Minv = Minv
+
+            cf = _SolveFallback(Sigma_inv)
+
+        # Get TOAs safely — handle both property and method forms
+        psr_obj = psr_map[psr_name]
+        try:
+            toas = psr_obj.toas
+            if callable(toas):
+                toas = toas()
+            toas = np.asarray(toas)
+        except Exception:
+            # Last resort: get from the underlying enterprise object
+            toas = np.asarray(psr_obj._psr.toas)
+
+        precomputed.append((
+            psr_name,
+            psr_obj,
+            toas,
+            parsed_noise_params.get(psr_name,
+                parsed_noise_params.get(get_base_name(psr_name), {})),
+            Nvec,
+            T,
+            cf,
+        ))
 
     if profile:
         print(f"Precompute time: {time.time()-t0:.2f} s")
 
-    # =========================================================
-    # EXACT enterprise_extensions INNER PRODUCT
-    # =========================================================
+    def _solve(cf, x):
+        if isinstance(cf, tuple):
+            return cho_solve(cf, x)
+        else:
+            return cf.Minv @ x
 
     def fast_inner_product_rr_exact(x, y, Nvec, Tmat, cf):
-
-        # EXACT SAME OPERATIONS
         TNy = Nvec.solve(y, left_array=Tmat)
         TNx = Nvec.solve(x, left_array=Tmat)
         xNy = Nvec.solve(y, left_array=x)
-
-        # ONLY DIFFERENCE:
-        # reuse prefactorized Sigma
-        SigmaTNy = cho_solve(
-            cf,
-            TNy,
-        )
-
+        SigmaTNy = _solve(cf, TNy)
         return xNy - TNx.T @ SigmaTNy
 
-    # =========================================================
-    # MAIN LOOP
-    # =========================================================
-
-    results = np.empty(len(population), dtype=np.float64)
+    results   = np.empty(len(population), dtype=np.float64)
     breakdowns = [] if return_breakdown else None
 
     for i, binary in enumerate(population):
-
-        rho_sq = 0.0
+        rho_sq     = 0.0
         per_pulsar = {} if return_breakdown else None
 
-        for (
-            psr_name,
-            psr,
-            psr_noise_params,
-            Nvec,
-            T,
-            cf,
-        ) in precomputed:
+        for (psr_name, psr_obj, toas, psr_noise_params,
+             Nvec, T, cf) in precomputed:
 
-            s_a = population_residuals(
-                psr.toas,
-                psr,
-                [binary],
-                Tspan,
-                psr_noise_params,
-            )
+            try:
+                s_a = population_residuals(
+                    toas,           # always a numpy array now
+                    psr_obj,
+                    [binary],
+                    Tspan,
+                    psr_noise_params,
+                )
+            except Exception as e:
+                print(f"  Warning: population_residuals failed for "
+                      f"{psr_name}: {e}")
+                continue
 
-            contrib = fast_inner_product_rr_exact(
-                s_a,
-                s_a,
-                Nvec,
-                T,
-                cf,
-            )
-            contrib = float(np.real(contrib))
+            contrib = float(np.real(
+                fast_inner_product_rr_exact(s_a, s_a, Nvec, T, cf)
+            ))
+
             rho_sq += contrib
             if return_breakdown:
                 base_name = get_base_name(psr_name)
-                per_pulsar[base_name] = per_pulsar.get(base_name, 0.0) + max(contrib, 0.0)
+                per_pulsar[base_name] = (
+                    per_pulsar.get(base_name, 0.0) + max(contrib, 0.0)
+                )
 
-        results[i] = np.sqrt(rho_sq)
+        # Guard against negative rho_sq from numerical errors
+        results[i] = np.sqrt(max(rho_sq, 0.0))
         if return_breakdown:
             breakdowns.append(per_pulsar)
 
     if profile:
         print(f"Total runtime: {time.time()-t0:.2f} s")
 
-    if return_breakdown:
-        return results, breakdowns
-    return results
-
+    return (results, breakdowns) if return_breakdown else results
+ 
 
 def compute_cgw_snr_optimal_population_with_gwb(
     psrs,

@@ -1640,3 +1640,556 @@ def test_simulator_consistency(psr_path, par_path, noise_dict, seed=42, tol_frac
 
     print("\n✓ All components within tolerance.")
     return results
+#### METHOD FOR MEERKAT ETC.
+import math
+import numpy as np
+ 
+day  = 86400.0
+year = 3.15581498e7
+ 
+# MPTA reference frequency
+NU_REF_MHZ = 1400.0  # Reference frequency in MHz
+ 
+ 
+def make_ideal_nofit(psr):
+    """Zero out residuals by adjusting TOAs."""
+    res = psr.residuals(updatebats=True, formresiduals=True)
+    psr.stoas[:] -= res / day
+ 
+ 
+def get_base_name(psrname):
+    """Extract base pulsar name by removing system suffix."""
+    for suffix in ['ao', 'gbt', 'vla', 'fast']:
+        if psrname.endswith(suffix):
+            return psrname[:-len(suffix)]
+    return psrname
+ 
+ 
+def _quantize_fast(times, flags=None, dt=1.0):
+    """Exact copy of libstempo's quantize_fast for binning TOAs."""
+    isort = np.argsort(times)
+    bucket_ref = [times[isort[0]]]
+    bucket_ind = [[isort[0]]]
+    for i in isort[1:]:
+        if times[i] - bucket_ref[-1] < dt:
+            bucket_ind[-1].append(i)
+        else:
+            bucket_ref.append(times[i])
+            bucket_ind.append([i])
+    avetoas = np.array([np.mean(times[ind]) for ind in bucket_ind], 'd')
+    if flags is not None:
+        aveflags = np.array([flags[ind[0]] for ind in bucket_ind])
+    U = np.zeros((len(times), len(bucket_ind)), 'd')
+    for i, l in enumerate(bucket_ind):
+        U[l, i] = 1
+    if flags is not None:
+        return avetoas, aveflags, U
+    else:
+        return avetoas, U
+ 
+ 
+def _add_efac(psr, efac, flagid, flags, seed=None):
+    """Add EFAC (quadrature jitter scaling) to TOAs."""
+    if seed is not None:
+        np.random.seed(seed)
+    flag_vals = np.array(psr.flagvals(flagid))
+    mask = np.array([fv == flags for fv in flag_vals])
+    noise = efac * psr.toaerrs * (1e-6 / day) * np.random.randn(psr.nobs)
+    psr.stoas[mask] += noise[mask]
+ 
+ 
+def _add_equad(psr, equad, flagid, flags, seed=None):
+    """Add EQUAD (timing system jitter) to TOAs."""
+    if seed is not None:
+        np.random.seed(seed)
+    flag_vals = np.array(psr.flagvals(flagid))
+    mask = np.array([fv == flags for fv in flag_vals])
+    noise = (equad / day) * np.random.randn(psr.nobs)
+    psr.stoas[mask] += noise[mask]
+ 
+ 
+def _add_ecorr(psr, ecorr, flagid, flags, coarsegrain=0.1, seed=None):
+    """Add ECORR (epoch-correlated jitter) to TOAs."""
+    if seed is not None:
+        np.random.seed(seed)
+    t = psr.toas()
+    f = np.array(psr.flagvals(flagid))
+    avetoas, aveflags, U = _quantize_fast(t, flags=f, dt=coarsegrain)
+    epoch_mask = np.array([fv == flags for fv in aveflags])
+    ecorrvec = np.where(epoch_mask, ecorr, 0.0)
+    psr.stoas[:] += (1 / day) * np.dot(U * ecorrvec, np.random.randn(U.shape[1]))
+ 
+ 
+def _add_red_noise_achromatic(psr, log10_A, gamma, components=10, tspan=None, seed=None, verbose=False):
+    """
+    Add ACHROMATIC RED NOISE (frequency-independent).
+    
+    P_red(f) = (A²/12π²) × (f/f_c)^(-γ)
+    
+    No frequency dependence - same at all observing frequencies.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    t = psr.toas()
+    minx, maxx = np.min(t), np.max(t)
+    if tspan is None:
+        x = (t - minx) / (maxx - minx)
+        T = (day / year) * (maxx - minx)
+    else:
+        x = (t - minx) / tspan
+        T = (day / year) * tspan
+    
+    A = 10**log10_A
+    norm = A**2 * year**2 / (12 * math.pi**2 * T)
+    
+    if verbose:
+        print(f"        T={T:.6f} yr, nobs={psr.nobs}, A={A:.4e}, γ={gamma:.3f}, norm={norm:.4e}")
+    
+    # Build design matrix with sine/cosine components
+    size = 2 * components
+    F = np.zeros((psr.nobs, size), 'd')
+    f = np.zeros(size, 'd')
+    
+    for i in range(components):
+        F[:, 2*i]   = np.cos(2 * math.pi * (i+1) * x)
+        F[:, 2*i+1] = np.sin(2 * math.pi * (i+1) * x)
+        f[2*i] = f[2*i+1] = (i+1) / T
+    
+    prior = norm * f**(-gamma)
+    y = np.sqrt(prior) * np.random.randn(size)
+    psr.stoas[:] += (1.0 / day) * np.dot(F, y)
+ 
+ 
+def _add_dm_noise(psr, log10_A_DM, gamma_DM, components=10, tspan=None, seed=None, verbose=False):
+    """
+    Add DM NOISE with proper frequency dependence (MPTA Eq. 7).
+    
+    P_DM(f; A_DM, γ_DM) = (A_DM²/12π²) × (f/f_c)^(-γ_DM) × (ν/ν_ref)^(-4)
+    
+    where:
+      - (f/f_c)^(-γ_DM): Power law in gravitational wave frequency f
+      - (ν/ν_ref)^(-4): Scaling with radio frequency ν
+      - ν_ref = 1400 MHz (MPTA reference)
+    
+    The frequency scaling comes from the fact that DM delays scale as 1/ν².
+    When computing power spectral density, this becomes (1/ν²)² = 1/ν⁴.
+    
+    Implementation:
+    1. Generate red noise Fourier coefficients
+    2. Scale amplitudes by (ν/ν_ref)^(-4) for each TOA
+    3. Generate time series from scaled coefficients
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Get observation frequencies (MHz)
+    try:
+        freqs_MHz = np.array(psr.freqs)
+        if freqs_MHz is None or len(freqs_MHz) == 0:
+            raise ValueError("No frequencies in pulsar object")
+    except (AttributeError, ValueError, TypeError):
+        # Fallback: assume 1400 MHz if not available
+        if verbose:
+            print(f"        WARNING: No frequency information in pulsar, assuming {NU_REF_MHZ:.0f} MHz")
+        freqs_MHz = np.full(psr.nobs, NU_REF_MHZ)
+    
+    # Time span setup
+    t = psr.toas()
+    minx, maxx = np.min(t), np.max(t)
+    if tspan is None:
+        x = (t - minx) / (maxx - minx)
+        T = (day / year) * (maxx - minx)
+    else:
+        x = (t - minx) / tspan
+        T = (day / year) * tspan
+    
+    # Power law parameters
+    A_DM = 10**log10_A_DM
+    norm = A_DM**2 * year**2 / (12 * math.pi**2 * T)
+    
+    if verbose:
+        print(f"        T={T:.6f} yr, nobs={psr.nobs}, A={A_DM:.4e}, γ={gamma_DM:.3f}")
+        print(f"        Freq range: {freqs_MHz.min():.0f} - {freqs_MHz.max():.0f} MHz")
+    
+    # Build design matrix
+    size = 2 * components
+    F = np.zeros((psr.nobs, size), 'd')
+    f = np.zeros(size, 'd')
+    
+    for i in range(components):
+        F[:, 2*i]   = np.cos(2 * math.pi * (i+1) * x)
+        F[:, 2*i+1] = np.sin(2 * math.pi * (i+1) * x)
+        f[2*i] = f[2*i+1] = (i+1) / T
+    
+    # Power law spectrum (before frequency scaling)
+    prior = norm * f**(-gamma_DM)
+    
+    # Draw Fourier coefficients
+    y = np.sqrt(prior) * np.random.randn(size)
+    
+    # Generate base red noise
+    red_noise = np.dot(F, y)  # Shape: (nobs,)
+    
+    # Apply FREQUENCY SCALING: (ν/ν_ref)^(-4)
+    # This is what makes it DM noise instead of generic red noise
+    freq_scaling = (freqs_MHz / NU_REF_MHZ)**(-4.0/2.0)  # Shape: (nobs,)
+    dm_noise = freq_scaling * red_noise
+    
+    psr.stoas[:] += (1.0 / day) * dm_noise
+ 
+ 
+def _add_chromatic_noise(psr, log10_A_chrom, gamma_chrom, beta, components=10, tspan=None, seed=None, verbose=False):
+    """
+    Add CHROMATIC NOISE (scattering/refractive index) with frequency dependence.
+    
+    P_chrom(f; A_ch, γ_ch) = (A_ch²/12π²) × (f/f_c)^(-γ_ch) × (ν/ν_ref)^(-β)
+    
+    where:
+      - (f/f_c)^(-γ_ch): Power law in gravitational wave frequency
+      - (ν/ν_ref)^(-β): Scaling with radio frequency
+      - β is the chromatic index (typically 2-4)
+    
+    The β parameter varies depending on the physical process:
+      - β = 2: Some absorption processes
+      - β = 4: Refractive index variations (common in ISM)
+      - β varies with frequency (more realistic models)
+    
+    For MPTA, β is extracted as the chrom_beta parameter.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Get observation frequencies (MHz)
+    try:
+        freqs_MHz = np.array(psr.freqs)
+        if freqs_MHz is None or len(freqs_MHz) == 0:
+            raise ValueError("No frequencies in pulsar object")
+    except (AttributeError, ValueError, TypeError):
+        if verbose:
+            print(f"        WARNING: No frequency information in pulsar, assuming {NU_REF_MHZ:.0f} MHz")
+        freqs_MHz = np.full(psr.nobs, NU_REF_MHZ)
+    
+    # Time span setup
+    t = psr.toas()
+    minx, maxx = np.min(t), np.max(t)
+    if tspan is None:
+        x = (t - minx) / (maxx - minx)
+        T = (day / year) * (maxx - minx)
+    else:
+        x = (t - minx) / tspan
+        T = (day / year) * tspan
+    
+    # Power law parameters
+    A_chrom = 10**log10_A_chrom
+    norm = A_chrom**2 * year**2 / (12 * math.pi**2 * T)
+    
+    if verbose:
+        print(f"        T={T:.6f} yr, nobs={psr.nobs}, A={A_chrom:.4e}, γ={gamma_chrom:.3f}, β={beta:.3f}")
+        print(f"        Freq range: {freqs_MHz.min():.0f} - {freqs_MHz.max():.0f} MHz")
+    
+    # Build design matrix
+    size = 2 * components
+    F = np.zeros((psr.nobs, size), 'd')
+    f = np.zeros(size, 'd')
+    
+    for i in range(components):
+        F[:, 2*i]   = np.cos(2 * math.pi * (i+1) * x)
+        F[:, 2*i+1] = np.sin(2 * math.pi * (i+1) * x)
+        f[2*i] = f[2*i+1] = (i+1) / T
+    
+    # Power law spectrum
+    prior = norm * f**(-gamma_chrom)
+    
+    # Draw Fourier coefficients
+    y = np.sqrt(prior) * np.random.randn(size)
+    
+    # Generate base red noise
+    red_noise = np.dot(F, y)  # Shape: (nobs,)
+    
+    # Apply FREQUENCY SCALING: (ν/ν_ref)^(-β)
+    # β is the chromatic index from MPTA extraction
+    freq_scaling = (freqs_MHz / NU_REF_MHZ)**(-beta)  # Shape: (nobs,)
+    chrom_noise = freq_scaling * red_noise
+    
+    psr.stoas[:] += (1.0 / day) * chrom_noise
+ 
+ 
+def _add_sw_noise(psr, log10_A_SW, gamma_SW, components=10, tspan=None, seed=None, verbose=False):
+    """
+    Add SOLAR WIND NOISE with frequency dependence.
+    
+    P_SW(f; A_SW, γ_SW) = (A_SW²/12π²) × (f/f_c)^(-γ_SW) × (ν/ν_ref)^(-4)
+    
+    Similar to DM noise (both scale as 1/ν²), so same (ν/ν_ref)^(-4) scaling.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Get observation frequencies
+    try:
+        freqs_MHz = np.array(psr.freqs)
+        if freqs_MHz is None or len(freqs_MHz) == 0:
+            raise ValueError("No frequencies in pulsar object")
+    except (AttributeError, ValueError, TypeError):
+        if verbose:
+            print(f"        WARNING: No frequency information in pulsar, assuming {NU_REF_MHZ:.0f} MHz")
+        freqs_MHz = np.full(psr.nobs, NU_REF_MHZ)
+    
+    # Time span setup
+    t = psr.toas()
+    minx, maxx = np.min(t), np.max(t)
+    if tspan is None:
+        x = (t - minx) / (maxx - minx)
+        T = (day / year) * (maxx - minx)
+    else:
+        x = (t - minx) / tspan
+        T = (day / year) * tspan
+    
+    # Power law parameters
+    A_SW = 10**log10_A_SW
+    norm = A_SW**2 * year**2 / (12 * math.pi**2 * T)
+    
+    if verbose:
+        print(f"        T={T:.6f} yr, nobs={psr.nobs}, A={A_SW:.4e}, γ={gamma_SW:.3f}")
+    
+    # Build design matrix
+    size = 2 * components
+    F = np.zeros((psr.nobs, size), 'd')
+    f = np.zeros(size, 'd')
+    
+    for i in range(components):
+        F[:, 2*i]   = np.cos(2 * math.pi * (i+1) * x)
+        F[:, 2*i+1] = np.sin(2 * math.pi * (i+1) * x)
+        f[2*i] = f[2*i+1] = (i+1) / T
+    
+    # Power law spectrum
+    prior = norm * f**(-gamma_SW)
+    
+    # Draw Fourier coefficients
+    y = np.sqrt(prior) * np.random.randn(size)
+    
+    # Generate base red noise
+    red_noise = np.dot(F, y)
+    
+    # Apply FREQUENCY SCALING: (ν/ν_ref)^(-4) (same as DM)
+    freq_scaling = (freqs_MHz / NU_REF_MHZ)**(-4.0/2.0)
+    sw_noise = freq_scaling * red_noise
+    
+    psr.stoas[:] += (1.0 / day) * sw_noise
+ 
+ 
+def _get_system_list(basename, psr_keys, patterns):
+    """Extract unique system/backend names from noise_dict keys."""
+    systems = set()
+    for k in psr_keys:
+        key_suffix = k.replace(f"{basename}_", "")
+        for pattern in patterns:
+            if key_suffix.endswith(pattern):
+                system = key_suffix.replace(pattern, "")
+                if system:
+                    systems.add(system)
+    return systems
+ 
+ 
+def get_rn_components(par_path, default=30):
+    """Determine number of red noise components from .par file."""
+    if par_path is None:
+        return default
+    
+    try:
+        with open(par_path) as f:
+            for line in f:
+                key = line.strip().split()[0].upper() if line.strip() else ''
+                if key in ('RNAMP', 'RNIDX'):
+                    return 100
+                if key == 'TNREDC':
+                    try:
+                        return int(float(line.strip().split()[1]))
+                    except (IndexError, ValueError):
+                        pass
+    except (IOError, FileNotFoundError):
+        pass
+    
+    return default
+ 
+ 
+def simulate_psr(psr, noise_dict,
+                 add_WN=True, add_RN=True, add_DM=True, add_chrom=True, add_SW=False,
+                 seed=None, par_path=None, verbose=False):
+    """
+    Inject noise processes into a pulsar with CORRECT frequency dependence.
+    
+    Uses MPTA Equation 7 for DM noise:
+    
+    P_DM(f; A_DM, γ_DM) = (A_DM²/12π²) × (f/f_c)^(-γ_DM) × (ν/ν_ref)^(-4)
+    
+    where ν is the radio observation frequency from the .tim file, and Equation 8 for chromatic noise:
+    
+    P_chrom(f; A_chrom, γ_chrom, beta) = (A_chrom²/12π²) × (f/f_c)^(-γ_chrom) × (ν/ν_ref)^(-2 * beta)
+    
+    Parameters:
+    -----------
+    psr : libstempo.tempopulsar
+        The pulsar to add noise to
+    noise_dict : dict
+        Parameters from MPTA extraction
+    add_WN, add_RN, add_DM, add_chrom, add_SW : bool
+        Which noise types to inject
+    seed : int, optional
+        Random seed
+    par_path : str, optional
+        Path to .par file for RN components
+    verbose : bool
+        Print diagnostic information
+    
+    Returns:
+    --------
+    psr : modified pulsar object
+    """
+    psrname  = psr.name
+    basename = get_base_name(psrname)
+    psr_keys = {k: v for k, v in noise_dict.items()
+                if k.startswith(basename + '_')}
+    rn_seed    = seed
+    dm_seed    = seed + 1 if seed is not None else None
+    chrom_seed = seed + 2 if seed is not None else None
+    sw_seed    = seed + 3 if seed is not None else None
+    wn_seed    = seed + 4 if seed is not None else None
+    
+    if not psr_keys:
+        if verbose:
+            print(f"  [{psrname}] no parameters found, returning unmodified")
+        return psr
+    
+    if verbose:
+        print(f"  [{psrname}] found {len(psr_keys)} parameters")
+    
+    # Zero residuals
+    if verbose:
+        print(f"  [{psrname}] zeroing residuals...", flush=True)
+    make_ideal_nofit(psr)
+    
+    t = psr.toas()
+    tspan = t.max() - t.min()
+    if verbose:
+        print(f"  [{psrname}] tspan = {tspan/365.25:.3f} yr, nobs = {psr.nobs}")
+    
+    # ========== RED NOISE (ACHROMATIC) ==========
+    if add_RN:
+        rn_log10_A_key = f"{basename}_red_log10_A"
+        rn_gamma_key   = f"{basename}_red_gamma"
+        
+        if rn_log10_A_key in psr_keys and rn_gamma_key in psr_keys:
+            log10_A = psr_keys[rn_log10_A_key]
+            gamma   = psr_keys[rn_gamma_key]
+            rn_components = get_rn_components(par_path, default=120)
+            
+            if verbose:
+                print(f"  [{psrname}] adding red noise (components={rn_components})...", flush=True)
+            
+            _add_red_noise_achromatic(psr, log10_A, gamma, components=rn_components,
+                                      tspan=tspan, seed=rn_seed, verbose=verbose)
+        elif verbose:
+            print(f"  [{psrname}] red noise not in parameters, skipping")
+    
+    # ========== DM NOISE ==========
+    if add_DM:
+        dm_log10_A_key = f"{basename}_dm_log10_A"
+        dm_gamma_key   = f"{basename}_dm_gamma"
+        
+        if dm_log10_A_key in psr_keys and dm_gamma_key in psr_keys:
+            log10_A = psr_keys[dm_log10_A_key]
+            gamma   = psr_keys[dm_gamma_key]
+            dm_components = get_rn_components(par_path, default=120)
+            
+            if verbose:
+                print(f"  [{psrname}] adding DM noise (components={dm_components})...", flush=True)
+            
+            _add_dm_noise(psr, log10_A, gamma, components=dm_components,
+                         tspan=tspan, seed=dm_seed, verbose=verbose)
+        elif verbose:
+            print(f"  [{psrname}] DM noise not in parameters, skipping")
+    
+    # ========== CHROMATIC NOISE ==========
+    if add_chrom:
+        chrom_log10_A_key = f"{basename}_chrom_log10_A"
+        chrom_gamma_key   = f"{basename}_chrom_gamma"
+        chrom_beta_key    = f"{basename}_chrom_beta"
+        
+        if (chrom_log10_A_key in psr_keys and chrom_gamma_key in psr_keys and 
+            chrom_beta_key in psr_keys):
+            log10_A = psr_keys[chrom_log10_A_key]
+            gamma   = psr_keys[chrom_gamma_key]
+            beta    = psr_keys[chrom_beta_key]
+            chrom_components = get_rn_components(par_path, default=120)
+            
+            if verbose:
+                print(f"  [{psrname}] adding chromatic noise (β={beta:.2f}, components={chrom_components})...",
+                      flush=True)
+            
+            _add_chromatic_noise(psr, log10_A, gamma, beta, components=chrom_components,
+                                tspan=tspan, seed=chrom_seed, verbose=verbose)
+        elif verbose:
+            print(f"  [{psrname}] chromatic noise not in parameters, skipping")
+    
+    # ========== SOLAR WIND NOISE ==========
+    if add_SW:
+        sw_log10_A_key = f"{basename}_sw_log10_A"
+        sw_gamma_key   = f"{basename}_sw_gamma"
+        
+        if sw_log10_A_key in psr_keys and sw_gamma_key in psr_keys:
+            log10_A = psr_keys[sw_log10_A_key]
+            gamma   = psr_keys[sw_gamma_key]
+            sw_components = get_rn_components(par_path, default=120)
+            
+            if verbose:
+                print(f"  [{psrname}] adding solar wind noise (components={sw_components})...", flush=True)
+            
+            _add_sw_noise(psr, log10_A, gamma, components=sw_components,
+                         tspan=tspan, seed=sw_seed, verbose=verbose)
+        elif verbose:
+            print(f"  [{psrname}] solar wind noise not in parameters, skipping")
+    
+    # ========== WHITE NOISE ==========
+    if add_WN:
+        try:
+            flag_vals = np.array(psr.flagvals('f'))
+        except Exception:
+            flag_vals = np.array([''] * psr.nobs)
+        
+        wn_patterns = ['_efac', '_log10_equad', '_log10_ecorr']
+        systems = _get_system_list(basename, psr_keys, wn_patterns)
+        
+        if verbose and systems:
+            print(f"  [{psrname}] found {len(systems)} systems: {systems}")
+        
+        for sys in systems:
+            mask = np.array([sys in str(fv) for fv in flag_vals])
+            if mask.sum() == 0:
+                if verbose:
+                    print(f"  [{psrname}] no TOAs for system {sys}, skipping")
+                continue
+            
+            efac = psr_keys.get(f"{basename}_{sys}_efac", 1.0)
+            log10_equad = psr_keys.get(f"{basename}_{sys}_log10_equad",
+                          psr_keys.get(f"{basename}_{sys}_log10_t2equad", -100.0))
+            equad = 10**log10_equad
+            
+            log10_ecorr = psr_keys.get(f"{basename}_{sys}_log10_ecorr", -100.0)
+            ecorr = 10**log10_ecorr
+            
+            if verbose:
+                print(f"  [{psrname}] {sys}: EFAC={efac:.4f}, EQUAD={equad:.4e}, "
+                      f"ECORR={ecorr:.4e} ({mask.sum()} TOAs)", flush=True)
+            
+            if efac > 0.1:
+                _add_efac(psr, efac, flagid='f', flags=sys, seed=wn_seed)
+            if equad > 1e-8:
+                _add_equad(psr, equad, flagid='f', flags=sys, seed=int(wn_seed+1))
+            if ecorr > 1e-8:
+                _add_ecorr(psr, ecorr, flagid='f', flags=sys, seed=int(wn_seed+2))
+
+    if verbose:
+        print(f"  [{psrname}] done", flush=True)
+    return psr

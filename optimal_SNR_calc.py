@@ -1065,7 +1065,7 @@ def plot_overlap_reduction_function(pulsars, binaries, parsed_noise_params):
 
 
 def pulsar_PSD_using_enterprise(psrs, raw_noise_params, parsed_noise_params, Tspan, nmodes=30, debug_pulsar_idx=0):
-    pta, model, params = build_pta_and_params(psrs=psrs, noise_params_15yr=raw_noise_params, Tspan=Tspan, include_GW=True, nmodes=nmodes)
+    pta, model, params = build_pta_and_params(psrs=psrs, noise_params=raw_noise_params, Tspan=Tspan, include_GW=True, nmodes=nmodes)
     
     fyr = 1.0 / (365.25 * 86400)
 
@@ -2305,7 +2305,7 @@ def compare_to_enterprise_os(
     # ------------------------------------------------------------------
     pta_cmp, _, params_cmp = build_pta_and_params(
         psrs              = pulsars,
-        noise_params_15yr = raw_noise_params,
+        noise_params = raw_noise_params,
         Tspan             = Tspan,
         include_GW        = True,
         nmodes            = nmodes,
@@ -2686,7 +2686,7 @@ def get_enterprise_noise_per_mode(
 
     pta, _, params = build_pta_and_params(
         psrs              = psrs_clean,
-        noise_params_15yr = raw_noise_params,
+        noise_params = raw_noise_params,
         Tspan             = Tspan,
         include_GW        = True,
         nmodes            = nmodes,
@@ -2803,7 +2803,7 @@ def sigma_ab_all_pairs_enterprise(
     # Build PTA again to get chi — or reuse if you have it
     pta, _, params = build_pta_and_params(
         psrs              = psrs_clean,
-        noise_params_15yr = raw_noise_params,
+        noise_params = raw_noise_params,
         Tspan             = Tspan,
         include_GW        = True,
         nmodes            = nmodes,

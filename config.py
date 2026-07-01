@@ -19,45 +19,52 @@ POPULATION_CONFIGS = {
         'description': 'Tiny population for local testing'
     },
     'pessimistic': {
-        'n_binaries': 400_000_000,
+        'n_binaries': 500_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(8.7),
-        'z_max': 1.0,
+        'z_max': 3.0,
         'description': 'Lower mass, higher population size'
     },
     'realistic': {
         'n_binaries': 20_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.0),
-        'z_max': 1.0,
+        'z_max': 3.0,
         'description': 'Medium mass, medium population size'
     },
     'optimistic': {
-        'n_binaries': 5_000_000,
+        'n_binaries': 625_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.3),
-        'z_max': 1.0,
+        'z_max': 3.0,
         'description': 'Higher mass, lower population size'
     }
 }
 
 # Data directories
-NANOGRAV_PULSARS = True
+NANOGRAV_PULSARS = False
+MEERKAT_PULSARS = True
 
 if NANOGRAV_PULSARS:
     # PAR_DIR = "./psars_narrowband/alternate/tempo2"
     # TIM_DIR = "./psars_narrowband/alternate/tim/initial"
     PAR_DIR = "./psars_narrowband/par/"
     TIM_DIR = "./psars_narrowband/tim/"
+    USE_PULSAR_CACHE = True
+    PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
+    NOISEFILE = '15yr_noise.json'
+
+elif MEERKAT_PULSARS:
+    PAR_DIR = "meerkat_partim/"
+    TIM_DIR = "meerkat_partim/"
     USE_PULSAR_CACHE = False
-    NANOGRAV_PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
+    PULSAR_CACHE = None
+    NOISEFILE = 'meerkat_45yr_noise.json'
 else:
     PAR_DIR = "pulsars/"
     TIM_DIR = "pulsars/"
     USE_PULSAR_CACHE = False
-
-# Noise file
-NOISEFILE = '15yr_noise.json'
+    NOISEFILE = '15yr_noise.json'
 
 # Analysis flags
 RUN_INITIAL_INJECTION_ANALYSIS = False
@@ -89,7 +96,7 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, n_binaries = None, compute_strain=False, T_obs_seconds=16.03 * 365.25 * 86400, seed=None):
+def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, compute_strain=False, seed=None):
     """Generate SMBHB population with given configuration."""
     if compute_strain:
 
@@ -98,7 +105,7 @@ def generate_population(config, smbhb_module, n_binaries = None, compute_strain=
             z_max=config['z_max'],
             mass_distribution=config['mass_distribution'],
             alpha_0=1.21,
-            alpha_z=0.0,
+            alpha_z=0.03,
             mass_min=10**(7.5),
             mass_max=10**(12.5),
             mass_cutoff_0=config['mass_cutoff_0'],
@@ -118,7 +125,7 @@ def generate_population(config, smbhb_module, n_binaries = None, compute_strain=
             n_binaries=n_binaries if n_binaries is not None else config['n_binaries'],
             mass_distribution=config['mass_distribution'],
             alpha_0=1.21,
-            alpha_z=0.0,
+            alpha_z=0.03,
             mass_min=10**(7.5),
             mass_max=10**(12.5),
             mass_cutoff_0=config['mass_cutoff_0'],

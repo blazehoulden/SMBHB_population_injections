@@ -7,7 +7,7 @@ from copy import deepcopy
 from enterprise.pulsar import Pulsar
 import sys
 from collections import defaultdict
-from config import PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, NANOGRAV_PULSAR_CACHE, NOISEFILE
+from config import NANOGRAV_PULSARS, PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, PULSAR_CACHE, NOISEFILE
 import libstempo as T
 from signal_injection import get_base_name
 
@@ -32,7 +32,7 @@ def tim_has_toas(tim_path):
 SKIP_PULSARS = {}
 MAX_SYNTH_TOAS = None
 
-def filter_pulsars_15yr(psrs, min_baseline_years=3.0, verbose=True):
+def filter_pulsars_15yr(psrs, min_baseline_years=0.0, verbose=True):
     """Filter to 15yr pulsars with sufficient baseline."""
     with open(NOISEFILE, 'r') as f:
         params = json.load(f)
@@ -219,10 +219,30 @@ def parse_pulsar_parameters(json_file_path):
 #     'J0030+0451', 'J1744-1134',
 # )
 
-BEST_PSRS = (
+BEST_PSRS_NANOGrav = (
     'J1713+0747', 'J1909-3744', 'J2043+1711',
-    'J1741+1351', 'J1600-3053',
+    'J1741+1351', 'J1918-0642'
 )
+BEST_PSRS_MEERKAT_SENS = (
+    'J2241-5236', 'J1744-1134', 'J0437-4715', 
+    'J2010-1323', 'J2124-3358', 'J1918-0642',
+    'J1732-5049', 'J1603-7202', 'J2129-5721',
+    'J0711-6830', 'J2145-0750', 'J1022+1001',
+    'J0030+0451', 'J1547-5709', 'J1435-6100',
+    'J1446-4701', 'J1455-3330', 'J2150-0326',
+    'J2322-2650', 'J1946-5403'
+)
+BEST_PSRS_MEERKAT = (
+    'J1327-0755', 'J1545-4550', 'J0613-0200', 
+    'J2322-2650', 'J1918-0642', 'J1446-4701', 
+    'J2039-3616', 'J1744-1134', 'J1125-6014', 
+    'J2124-3358', 'J1732-5049', 'J1946-5403', 
+    'J0711-6830', 'J1629-6902', 'J2010-1323', 
+    'J2129-5721', 'J1909-3744', 'J0125-2327', 
+    'J0437-4715', 'J2241-5236'
+)
+
+BEST_PSRS = BEST_PSRS_NANOGrav if NANOGRAV_PULSARS else BEST_PSRS_MEERKAT
  
 # Each scenario entry:
 #   cadence_factor  int    — TOA grid multiplier   (1 = unchanged)
@@ -235,21 +255,57 @@ SCENARIOS = {
         toaerr_factor  = 1.0,
         best_only      = True,
     ),
-    '5x_cadence': dict(
-        cadence_factor = 5,
+    '4x_cadence': dict(
+        cadence_factor = 4,
         toaerr_factor  = 1.0,
         best_only      = True,
     ),
-    '4x_precision': dict(
+    #     # New: per-pulsar control
+    # 'hi_prec': dict(
+    #     cadence_factor = 1,      # default for any best pulsar not listed below
+    #     toaerr_factor  = 1.0,    # default for any best pulsar not listed below
+    #     best_only      = True,
+    #     per_pulsar     = {
+    #         'J1713+0747':  dict(cadence_factor=1, toaerr_factor=0.5),
+    #         'J1909-3744':  dict(cadence_factor=1,  toaerr_factor=0.5),
+    #         'J2043+1711':  dict(cadence_factor=1,  toaerr_factor=0.25),
+    #         'J1741+1351':  dict(cadence_factor=1,  toaerr_factor=0.25),
+    #         'J1918-0642':  dict(cadence_factor=1,  toaerr_factor=0.25),
+    #     },
+    # ),
+    '2x_precision': dict(
         cadence_factor = 1,
-        toaerr_factor  = 0.25,
+        toaerr_factor  = 0.5,
         best_only      = True,
     ),
-    '5x_cad_4x_prec': dict(
-        cadence_factor = 5,
-        toaerr_factor  = 0.25,
+    '2x_cad_2x_prec': dict(
+        cadence_factor = 2,
+        toaerr_factor  = 0.5,
         best_only      = True,
     ),
+    '4x_cad_2x_prec': dict(
+        cadence_factor = 4,
+        toaerr_factor  = 0.5,
+        best_only      = True,
+    ),
+    # '5x_cad_4x_prec': dict(
+    #     cadence_factor = 5,
+    #     toaerr_factor  = 0.25,
+    #     best_only      = True,
+    # ),
+    # # New: per-pulsar control
+    # 'hi_prec_hi_cad': dict(
+    #     cadence_factor = 1,      # default for any best pulsar not listed below
+    #     toaerr_factor  = 1.0,    # default for any best pulsar not listed below
+    #     best_only      = True,
+    #     per_pulsar     = {
+    #         'J1713+0747':  dict(cadence_factor=5, toaerr_factor=0.5),
+    #         'J1909-3744':  dict(cadence_factor=5,  toaerr_factor=0.5),
+    #         'J2043+1711':  dict(cadence_factor=5,  toaerr_factor=0.25),
+    #         'J1741+1351':  dict(cadence_factor=5,  toaerr_factor=0.25),
+    #         'J1918-0642':  dict(cadence_factor=5,  toaerr_factor=0.25),
+    #     },
+    # ),
 }
 
 
@@ -748,7 +804,7 @@ def load_pulsars(
     _tim_dir    = tim_dir      or TIM_DIR
     _skip       = skip_pulsars if skip_pulsars is not None else SKIP_PULSARS
     _use_cache  = use_cache    if use_cache    is not None else USE_PULSAR_CACHE
-    _cache_path = cache_path   or NANOGRAV_PULSAR_CACHE
+    _cache_path = cache_path   or PULSAR_CACHE
     _scenarios  = scenarios    if scenarios    is not None else SCENARIOS
 
     if scenario not in _scenarios:

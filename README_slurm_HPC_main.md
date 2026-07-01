@@ -167,22 +167,23 @@ Results appear in each `pop_{NNNN}_result.json` under the `"cgw"` key.
 
 ### Optimistic settings
 ```bash
-sbatch submit_main_HPC.sh --config optimistic --simulations 2 --chunk-size 5_000_000 --n-chunks 1 --cgw --s1-time "00:55:00" --s1-mem "15G" --s2-time "04:40:00" --s2-mem "38G" --synthetic-ptas --snr-range 3.5 4.0 --sim-start 471
+sbatch submit_main_HPC.sh --config optimistic --simulations 10 --chunk-size 625_000 --n-chunks 1 --n-sub-chunks 100 --cgw --s1-time "00:55:00" --s1-mem "23G" --s2-time "04:40:00" --s2-mem "38G" --snr-range 3.0 3.3 --sim-start 506
 ```
 
 ### Pessimistic settings
 ```bash
-sbatch submit_main_HPC.sh --config pessimistic --simulations 2 --chunk-size 50_000_000 --n-chunks 8  --cgw --s1-time "03:35:00" --s1-mem "30G" --s2-time "04:50:00" --s2-mem "38G" --synthetic-ptas --snr-range 3.5 4.0 --sim-start 547
+sbatch submit_main_HPC.sh --config pessimistic --simulations 10 --chunk-size 50_000_000 --n-chunks 10 --n-sub-chunks 10 --cgw --s1-time "01:30:00" --s1-mem "30G" --s2-time "06:00:00" --s2-mem "38G" --snr-range 3.0 3.3 
 ```
 
 ### Realistic settings
 ```bash
-sbatch submit_main_HPC.sh --config realistic --simulations 3 --chunk-size 20_000_000 --n-chunks 1 --cgw --s1-time "01:35:00" --s1-mem "20G" --s2-time "04:40:00" --s2-mem "38G" --synthetic-ptas --snr-range 3.5 4.0 --sim-start 508
+sbatch submit_main_HPC.sh --config realistic --simulations 10 --chunk-size 20_000_000 --n-chunks 1 --n-sub-chunks 100 --cgw --s1-time "00:45:00" --s1-mem "12G" --s2-time "04:40:00" --s2-mem "20G" --snr-range 3.0 3.3
 ```
 
 ### Test settings
-sbatch submit_main_HPC.sh --config test --simulations 1 --chunk-size 20_000 --n-chunks 1 --cgw --s1-time "00:10:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G" --proxy-only --n-test 20_000
-
+```bash
+sbatch submit_main_HPC.sh --config test --simulations 1 --chunk-size 20_000 --n-chunks 1 --cgw --s1-time "00:30:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G" --snr-range 3.0 3.3 
+```
 ## Files
 
 | File                  | Description                              |

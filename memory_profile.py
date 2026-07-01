@@ -99,7 +99,7 @@ def monitor_script():
     # Build PTA (also memory intensive)
     print("Building PTA...")
     pta, model, params_complete = build_pta_and_params(
-        psrs=psrs_injected, noise_params_15yr=noise_params, Tspan=Tspan
+        psrs=psrs_injected, noise_params=noise_params, Tspan=Tspan
     )
     
     mem_after_pta = get_memory_usage()

@@ -1,0 +1,15 @@
+{
+  "sim_id": 41,
+  "n_active_sub_chunks": 5,
+  "n_total_sub_chunks": 100,
+  "fraction_used": 0.05,
+  "scenarios": [
+    "baseline",
+    "5x_cadence",
+    "5x_cad_2x_prec",
+    "hi_prec"
+  ],
+  "n_cgw_baseline": 12500,
+  "n_cgw_scenario": 1000,
+  "completed_at": "2026-06-17T07:49:52"
+}

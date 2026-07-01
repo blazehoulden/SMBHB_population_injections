@@ -1,0 +1,104 @@
+sim_id,status,phase_reached,resumable,reason,log_file
+2,incomplete_late,baseline+scenarios (0/2 done),True,SNR converged but all scenarios not done; can resume,runs/2026-06-16_optimistic/logs/stage2_sim002_try1_13220051.out
+3,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim003_try1_13221595.out
+4,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim004_try1_13224011.out
+5,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim005_try1_13232848.out
+6,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim006_try1_13232852.out
+7,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim007_try1_13232856.out
+8,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim008_try1_13232860.out
+9,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim009_try1_13232864.out
+10,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim010_try1_13232868.out
+11,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim011_try1_13232872.out
+12,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim012_try1_13232876.out
+13,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim013_try1_13232880.out
+14,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim014_try1_13232884.out
+15,incomplete_late,scenario 2/3,True,Baseline+CGW done; timed out in scenario phases (1/3 completed),runs/2026-06-16_optimistic/logs/stage2_sim015_try1_13232888.out
+16,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim016_try1_13232892.out
+17,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim017_try1_13232896.out
+18,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim018_try1_13232900.out
+19,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim019_try1_13232904.out
+20,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim020_try1_13232908.out
+21,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim021_try1_13232912.out
+22,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim022_try1_13232916.out
+23,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim023_try1_13232920.out
+24,incomplete_late,scenario 3/4,True,Baseline+CGW done; timed out in scenario phases (2/4 completed),runs/2026-06-16_optimistic/logs/stage2_sim024_try1_13232924.out
+25,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim025_try1_13232928.out
+26,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim026_try1_13232932.out
+27,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim027_try1_13232936.out
+28,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim028_try1_13232940.out
+29,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim029_try1_13232944.out
+30,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim030_try1_13232948.out
+31,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim031_try1_13232952.out
+32,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim032_try1_13232956.out
+33,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim033_try1_13232960.out
+34,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim034_try1_13232964.out
+35,incomplete_late,scenario 2/3,True,Baseline+CGW done; timed out in scenario phases (1/3 completed),runs/2026-06-16_optimistic/logs/stage2_sim035_try1_13232968.out
+36,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim036_try1_13232972.out
+37,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim037_try1_13232976.out
+38,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim038_try1_13232980.out
+39,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim039_try1_13232984.out
+40,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim040_try1_13232988.out
+41,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim041_try1_13232992.out
+42,incomplete_late,scenario 2/3,True,Baseline+CGW done; timed out in scenario phases (1/3 completed),runs/2026-06-16_optimistic/logs/stage2_sim042_try1_13232996.out
+43,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim043_try1_13233000.out
+44,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim044_try1_13233004.out
+45,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim045_try1_13233008.out
+46,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim046_try1_13233012.out
+47,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim047_try1_13233016.out
+48,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim048_try1_13233020.out
+49,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim049_try1_13233024.out
+50,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim050_try1_13233028.out
+51,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim051_try1_13233032.out
+52,incomplete_early,"SNR shard selection (no convergence, no timeout)",False,Job stopped without finding population SNR; unclear why,runs/2026-06-16_optimistic/logs/stage2_sim052_try1_13233036.out
+53,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim053_try1_13233040.out
+54,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim054_try1_13233044.out
+55,incomplete_late,scenario 3/4,True,Baseline+CGW done; timed out in scenario phases (2/4 completed),runs/2026-06-16_optimistic/logs/stage2_sim055_try1_13233048.out
+56,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim056_try1_13233052.out
+57,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim057_try1_13233056.out
+58,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim058_try1_13233060.out
+59,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim059_try1_13233064.out
+60,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim060_try1_13233068.out
+61,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim061_try1_13233072.out
+62,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim062_try1_13233076.out
+63,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim063_try1_13233080.out
+64,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim064_try1_13233084.out
+65,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim065_try1_13233088.out
+66,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim066_try1_13233092.out
+67,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim067_try1_13233096.out
+68,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim068_try1_13233100.out
+69,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim069_try1_13233104.out
+70,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim070_try1_13233108.out
+71,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim071_try1_13233112.out
+72,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim072_try1_13233116.out
+73,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim073_try1_13233120.out
+74,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim074_try1_13233124.out
+75,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim075_try1_13233128.out
+76,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim076_try1_13233132.out
+77,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim077_try1_13233136.out
+78,incomplete_late,scenario 2/3,True,Baseline+CGW done; timed out in scenario phases (1/3 completed),runs/2026-06-16_optimistic/logs/stage2_sim078_try1_13233140.out
+79,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim079_try1_13233144.out
+80,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim080_try1_13233148.out
+81,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim081_try1_13233152.out
+82,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim082_try1_13233156.out
+83,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim083_try1_13233159.out
+84,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim084_try1_13233163.out
+85,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim085_try1_13233167.out
+86,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim086_try1_13233171.out
+87,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim087_try1_13233175.out
+88,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim088_try1_13233179.out
+89,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim089_try1_13233184.out
+90,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim090_try1_13233188.out
+91,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim091_try1_13233192.out
+92,incomplete_late,scenario 2/3,True,Baseline+CGW done; timed out in scenario phases (1/3 completed),runs/2026-06-16_optimistic/logs/stage2_sim092_try1_13233196.out
+93,incomplete_late,scenario 1/2,True,Baseline+CGW done; timed out in scenario phases (0/2 completed),runs/2026-06-16_optimistic/logs/stage2_sim093_try1_13233200.out
+94,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim094_try1_13233204.out
+95,incomplete_late,scenario 3/4,True,Baseline+CGW done; timed out in scenario phases (2/4 completed),runs/2026-06-16_optimistic/logs/stage2_sim095_try1_13233208.out
+96,incomplete_late,scenario 3/4,True,Baseline+CGW done; timed out in scenario phases (2/4 completed),runs/2026-06-16_optimistic/logs/stage2_sim096_try1_13233212.out
+97,incomplete_late,scenario 2/3,True,Baseline+CGW done; timed out in scenario phases (1/3 completed),runs/2026-06-16_optimistic/logs/stage2_sim097_try1_13233216.out
+98,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim098_try1_13233220.out
+99,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim099_try1_13233224.out
+100,complete,all phases,False,Explicit Stage 2 completion marker found,runs/2026-06-16_optimistic/logs/stage2_sim100_try1_13233228.out
+101,incomplete_early,"SNR shard selection (no convergence, no timeout)",False,Job stopped without finding population SNR; unclear why,runs/2026-06-16_optimistic/logs/stage2_sim101_try1_13233233.out
+102,incomplete_early,"SNR shard selection (no convergence, no timeout)",False,Job stopped without finding population SNR; unclear why,runs/2026-06-16_optimistic/logs/stage2_sim102_try1_13233237.out
+103,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim103_try1_13233241.out
+104,incomplete_early,SNR shard selection (failed to converge),False,Timed out before finding population SNR in target band; no resumable state,runs/2026-06-16_optimistic/logs/stage2_sim104_try1_13233245.out
