@@ -278,6 +278,7 @@ def _simulate_noise(
     psrs_clean,
     raw_noise_params,
     seed: int,
+    tspan_override: Optional[float] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Simulate white + red noise for a list of pulsars with a fixed numpy seed.
@@ -285,9 +286,12 @@ def _simulate_noise(
     Using the same seed across scenarios ensures noise realisations are
     comparable — only PTA sensitivity differs.
     """
+    tspan_override_days = (tspan_override / 86400.0
+                            if tspan_override is not None else None)
     for i, psr in enumerate(psrs_clean):
         psr_seed = seed + i * 13579 if seed is not None else None
-        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True, seed=psr_seed)
+        simulate_psr(psr, raw_noise_params, add_WN=True, add_RN=True,
+                     seed=psr_seed, tspan_override=tspan_override_days)
     return {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
 
 
@@ -598,6 +602,37 @@ def _select_active_shards(
         f'Chunk-count SNR selection failed in {max_iterations} iterations. '
         f'Last: k={last_k}, SNR={last_snr:.4f}, target=[{snr_low},{snr_high}].')
 
+def _record_sgwb_snr(meta_dir: str, scenario_label: str, snr: float,
+                      tspan_seconds: float, extra: dict = None) -> None:
+    """
+    Append/update this scenario's SGWB (OS) SNR into a shared summary file,
+    so baseline (4.5yr) and every forecast scenario (9yr) land in one place
+    for comparison. Safe under the existing architecture since phases run
+    sequentially, one subprocess at a time — never concurrently.
+    """
+    path = os.path.join(meta_dir, 'sgwb_snr_summary.json')
+    summary = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as fh:
+                summary = json.load(fh)
+        except Exception:
+            summary = {}
+ 
+    record = {
+        'sgwb_snr':      float(snr),
+        'Tspan_seconds': float(tspan_seconds),
+        'Tspan_years':   float(tspan_seconds) / (365.25 * 86400),
+    }
+    if extra:
+        record.update(extra)
+    summary[scenario_label] = record
+ 
+    with open(path, 'w') as fh:
+        json.dump(summary, fh, indent=2)
+    print(f'  📊 Recorded SGWB SNR [{scenario_label}]: {snr:.4f}  '
+          f'(Tspan={record["Tspan_years"]:.2f} yr) → {path}')
+    
 # =============================================================================
 # CGW SNR infrastructure
 # =============================================================================
@@ -962,7 +997,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     # ── proxy-only mode ───────────────────────────────────────────────────────
     if args.proxy_only:
         print(f'\n{"="*60}\nProxy-only mode\n{"="*60}')
-        noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
+        noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed, tspan_override=args.tspan_reference_seconds)
         _, pta, enterprise_psrs = compute_population_snr(
             psrs_clean=psrs_clean, population=None,
             raw_noise_params=raw_noise_params, Tspan=Tspan_seconds,
@@ -1018,7 +1053,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
 
         try:
             noise_stoas = _simulate_noise(psrs_clean, raw_noise_params,
-                                        seed=attempt_seed)
+                                        seed=attempt_seed, tspan_override=args.tspan_reference_seconds)
         except Exception as e:
             print(f'  ⚠️  Noise simulation failed: {e}, retrying...')
             continue
@@ -1148,6 +1183,11 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
 
     del pta, enterprise_psrs, psrs_clean; gc.collect()
 
+    _record_sgwb_snr(
+        meta_dir, 'baseline', snr_achieved, Tspan_seconds,
+        extra={'n_active_sub_chunks': n_active, 'n_total_sub_chunks': N_total},
+    )
+ 
     # Serialise candidates as [chunk_id, sub_id, local_idx, proxy]
     handoff = {
         'n_active_sub_chunks': n_active,
@@ -1155,6 +1195,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
         'active_shard_ids':    [[c, s] for c, s in active_shards],
         'Tspan_seconds':       Tspan_seconds,
         'noise_seed':          winning_seed,
+        'snr_achieved':        snr_achieved,
         'baseline_candidates': [[c, s, i, float(p)]
                                 for c, s, i, p in (baseline_candidates or [])],
         'baseline_snrs':       (baseline_snrs.tolist()
@@ -1163,7 +1204,8 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     with open(os.path.join(meta_dir, HANDOFF_FILENAME), 'w') as fh:
         json.dump(handoff, fh)
     print(f'✓ [baseline] Wrote {HANDOFF_FILENAME}  '
-          f'(k={n_active}/{N_total}, noise_seed={winning_seed})')
+          f'(k={n_active}/{N_total}, noise_seed={winning_seed}, '
+          f'SGWB SNR={snr_achieved:.4f})')
 
 
 def _phase_scenario(args, scenario_label, combined_scenarios):
@@ -1174,68 +1216,98 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
       - Sum Δstoas for active shards ONLY (same k as baseline).
       - Save residuals; clean scenario npz files.
       - Build Enterprise PTA; compute CGW SNRs; write to shards.
+      - Compute this scenario's SGWB (OS) SNR on its own Tspan/stoas and
+        record it (metadata/sgwb_snr_summary.json) alongside baseline's,
+        for direct before/after comparison.
+      - Re-score the baseline's fixed 4.5yr CW candidate list against this
+        scenario's own PTA — unchanged logic from before, just now on the
+        correct Tspan.
     """
     sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
-
+ 
     handoff_path = os.path.join(meta_dir, HANDOFF_FILENAME)
     if not os.path.isfile(handoff_path):
         sys.exit(f'ERROR: handoff file not found: {handoff_path}')
     with open(handoff_path) as fh:
         handoff = json.load(fh)
-
-    active_shard_ids    = [tuple(x) for x in handoff['active_shard_ids']]
-    n_active            = handoff['n_active_sub_chunks']
-    n_total             = handoff.get('n_total_sub_chunks', n_active)
-    Tspan_seconds       = handoff['Tspan_seconds']
-    noise_seed          = handoff['noise_seed']
-    baseline_candidates = [(c, s, i, p)
-                           for c, s, i, p in handoff['baseline_candidates']]
-    baseline_snrs       = np.array(handoff['baseline_snrs'], dtype=np.float64)
-
-    pop_dir   = os.path.join(sim_out_dir, 'populations')
-    store     = ShardedPickleStore(pop_dir)
-    all_shards = store.available()
-
+ 
+    active_shard_ids       = [tuple(x) for x in handoff['active_shard_ids']]
+    n_active                = handoff['n_active_sub_chunks']
+    n_total                 = handoff.get('n_total_sub_chunks', n_active)
+    Tspan_seconds_baseline  = handoff['Tspan_seconds']    # 4.5yr — logging only
+    noise_seed              = handoff['noise_seed']
+    baseline_candidates     = [(c, s, i, p)
+                               for c, s, i, p in handoff['baseline_candidates']]
+    baseline_snrs           = np.array(handoff['baseline_snrs'], dtype=np.float64)
+ 
+    pop_dir    = os.path.join(sim_out_dir, 'populations')
+    store      = ShardedPickleStore(pop_dir)
+    all_shards = [(c, s) for c in range(args.n_chunks)
+                      for s in range(args.n_sub_chunks)]
+ 
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
-
+ 
     print(f'\n📡 [{scenario_label}] Loading pulsars...')
     psrs_unfiltered = load_pulsars(verbose=True, scenario=scenario_label,
                                    scenarios=combined_scenarios)
     with suppress_enterprise_warnings():
-        psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
+        psrs_clean, raw_noise_params, Tspan_seconds = filter_pulsars_15yr(
             psrs_unfiltered, verbose=False)
     del psrs_unfiltered; gc.collect()
     psr_names = [p.name for p in psrs_clean]
-
-    # Use the SAME active shard subset as baseline (same k)
+ 
+    print(f'  [{scenario_label}] Tspan: {Tspan_seconds / (365.25*86400):.2f} yr '
+          f'(baseline was {Tspan_seconds_baseline / (365.25*86400):.2f} yr)')
+ 
+    # Use the SAME active shard subset as baseline (same k, same physical
+    # population — calibrated once against 4.5yr SGWB evidence). Read the
+    # per-scenario Δstoas stage 1 already computed for every chunk.
     print(f'\n📂 [{scenario_label}] Summing Δstoas for '
           f'{n_active}/{n_total} active shards...')
     combined_delta = _load_and_sum_toa_deltas(
         sim_out_dir, active_shard_ids, psr_names, scenario=scenario_label)
-
+ 
     print(f'\n🔊 [{scenario_label}] Simulating noise (seed={noise_seed})...')
-    noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed)
-
+    noise_stoas = _simulate_noise(psrs_clean, raw_noise_params, seed=noise_seed,
+                            tspan_override=args.tspan_reference_seconds)
+ 
     _save_toa_residuals(sim_out_dir, psrs_clean, noise_stoas,
                         combined_delta, n_active, n_total, scenario=scenario_label)
     _cleanup_shard_stoas(sim_out_dir, all_shards, scenario=scenario_label)
     del noise_stoas, combined_delta; gc.collect()
-
-    print(f'\n🔧 [{scenario_label}] Building Enterprise PTA...')
-    # Reconstruct signal stoas from saved residuals
+ 
+    # Reconstruct signal stoas (noise + population) from saved residuals
     resid_base   = os.path.join(sim_out_dir, f'residuals_{scenario_label}', 'combined')
     signal_stoas = {}
     for name in psr_names:
         arr = np.load(os.path.join(resid_base, f'{name}.npy'))
         signal_stoas[name] = arr
-
-    for psr in psrs_clean:
-        psr.stoas[:] = signal_stoas[psr.name]
-
-    pta, epsrs = _build_pta(psrs_clean, raw_noise_params, Tspan_seconds)
+ 
+    print(f'\n🔧 [{scenario_label}] Building PTA + computing SGWB SNR '
+          f'(Tspan={Tspan_seconds/(365.25*86400):.2f} yr)...')
+    snr_sgwb_scenario, pta, epsrs = compute_population_snr(
+        psrs_clean=psrs_clean,
+        population=None,
+        raw_noise_params=raw_noise_params,
+        Tspan=Tspan_seconds,
+        current_stoas=signal_stoas,
+        return_psrs_pta=True,
+    )
+    print(f'  ✓ [{scenario_label}] SGWB (OS) SNR = {snr_sgwb_scenario:.4f}  '
+          f'(baseline 4.5yr calibration target: {args.target_snr})')
+ 
+    _record_sgwb_snr(
+        meta_dir, scenario_label, snr_sgwb_scenario, Tspan_seconds,
+        extra={
+            'n_active_sub_chunks':    n_active,
+            'n_total_sub_chunks':     n_total,
+            'Tspan_seconds_baseline': Tspan_seconds_baseline,
+        },
+    )
+ 
     del psrs_clean; gc.collect()
-
+ 
     if args.cgw and len(baseline_candidates) > 0:
         _compute_cgw_snrs_scenario(
             store=store, active_shards=active_shard_ids,
@@ -1250,10 +1322,33 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
         )
     elif args.cgw:
         print(f'  WARNING: no baseline candidates, skipping CGW for {scenario_label}')
-
+ 
     del pta, epsrs; gc.collect()
     print(f'✓ [{scenario_label}] Phase complete')
 
+def _determine_reference_tspan(syn_scenarios, combined_scenarios) -> Optional[float]:
+    """
+    Pick the Tspan (seconds) to use as the shared Fourier-basis reference for
+    red/DM/chromatic noise across baseline + every forecast scenario. Must be
+    computed before baseline runs, since baseline needs to inject noise on the
+    SAME basis as the (longer) forecast scenarios for consistency.
+    """
+    if not syn_scenarios:
+        return None  # no forecasting — each phase can use its own tspan
+
+    longest_tspan, longest_label = -1.0, None
+    for label in syn_scenarios:
+        psrs_unfiltered = load_pulsars(verbose=False, scenario=label,
+                                       scenarios=combined_scenarios)
+        with suppress_enterprise_warnings():
+            _, _, tspan = filter_pulsars_15yr(psrs_unfiltered, verbose=False)
+        del psrs_unfiltered; gc.collect()
+        if tspan > longest_tspan:
+            longest_tspan, longest_label = tspan, label
+
+    print(f'  📏 Reference Tspan for noise basis: '
+          f'{longest_tspan/(365.25*86400):.2f} yr (from "{longest_label}")')
+    return longest_tspan
 
 # =============================================================================
 # Per-sim orchestrator
@@ -1274,6 +1369,8 @@ def process_sim(
     print(f'  Scenarios : baseline + {list(syn_scenarios.keys())}')
     print(f'  Each phase runs in its own subprocess (clean C heap)')
     print(f'{"="*60}')
+
+    reference_tspan_seconds = _determine_reference_tspan(syn_scenarios, combined_scenarios)
 
     config_path = os.path.join(sim_out_dir, 'metadata', 'config.json')
     if not os.path.isfile(config_path):
@@ -1298,6 +1395,8 @@ def process_sim(
         if args.synthetic_ptas:   argv.append('--synthetic-ptas')
         if args.synthetic_pta_config:
             argv += ['--synthetic-pta-config', args.synthetic_pta_config]
+        if reference_tspan_seconds is not None:
+            argv += ['--tspan-reference-seconds', str(reference_tspan_seconds)]
         return argv
 
     try:
@@ -1453,6 +1552,11 @@ def _build_summary_object(
     if os.path.isfile(handoff_path):
         with open(handoff_path) as fh:
             handoff_meta = json.load(fh)
+    sgwb_snr_summary = {}
+    sgwb_path = os.path.join(sim_out_dir, 'metadata', 'sgwb_snr_summary.json')
+    if os.path.isfile(sgwb_path):
+        with open(sgwb_path) as fh:
+            sgwb_snr_summary = json.load(fh)
 
     payload = {
         'arrays': arrays,
@@ -1461,6 +1565,7 @@ def _build_summary_object(
             'total_scanned':       total_scanned,
             'n_keep_per_category': n_keep_per_category,
             'snr_fields':          snr_fields,
+            'sgwb_snr_summary':    sgwb_snr_summary,
             'category_indices':    category_indices,
             'top_cgw_breakdowns':  top_cgw_breakdowns,
             'n_active_sub_chunks': handoff_meta.get('n_active_sub_chunks'),
@@ -1507,6 +1612,7 @@ def parse_args():
                    help=argparse.SUPPRESS)
     p.add_argument('--phase-scenario',       type=str, default=None,
                    help=argparse.SUPPRESS)
+    p.add_argument('--tspan-reference-seconds', type=float, default=None)
     return p.parse_args()
 
 

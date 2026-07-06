@@ -2016,7 +2016,7 @@ def get_rn_components(par_path, default=30):
  
 def simulate_psr(psr, noise_dict,
                  add_WN=True, add_RN=True, add_DM=True, add_chrom=True, add_SW=False,
-                 seed=None, par_path=None, verbose=False):
+                 seed=None, par_path=None, tspan_override=None, verbose=False):
     """
     Inject noise processes into a pulsar with CORRECT frequency dependence.
     
@@ -2071,9 +2071,13 @@ def simulate_psr(psr, noise_dict,
     make_ideal_nofit(psr)
     
     t = psr.toas()
-    tspan = t.max() - t.min()
+    tspan_actual = t.max() - t.min()
+    tspan = tspan_override if tspan_override is not None else tspan_actual
     if verbose:
-        print(f"  [{psrname}] tspan = {tspan/365.25:.3f} yr, nobs = {psr.nobs}")
+        print(f"  [{psrname}] tspan_actual = {tspan_actual/365.25:.3f} yr, "
+              f"tspan_used = {tspan/365.25:.3f} yr"
+              f"{'  (overridden)' if tspan_override is not None else ''}, "
+              f"nobs = {psr.nobs}")
     
     # ========== RED NOISE (ACHROMATIC) ==========
     if add_RN:
