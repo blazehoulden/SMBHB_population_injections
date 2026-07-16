@@ -167,22 +167,22 @@ Results appear in each `pop_{NNNN}_result.json` under the `"cgw"` key.
 
 ### Optimistic settings
 ```bash
-sbatch submit_main_HPC.sh --config optimistic --simulations 1 --chunk-size 125_000 --n-chunks 1 --n-sub-chunks 50 --cgw --s1-time "00:40:00" --s1-mem "13G" --s2-time "05:00:00" --s2-mem "18G" --snr-range 3.0 3.3 --synthetic-ptas --sim-start 500
+sbatch submit_main_HPC.sh --config optimistic --simulations 1 --chunk-size 2_250_000 --n-chunks 1 --n-sub-chunks 50 --cgw --s1-time "00:55:00" --s1-mem "12G" --s2-time "05:00:00" --s2-mem "20G" --snr-range 3.0 3.4 --synthetic-ptas --sim-start 501
 ```
 
 ### Pessimistic settings
 ```bash
-sbatch submit_main_HPC.sh --config pessimistic --simulations 500 --chunk-size 20_000_000 --n-chunks 1 --n-sub-chunks 50 --cgw --s1-time "02:30:00" --s1-mem "13G" --s2-time "05:00:00" --s2-mem "24G" --snr-range 3.0 3.3 --synthetic-ptas --sim-start 0
+sbatch submit_main_HPC.sh --config pessimistic --simulations 1 --chunk-size 20_000_000 --n-chunks 10 --n-sub-chunks 50 --cgw --s1-time "03:30:00" --s1-mem "14G" --s2-time "05:00:00" --s2-mem "20G" --snr-range 3.0 3.4 --synthetic-ptas --sim-start 501
 ```
 
 ### Realistic settings
 ```bash
-sbatch submit_main_HPC.sh --config realistic --simulations 500 --chunk-size 2_000_000 --n-chunks 1 --n-sub-chunks 50 --cgw --s1-time "00:55:00" --s1-mem "13G" --s2-time "05:00:00" --s2-mem "24G" --snr-range 3.0 3.3 --synthetic-ptas --sim-start 0
+sbatch submit_main_HPC.sh --config realistic --simulations 1 --chunk-size 20_000_000 --n-chunks 1 --n-sub-chunks 50 --cgw --s1-time "01:35:00" --s1-mem "14G" --s2-time "05:00:00" --s2-mem "20G" --snr-range 3.0 3.4 --synthetic-ptas --sim-start 501
 ```
 
 ### Test settings
 ```bash
-sbatch submit_main_HPC.sh --config test --simulations 1 --chunk-size 20_000 --n-chunks 1 --cgw --s1-time "00:30:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G" --snr-range 3.0 3.3 
+sbatch submit_main_HPC.sh --config test --simulations 1 --chunk-size 20_000 --n-chunks 1 --cgw --s1-time "00:30:00" --s1-mem "15G" --s2-time "02:00:00" --s2-mem "24G" --snr-range 3.0 3.4 
 ```
 ## Files
 

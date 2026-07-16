@@ -645,6 +645,7 @@ def generate_smbhb_population(
         mass_cutoff_z: float = 0.0,
         compute_strain: bool = True,
         f_obs_max: float = 300e-9,
+        f_obs_min: Optional[float] = None,
         random_seed: Optional[int] = None,
 ) -> PopulationArrays | Tuple[PopulationArrays, dict]:
     """
@@ -701,7 +702,8 @@ def generate_smbhb_population(
     # ── observed-frame frequencies: analytic inverse-CDF, one numpy call ─────
     # p(f_obs) ∝ f_obs^{-11/3}  →  CDF ∝ f_obs^{-8/3}
     # Sample uniformly in x = f^{-8/3}, invert: f = x^{-3/8}
-    f_obs_min = 1.0 / T_obs_seconds
+    if f_obs_min is None: # set baseline population to be minimum 1 nHz unless f_obs_min is not None
+        f_obs_min = 1.0 / T_obs_seconds
     x_min     = f_obs_min**(-8.0 / 3.0)
     x_max     = f_obs_max**(-8.0 / 3.0)
     # x_min > x_max (f^{-8/3} decreasing), so uniform draw spans [x_max, x_min]

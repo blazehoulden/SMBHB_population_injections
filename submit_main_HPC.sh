@@ -107,9 +107,9 @@ REPO_DIR="/fred/oz005/users/bhoulden/SMBHB_population_injections"
 # DEFAULTS
 # =============================================================================
 CONFIG="${SMBHB_CONFIG:-optimistic}"
-TARGET_SNR="${SMBHB_TARGET_SNR:-3.15}"
+TARGET_SNR="${SMBHB_TARGET_SNR:-3.2}"
 SNR_LOW="${SMBHB_SNR_LOW:-3.0}"
-SNR_HIGH="${SMBHB_SNR_HIGH:-3.30}"
+SNR_HIGH="${SMBHB_SNR_HIGH:-3.40}"
 N_SIMS="${SMBHB_SIMULATIONS:-400}"
 N_CHUNKS="${SMBHB_N_CHUNKS:-10}"
 CHUNK_SIZE="${SMBHB_CHUNK_SIZE:-1000000}"

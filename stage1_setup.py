@@ -325,9 +325,7 @@ def _compute_analytic_proxy(pop, psrs, Nvecs=None, Tspan_seconds=None):
             np.sin(phase) / phase,
             1.0 - phase**2 / 6.0
         )
-        time_avg      = 0.5 * (1.0 - sinc_term)
-        cycle_penalty = np.clip((f_T - 1.0) / 9.0, 0.0, 1.0)
-        time_avg      = np.clip(time_avg * cycle_penalty, 0.0, 0.5)
+        time_avg = np.clip(0.5 * (1.0 - sinc_term), 0.0, 0.5)
     else:
         time_avg = 0.5
 
@@ -354,51 +352,80 @@ def _filter_population_extremes(
     n_total: int = None,
     n_sub_chunks: int = 1,
     Tspan_seconds: Optional[float] = None,
+    extra_tspans_seconds: Optional[List[float]] = None,
 ) -> tuple:
+    """
+    Filter down to the top-N proxy-ranked + parameter/regime-extreme
+    binaries, evaluated at `Tspan_seconds` (the real baseline — this is
+    also what gets STORED as pop.cgw_proxy, since stage 2's baseline CW
+    candidate ranking expects proxies computed at the real Tspan).
+ 
+    If `extra_tspans_seconds` is given, the SAME top-N proxy pass and
+    low/mid-f rescue are ALSO run at each of those Tspans, and the
+    resulting indices are UNIONED into the keep-set — so a binary that's
+    only loud/resolvable at a longer (forecast) Tspan isn't dropped just
+    because it didn't rank at the real baseline. Their proxy VALUES are
+    not stored; only their INDICES widen what gets kept.
+    """
     n = len(pop)
-
+ 
     if n_total is None:
         n_total = N_PRE_FILTER_PER_CHUNK // n_sub_chunks
     n_total = min(n_total, n)
     n_keep  = min(n_keep, n // 2)
-
+ 
     indices = set()
-
-    proxies = _compute_analytic_proxy(pop, psrs, Nvecs=None,
-                                      Tspan_seconds=Tspan_seconds)
-
-    n_cgw = min(n_total, n)
-    if n_cgw == n:
-        cgw_top = np.argsort(proxies)[::-1]
-    else:
-        cgw_top = np.argpartition(proxies, -n_cgw)[-n_cgw:]
-        cgw_top = cgw_top[np.argsort(proxies[cgw_top])[::-1]]
-    indices.update(cgw_top.tolist())
-
+ 
+    def _proxy_topn_and_rescue(tspan):
+        """Run the top-N proxy pass + low/mid-f rescue at one Tspan.
+        Returns the proxy array (only meaningful/used for the primary,
+        real-baseline call) and updates `indices` in place."""
+        proxies = _compute_analytic_proxy(pop, psrs, Nvecs=None,
+                                          Tspan_seconds=tspan)
+        n_cgw = min(n_total, n)
+        if n_cgw == n:
+            top = np.argsort(proxies)[::-1]
+        else:
+            top = np.argpartition(proxies, -n_cgw)[-n_cgw:]
+            top = top[np.argsort(proxies[top])[::-1]]
+        indices.update(top.tolist())
+ 
+        if tspan is not None:
+            f_T = np.asarray(pop.f, dtype=np.float64) * tspan
+            for lo, hi in ((0.0, 10.0), (10.0, 50.0)):
+                mask = (f_T >= lo) & (f_T < hi)
+                if mask.sum() == 0:
+                    continue
+                regime_idx = np.where(mask)[0]
+                top_h0 = regime_idx[np.argsort(pop.h0[regime_idx])[-n_keep:]]
+                indices.update(top_h0.tolist())
+ 
+        return proxies, n_cgw
+ 
+    # ── primary pass: real baseline Tspan — THIS is what gets stored ────────
+    proxies, n_cgw = _proxy_topn_and_rescue(Tspan_seconds)
+ 
+    # ── parameter extremes — Tspan-independent, do once ─────────────────────
     for arr in (pop.f, pop.D_comov, pop.h0, pop.Mc, pop.Mtot):
         order = np.argsort(arr)
         indices.update(order[:n_keep].tolist())
         indices.update(order[-n_keep:].tolist())
-
-    if Tspan_seconds is not None:
-        f_T = np.asarray(pop.f, dtype=np.float64) * Tspan_seconds
-
-        low_f_mask = f_T < 10.0
-        if low_f_mask.sum() > 0:
-            low_f_idx    = np.where(low_f_mask)[0]
-            top_h0_low_f = low_f_idx[np.argsort(pop.h0[low_f_idx])[-n_keep:]]
-            indices.update(top_h0_low_f.tolist())
-
-        mid_f_mask = (f_T >= 10.0) & (f_T < 50.0)
-        if mid_f_mask.sum() > 0:
-            mid_f_idx    = np.where(mid_f_mask)[0]
-            top_h0_mid_f = mid_f_idx[np.argsort(pop.h0[mid_f_idx])[-n_keep:]]
-            indices.update(top_h0_mid_f.tolist())
-
+ 
+    # ── extra pass(es): widen the keep-set for longer (forecast) Tspans ────
+    n_before_extra = len(indices)
+    if extra_tspans_seconds:
+        for extra_tspan in extra_tspans_seconds:
+            _proxy_topn_and_rescue(extra_tspan)
+    n_rescued_extra = len(indices) - n_before_extra
+ 
     idx = np.array(sorted(indices))
+    extra_note = (f' + {n_rescued_extra:,} rescued for forecast Tspan'
+                  if extra_tspans_seconds else '')
     print(
         f"  Population filtered: {n:,} → {len(idx):,} kept "
-        f"(top-{n_cgw} proxy + {len(idx) - n_cgw} parameter/regime extremes)"
+        f"(top-{n_cgw} proxy @ real Tspan + "
+        f"{n_before_extra - n_cgw:,} parameter/regime extremes"
+        f"{extra_note})"
     )
     return pop[idx], proxies[idx]
 
@@ -433,6 +460,26 @@ def _save_toa_deltas(
     np.savez(outpath, **save_dict)
     print(f'  Saved Δstoas ({len(save_dict)} pulsars) → {outpath}')
 
+
+def _max_scenario_extension_days(scenarios_dict: dict, real_span_days: float) -> float:
+    """
+    Longest forecast extension (in days) across every scenario in
+    scenarios_dict, so the population can be generated with a frequency
+    floor low enough for whichever scenario needs the longest Tspan.
+ 
+    Mirrors the same extension_years-takes-precedence-else-extension_fraction
+    logic used everywhere else (_pulsar_needs_scenario_tim,
+    _scenario_params_cache_key, etc.) so this stays consistent with how
+    each scenario's actual forecast length gets resolved elsewhere.
+    """
+    max_ext_days = 0.0
+    for label, cfg in scenarios_dict.items():
+        ext_years = cfg.get('extension_years', None)
+        ext_frac  = cfg.get('extension_fraction', 0.0)
+        ext_days  = (ext_years * 365.25 if ext_years is not None
+                     else ext_frac * real_span_days)
+        max_ext_days = max(max_ext_days, ext_days)
+    return max_ext_days
 
 # =============================================================================
 # Seeding helper  (unchanged)
@@ -611,13 +658,14 @@ def _run_nufft_for_scenario(
 
 def _filter_and_write_shard(
     *,
-    sub_id:           int,
-    chunk_id:         int,
-    population_batch: PopulationArrays,
+    sub_id:               int,
+    chunk_id:              int,
+    population_batch:      PopulationArrays,
     psrs_baseline,
-    Tspan_seconds:    float,
-    pop_dir:          str,
+    Tspan_seconds:         float,
+    pop_dir:               str,
     args,
+    extra_tspans_seconds:  Optional[List[float]] = None,
 ) -> None:
     population_batch, proxy_scores = _filter_population_extremes(
         population_batch,
@@ -625,8 +673,9 @@ def _filter_and_write_shard(
         n_sub_chunks=args.n_sub_chunks,
         psrs=psrs_baseline,
         Tspan_seconds=Tspan_seconds,
+        extra_tspans_seconds=extra_tspans_seconds,
     )
-
+ 
     store = ShardedPickleStore(pop_dir)
     store.write(chunk_id, sub_id, population_batch)
     store.update(chunk_id, sub_id, cgw_proxy=proxy_scores)
@@ -726,10 +775,26 @@ def main():
             psrs_unfiltered, verbose=True)
     del psrs_unfiltered
     gc.collect()
+    
     t_load_total += time.time() - t_l0
     print(f'✓ {len(psrs_baseline)} baseline pulsars, '
           f'Tspan={Tspan_seconds / (365.25 * 86400):.1f} yr')
     _log_mem('after loading baseline pulsars')
+ 
+    # ── Frequency floor must cover the LONGEST scenario Tspan, not just
+    #    the real baseline — otherwise low-frequency binaries that only
+    #    become resolvable/loud with the extra forecast years are never
+    #    sampled in the first place, regardless of how the PTA's own
+    #    sensitivity improves with more observing time.
+    real_span_days          = Tspan_seconds / 86400.0
+    max_extension_days      = _max_scenario_extension_days(
+        combined_scenarios, real_span_days)
+    population_gen_tspan_seconds = Tspan_seconds + max_extension_days * 86400.0
+    if max_extension_days > 0:
+        print(f'  ℹ Longest scenario extension: {max_extension_days/365.25:.2f} yr '
+              f'→ population generated with T_obs={population_gen_tspan_seconds/(365.25*86400):.2f} yr '
+              f'(f_obs_min={1.0/population_gen_tspan_seconds*1e9:.3f} nHz), '
+              f'not the real {Tspan_seconds/(365.25*86400):.2f} yr baseline')
 
 
     # =========================================================================
@@ -739,7 +804,7 @@ def main():
     # every scenario below reuse the *same* binaries without re-seeding.
     print(f'\n🌌 Generating {len(sub_ids)} sub-chunk population batch(es)...')
     population_batches = _generate_population_batches(
-        Tspan_seconds=Tspan_seconds,
+        Tspan_seconds=population_gen_tspan_seconds,
         sub_ids=sub_ids,
         chunk_id=chunk_id,
         sim_id=sim_id,
@@ -813,7 +878,9 @@ def main():
     # =========================================================================
     # STEP 5 — filter + write shards (uses baseline pulsars, still loaded)
     # =========================================================================
-    print(f'\n💾 Filtering and writing {len(sub_ids)} shard(s)...')
+    print(f'\\n💾 Filtering and writing {len(sub_ids)} shard(s)...')
+    extra_tspans = ([population_gen_tspan_seconds]
+                     if max_extension_days > 0 else None)
     for i, sub_id in enumerate(sub_ids):
         _filter_and_write_shard(
             sub_id=sub_id,
@@ -823,6 +890,7 @@ def main():
             Tspan_seconds=Tspan_seconds,
             pop_dir=pop_dir,
             args=args,
+            extra_tspans_seconds=extra_tspans,
         )
         # Free each sub-chunk's population batch as soon as it's written.
         population_batches[i] = None
