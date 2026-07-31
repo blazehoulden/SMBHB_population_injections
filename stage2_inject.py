@@ -270,6 +270,37 @@ def _cleanup_inactive_population_shards(
           f'({freed_bytes / 1e6:.1f} MB freed)  '
           f'({len(active_set)} active shards retained)')
 
+def _cleanup_inactive_freq_mass_hist(
+    sim_out_dir:   str,
+    all_shards:    List[Tuple[int, int]],
+    active_shards: List[Tuple[int, int]],
+) -> None:
+    """
+    Delete metadata/freq_mass_z_hist/{chunk:03d}_{sub:03d}.npz files for
+    population shards that were not selected as active. Mirrors
+    _cleanup_inactive_population_shards — uses phase_handoff.json's
+    active_shard_ids (via active_shards, passed in by the caller) as the
+    authoritative source of which sub-chunks survive, rather than trying
+    to parse stage 1's log output. If stage 1 wasn't run with
+    --freq-mass-hist, the directory won't exist and this is a no-op.
+    """
+    hist_dir = os.path.join(sim_out_dir, 'metadata', 'freq_mass_z_hist')
+    if not os.path.isdir(hist_dir):
+        return
+
+    active_set = set(active_shards)
+    inactive   = [s for s in all_shards if s not in active_set]
+    removed, freed_bytes = 0, 0
+    for chunk_id, sub_id in inactive:
+        path = os.path.join(hist_dir, f'{chunk_id:03d}_{sub_id:03d}.npz')
+        if os.path.isfile(path):
+            freed_bytes += os.path.getsize(path)
+            os.remove(path)
+            removed += 1
+    print(f'  🗑️  Removed {removed} inactive freq/mass/z histogram shards '
+          f'({freed_bytes / 1e6:.1f} MB freed)  '
+          f'({len(active_set)} active shards retained)')
+          
 # =============================================================================
 # Noise simulation (seeded)
 # =============================================================================
@@ -1036,12 +1067,13 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     winning_seed      = noise_seed
 
     for noise_attempt in range(max_noise_retries):
-        # Each attempt gets a seed offset by attempt * large_prime to avoid
-        # overlap with other sim_ids (which are spaced by 10000).
-        # Using a prime (97) ensures no two (sim_id, attempt) pairs collide:
-        # seed = base + sim_id^2 * 10000 + attempt * 97
-        # For any two sims i != j and attempts a, b:
-        # i^2 * 10000 + a*97 != j^2 * 10000 + b*97 (for i,j < 100, a,b < 20)
+        # Each attempt gets a seed offset by attempt * 97 (a prime), giving
+        # up to max_noise_retries*97 ≈ 1,940 of additional headroom below
+        # the numpy/tempo2 32-bit seed ceiling. noise_seed itself is derived
+        # from a np.random.SeedSequence spawn in main() (always < 2**31), so
+        # there is ample room left before hitting 2**32 - 1 even after this
+        # offset and the further per-pulsar offset applied in
+        # _simulate_noise() (seed + i * 13579).
         attempt_seed = noise_seed + noise_attempt * 97
 
         if noise_attempt == 0:
@@ -1137,6 +1169,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
 
     # delete unused shards
     _cleanup_inactive_population_shards(store, all_shards, active_shards)
+    _cleanup_inactive_freq_mass_hist(sim_out_dir, all_shards, active_shards)
 
     # Reconstruct signal_stoas from saved residuals
     resid_base = os.path.join(sim_out_dir, 'residuals', 'combined')
@@ -1656,9 +1689,20 @@ def main():
 
     combined_scenarios = dict(DEFAULT_SCENARIOS)
     combined_scenarios.update(syn_scenarios)
-    noise_seed = (args.noise_seed_base + args.sim_id**2 * 10000
-                if args.noise_seed_base is not None
-                else args.sim_id * 10000)
+    # Use the SeedSequence-derived seed_int (spawned per sim_id just above)
+    # instead of the old "base + sim_id**2 * 10000" formula. That formula
+    # is quadratic in sim_id and overflows the tempo2/numpy 32-bit seed
+    # ceiling (2**32 - 1) once sim_id gets large enough relative to the
+    # base (e.g. sim_id >= 654 with the default noise_seed_base=26072001 —
+    # this is exactly what caused every stage-2 job for sim_id >= 654 to
+    # fail with "Seed must be between 0 and 2**32 - 1" across all 20 noise
+    # retries, since the retry offset (+attempt*97) only made it worse).
+    # seed_int is always < 2**31, leaving ~2.1e9 of headroom for the
+    # per-retry (+noise_attempt*97) and per-pulsar (+i*13579) offsets added
+    # downstream in _simulate_noise / _phase_baseline, while still being
+    # uniquely and reproducibly derived per (noise_seed_base, sim_id) via
+    # SeedSequence.spawn().
+    noise_seed = seed_int
 
     # ── Subprocess phase dispatch ─────────────────────────────────────────────
     if args.phase == 'baseline':

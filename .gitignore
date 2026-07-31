@@ -27,7 +27,7 @@ cache/
 figures/
 test_runs/
 tables/
-
+min_7nHz_MPTA/
 nanograv_pulsars_cache.pkl
 tempo2_runtime.tar.gz
 data/2026-02-17/pessimistic/optimal_snr_population.json
@@ -35,6 +35,7 @@ logs/
 runs/
 nanograv_runs/
 nanograv_scenario_tims/
+nanograv_comp_runs/
 old_successful_run_logs/
 psars_narrowband/
 meerkat_partim/

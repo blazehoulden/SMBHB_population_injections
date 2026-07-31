@@ -55,6 +55,27 @@ Arguments added (carried over from the previous revision)
   --sub-chunk-id   process a single sub-chunk only (0-based).
                    When omitted all sub-chunks are run in sequence.
                    Useful for manual reruns or finer Slurm arrays.
+
+Optional: frequency/mass/redshift histogram (--freq-mass-hist)
+─────────────────────────────────────────────────────────────
+Stage 1's population filter step keeps only proxy-ranked CGW candidates +
+parameter extremes — correct for the CW/SGWB analysis, but it means the
+TRUE frequency/mass/redshift distribution of "all binaries generated"
+doesn't survive anywhere on disk once filtering runs. Passing
+--freq-mass-hist writes a compact 3D histogram (f x log10(Mtot) x z) of
+each sub-chunk's FULL population batch — computed BEFORE that sub-chunk
+gets filtered away — as its OWN file:
+
+    metadata/freq_mass_z_hist/{chunk_id:03d}_{sub_id:03d}.npz
+
+One file per sub-chunk (not merged) so stage 2 can later delete exactly
+the sub-chunks it decides are "inactive" (via phase_handoff.json's
+active_shard_ids — see _prune_inactive_freq_mass_hist in stage2_inject.py),
+the same way it already prunes unused population shards. This is for
+reproducing population-distribution plots (e.g. Fig 9 of Agarwal et al.
+2026) from the real, unbiased population — NOT from the filtered shards.
+Off by default: zero cost, zero behavior change, unless explicitly
+requested.
 """
 
 import argparse
@@ -65,6 +86,7 @@ import os
 import pickle
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -359,7 +381,7 @@ def _filter_population_extremes(
     binaries, evaluated at `Tspan_seconds` (the real baseline — this is
     also what gets STORED as pop.cgw_proxy, since stage 2's baseline CW
     candidate ranking expects proxies computed at the real Tspan).
- 
+
     If `extra_tspans_seconds` is given, the SAME top-N proxy pass and
     low/mid-f rescue are ALSO run at each of those Tspans, and the
     resulting indices are UNIONED into the keep-set — so a binary that's
@@ -368,14 +390,14 @@ def _filter_population_extremes(
     not stored; only their INDICES widen what gets kept.
     """
     n = len(pop)
- 
+
     if n_total is None:
         n_total = N_PRE_FILTER_PER_CHUNK // n_sub_chunks
     n_total = min(n_total, n)
     n_keep  = min(n_keep, n // 2)
- 
+
     indices = set()
- 
+
     def _proxy_topn_and_rescue(tspan):
         """Run the top-N proxy pass + low/mid-f rescue at one Tspan.
         Returns the proxy array (only meaningful/used for the primary,
@@ -389,7 +411,7 @@ def _filter_population_extremes(
             top = np.argpartition(proxies, -n_cgw)[-n_cgw:]
             top = top[np.argsort(proxies[top])[::-1]]
         indices.update(top.tolist())
- 
+
         if tspan is not None:
             f_T = np.asarray(pop.f, dtype=np.float64) * tspan
             for lo, hi in ((0.0, 10.0), (10.0, 50.0)):
@@ -399,25 +421,25 @@ def _filter_population_extremes(
                 regime_idx = np.where(mask)[0]
                 top_h0 = regime_idx[np.argsort(pop.h0[regime_idx])[-n_keep:]]
                 indices.update(top_h0.tolist())
- 
+
         return proxies, n_cgw
- 
+
     # ── primary pass: real baseline Tspan — THIS is what gets stored ────────
     proxies, n_cgw = _proxy_topn_and_rescue(Tspan_seconds)
- 
+
     # ── parameter extremes — Tspan-independent, do once ─────────────────────
     for arr in (pop.f, pop.D_comov, pop.h0, pop.Mc, pop.Mtot):
         order = np.argsort(arr)
         indices.update(order[:n_keep].tolist())
         indices.update(order[-n_keep:].tolist())
- 
+
     # ── extra pass(es): widen the keep-set for longer (forecast) Tspans ────
     n_before_extra = len(indices)
     if extra_tspans_seconds:
         for extra_tspan in extra_tspans_seconds:
             _proxy_topn_and_rescue(extra_tspan)
     n_rescued_extra = len(indices) - n_before_extra
- 
+
     idx = np.array(sorted(indices))
     extra_note = (f' + {n_rescued_extra:,} rescued for forecast Tspan'
                   if extra_tspans_seconds else '')
@@ -428,6 +450,127 @@ def _filter_population_extremes(
         f"{extra_note})"
     )
     return pop[idx], proxies[idx]
+
+
+# =============================================================================
+# Frequency / mass / redshift histogram  (optional, --freq-mass-hist)
+# =============================================================================
+# Preserves the TRUE (unfiltered) population distribution — everything
+# above discards ~99% of the generated binaries down to CGW-candidate-
+# biased extremes, which would badly distort a population-distribution
+# plot (e.g. reproducing Fig 9 of Agarwal et al. 2026). Each histogram is
+# tiny (~140K cells) regardless of population size, since only bin counts
+# are stored, never per-binary data.
+#
+# ONE FILE PER SUB-CHUNK (not merged into a running sum): this lets stage 2
+# delete exactly the sub-chunks it decides are "inactive" — via
+# phase_handoff.json's active_shard_ids, the same authoritative source
+# already used to prune unused population shards — without needing to
+# parse log output or re-derive anything after the fact. As a bonus, since
+# no two sub-chunks ever share a file, there's no read-merge-write race to
+# guard against either.
+#
+# Fixed bin edges across every sim/run so histograms combine cleanly:
+#   f:    1nHz - 1000nHz, 60 log bins
+#   Mtot: log10(Mtot/Msun) 7.5-10.6, 0.1 dex bins (fine — coarser bins
+#         requested at plot time are built by summing these)
+#   z:    0-3, 60 bins (covers every POPULATION_CONFIGS z_max; a config
+#         with smaller z_max just has zero counts above its own range)
+
+_HIST_F_BINS    = np.logspace(-9, -6, 61)
+_HIST_MTOT_BINS = np.arange(7.5, 10.61, 0.1)
+_HIST_Z_BINS    = np.linspace(0.0, 3.0, 61)
+
+def _accumulate_and_save_freq_mass_z_hist(
+    population_batch, sim_out_dir: str, chunk_id: int, sub_id: int
+) -> None:
+    """
+    Histogram this sub-chunk's FULL (unfiltered) population batch over
+    (f, log10(Mtot), z) and write it to its own file:
+    metadata/freq_mass_z_hist/{chunk_id:03d}_{sub_id:03d}.npz
+
+    Mtot is stored in solar masses directly in PopulationArrays (confirmed
+    via its docstring — no unit conversion needed here).
+
+    Written atomically (temp file + os.replace) and verified by reading the
+    file back and checking counts.sum() matches len(population_batch) before
+    the temp file is trusted — so a partial/failed write can never silently
+    end up looking like a valid shard on disk.
+    """
+    f        = np.asarray(population_batch.f,    dtype=np.float64)
+    mtot_log = np.log10(np.asarray(population_batch.Mtot, dtype=np.float64))
+    z        = np.asarray(population_batch.z,     dtype=np.float64)
+    n_binaries = len(f)
+
+    if not (len(mtot_log) == n_binaries and len(z) == n_binaries):
+        raise ValueError(
+            f'[{chunk_id:03d}_{sub_id:03d}] Mismatched array lengths: '
+            f'f={n_binaries}, Mtot={len(mtot_log)}, z={len(z)}'
+        )
+
+    counts, _ = np.histogramdd(
+        np.column_stack([f, mtot_log, z]),
+        bins=[_HIST_F_BINS, _HIST_MTOT_BINS, _HIST_Z_BINS],
+    )
+
+    hist_dir = os.path.join(sim_out_dir, 'metadata', 'freq_mass_z_hist')
+    os.makedirs(hist_dir, exist_ok=True)
+    out_path = os.path.join(hist_dir, f'{chunk_id:03d}_{sub_id:03d}.npz')
+
+    # Each (chunk_id, sub_id) writes its own file — never shared with any
+    # other sub-chunk — but still write atomically (temp + replace) for
+    # general safety against e.g. a killed job leaving a partial file.
+    #
+    # IMPORTANT: tmp_path must itself end in '.npz'. np.savez() silently
+    # APPENDS '.npz' to whatever path you give it if the path doesn't
+    # already end that way — so a suffix like '.npz.tmp' causes savez to
+    # write to a completely different stray path ('*.npz.tmp.npz') while
+    # leaving the intended tmp_path an empty, untouched 0-byte file. That
+    # empty file then gets os.replace()'d into out_path, producing a
+    # silently-corrupt (0-byte) final shard. Ending the suffix in '.npz'
+    # guarantees np.savez writes to exactly the path we pass it.
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=hist_dir, prefix=f'.{chunk_id:03d}_{sub_id:03d}.tmp.', suffix='.npz')
+    os.close(tmp_fd)
+
+    try:
+        np.savez(tmp_path, counts=counts,
+                 f_bins=_HIST_F_BINS, mtot_log_bins=_HIST_MTOT_BINS,
+                 z_bins=_HIST_Z_BINS)
+
+        # Verify before trusting the write: re-open the temp file and
+        # confirm it's a real npz with the expected keys and a count total
+        # matching the population size. Catches truncated writes, silent
+        # np.savez path-mangling (like the bug above), disk-full errors
+        # that don't raise, etc. — anything that would otherwise produce a
+        # shard that "exists" but is wrong or unreadable.
+        with np.load(tmp_path) as check:
+            required_keys = {'counts', 'f_bins', 'mtot_log_bins', 'z_bins'}
+            missing = required_keys - set(check.files)
+            if missing:
+                raise IOError(
+                    f'[{chunk_id:03d}_{sub_id:03d}] Written file is missing '
+                    f'keys after save: {missing}'
+                )
+            written_total = check['counts'].sum()
+            if written_total != n_binaries:
+                raise IOError(
+                    f'[{chunk_id:03d}_{sub_id:03d}] Round-trip count mismatch: '
+                    f'wrote {n_binaries} binaries but read back '
+                    f'{written_total:.0f} from {tmp_path}'
+                )
+
+        os.replace(tmp_path, out_path)
+
+    except Exception:
+        # Never leave a bad temp file lying around, and never let a bad
+        # write masquerade as a successful shard at out_path.
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    print(f'  ✓ Wrote + verified freq/mass/z hist: {out_path} '
+          f'({n_binaries:,} binaries)')
 
 
 # =============================================================================
@@ -466,7 +609,7 @@ def _max_scenario_extension_days(scenarios_dict: dict, real_span_days: float) ->
     Longest forecast extension (in days) across every scenario in
     scenarios_dict, so the population can be generated with a frequency
     floor low enough for whichever scenario needs the longest Tspan.
- 
+
     Mirrors the same extension_years-takes-precedence-else-extension_fraction
     logic used everywhere else (_pulsar_needs_scenario_tim,
     _scenario_params_cache_key, etc.) so this stays consistent with how
@@ -563,6 +706,22 @@ def parse_args():
              'before deduplication/overlap with the proxy set. '
              'Lower this to shrink the "parameter/regime extremes" count. '
              '[20]',
+    )
+    p.add_argument(
+        '--freq-mass-hist',
+        action='store_true',
+        default=True,
+        help='Write a per-sub-chunk (frequency x log10(Mtot) x redshift) '
+             'histogram of the FULL, unfiltered population to '
+             'metadata/freq_mass_z_hist/{chunk:03d}_{sub:03d}.npz — the '
+             'only surviving record of the true population distribution '
+             'once filtering runs. Off by default: zero cost, zero '
+             'behavior change, unless explicitly requested. Stage 2 '
+             'automatically prunes the files for any sub-chunk it decides '
+             'is inactive. Used to reproduce population-distribution plots '
+             '(e.g. Fig 9 of Agarwal et al. 2026) from the unbiased '
+             'population rather than the CGW-candidate-biased filtered '
+             'shards.',
     )
     return p.parse_args()
 
@@ -675,7 +834,7 @@ def _filter_and_write_shard(
         Tspan_seconds=Tspan_seconds,
         extra_tspans_seconds=extra_tspans_seconds,
     )
- 
+
     store = ShardedPickleStore(pop_dir)
     store.write(chunk_id, sub_id, population_batch)
     store.update(chunk_id, sub_id, cgw_proxy=proxy_scores)
@@ -732,6 +891,7 @@ def main():
     print(f'  config={args.config}  chunk_size={args.chunk_size:,}')
     print(f'  n_sub_chunks={args.n_sub_chunks}  sub_chunk_size={sub_chunk_size:,}')
     print(f'  sub_ids to process: {sub_ids}')
+    print(f'  freq_mass_hist={args.freq_mass_hist}')
     print(f'  output → {sim_out_dir}')
     print(f'{"="*62}')
 
@@ -775,12 +935,12 @@ def main():
             psrs_unfiltered, verbose=True)
     del psrs_unfiltered
     gc.collect()
-    
+
     t_load_total += time.time() - t_l0
     print(f'✓ {len(psrs_baseline)} baseline pulsars, '
           f'Tspan={Tspan_seconds / (365.25 * 86400):.1f} yr')
     _log_mem('after loading baseline pulsars')
- 
+
     # ── Frequency floor must cover the LONGEST scenario Tspan, not just
     #    the real baseline — otherwise low-frequency binaries that only
     #    become resolvable/loud with the extra forecast years are never
@@ -876,12 +1036,19 @@ def main():
         _log_mem(f'after freeing "{scenario_label}" pulsars')
 
     # =========================================================================
-    # STEP 5 — filter + write shards (uses baseline pulsars, still loaded)
+    # STEP 5 — histogram (optional) + filter + write shards
     # =========================================================================
-    print(f'\\n💾 Filtering and writing {len(sub_ids)} shard(s)...')
+    print(f'\n💾 Filtering and writing {len(sub_ids)} shard(s)...')
     extra_tspans = ([population_gen_tspan_seconds]
                      if max_extension_days > 0 else None)
     for i, sub_id in enumerate(sub_ids):
+        if args.freq_mass_hist:
+            # MUST run before _filter_and_write_shard — that call discards
+            # ~99% of population_batches[i] down to CGW-candidate-biased
+            # extremes. This is the only chance to see the full population.
+            _accumulate_and_save_freq_mass_z_hist(
+                population_batches[i], sim_out_dir, chunk_id, sub_id)
+
         _filter_and_write_shard(
             sub_id=sub_id,
             chunk_id=chunk_id,
@@ -914,6 +1081,7 @@ def main():
             'sub_chunk_size':       sub_chunk_size,
             'Tspan_seconds':        Tspan_seconds,
             'synthetic_scenarios':  list(syn_scenarios.keys()),
+            'freq_mass_hist':       args.freq_mass_hist,
         }
         with open(config_path, 'w') as fh:
             json.dump(config_json, fh, indent=2)
