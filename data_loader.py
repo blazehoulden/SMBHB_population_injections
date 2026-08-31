@@ -74,29 +74,25 @@ def filter_pulsars_15yr(psrs, min_baseline_years=0.0, verbose=True):
     return psrs_filtered, params, Tspan_seconds
 
 
-def get_clean_pulsars_and_tspan(psrs_filtered):
-    """
-    Get pulsars and calculate Tspan.
+_ORIGINAL_RESIDUALS_CACHE: dict = {}
 
-    Note: Returns original pulsars (not copies) to save memory.
-    Original residuals are saved for restoration between injections.
-    """
+def get_clean_pulsars_and_tspan(psrs_filtered):
     tmin = min(min(p.toas()) for p in psrs_filtered)
     tmax = max(max(p.toas()) for p in psrs_filtered)
     Tspan = tmax - tmin
 
     for psr in psrs_filtered:
-        if not hasattr(psr, '_original_residuals'):
-            psr._original_residuals = np.copy(psr.residuals)
+        if id(psr) not in _ORIGINAL_RESIDUALS_CACHE:
+            _ORIGINAL_RESIDUALS_CACHE[id(psr)] = np.copy(psr.residuals)
 
     return psrs_filtered, Tspan
 
 
 def restore_original_residuals(psrs):
-    """Restore pulsars to original state before next injection."""
     for psr in psrs:
-        if hasattr(psr, '_original_residuals'):
-            psr._residuals = np.copy(psr._original_residuals)
+        orig = _ORIGINAL_RESIDUALS_CACHE.get(id(psr))
+        if orig is not None:
+            psr._residuals = np.copy(orig)
     gc.collect()
 
 
@@ -280,27 +276,27 @@ SCENARIOS = {
         best_only       = True,
         extension_years = 4.46,
     ),
-    '4x_cadence_conserved': dict(
-        cadence_factor          = 4,
-        toaerr_factor           = 1.0,
-        best_only               = True,
-        extension_years         = 4.46,
-        conserve_telescope_time = True,
-    ),
-    '2x_precision_conserved': dict(
-        cadence_factor          = 2,
-        toaerr_factor           = 1.0,
-        best_only               = True,
-        extension_years         = 4.46,
-        conserve_telescope_time = True,
-    ),
-    '4x_cad_2x_prec_conserved': dict(
-        cadence_factor  = 4,
-        toaerr_factor   = 0.5,
-        best_only       = True,
-        extension_years = 4.46,
-        conserve_telescope_time = True,
-    ),
+    # '4x_cadence_conserved': dict(
+    #     cadence_factor          = 4,
+    #     toaerr_factor           = 1.0,
+    #     best_only               = True,
+    #     extension_years         = 4.46,
+    #     conserve_telescope_time = True,
+    # ),
+    # '2x_precision_conserved': dict(
+    #     cadence_factor          = 2,
+    #     toaerr_factor           = 1.0,
+    #     best_only               = True,
+    #     extension_years         = 4.46,
+    #     conserve_telescope_time = True,
+    # ),
+    # '4x_cad_2x_prec_conserved': dict(
+    #     cadence_factor  = 4,
+    #     toaerr_factor   = 0.5,
+    #     best_only       = True,
+    #     extension_years = 4.46,
+    #     conserve_telescope_time = True,
+    # ),
 }
 
 def _bounded_maxobs(tim_path: str) -> int:
@@ -1543,9 +1539,9 @@ def _make_max_cadence_scenario(best_psrs, min_cadence_days=MIN_CADENCE_DAYS_DEFA
     )
 
 
-SCENARIOS.update({
-    'max_cadence_top10': _make_max_cadence_scenario(top10),
-    'max_cadence_top20': _make_max_cadence_scenario(top20),
-    'max_cadence_top30': _make_max_cadence_scenario(top30),
-    'max_cadence_top40': _make_max_cadence_scenario(top40),
-})
+# SCENARIOS.update({
+#     'max_cadence_top10': _make_max_cadence_scenario(top10),
+#     'max_cadence_top20': _make_max_cadence_scenario(top20),
+#     'max_cadence_top30': _make_max_cadence_scenario(top30),
+#     'max_cadence_top40': _make_max_cadence_scenario(top40),
+# })
