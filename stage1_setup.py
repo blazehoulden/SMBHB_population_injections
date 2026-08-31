@@ -76,6 +76,15 @@ reproducing population-distribution plots (e.g. Fig 9 of Agarwal et al.
 2026) from the real, unbiased population — NOT from the filtered shards.
 Off by default: zero cost, zero behavior change, unless explicitly
 requested.
+
+Optional: memory tracking (--track-memory)
+───────────────────────────────────────────
+Passing --track-memory turns on the shared MemoryTracker (see
+memory_tracking below): RSS is recorded at named checkpoints throughout
+the run, a background sampler catches peaks between checkpoints, and a
+JSON report is written to metadata/memory_profile/stage1_chunk{id:03d}.json
+at the end. Off by default: zero cost, zero behavior change, unless
+explicitly requested. Intended for sizing Slurm --mem requests.
 """
 
 import argparse
@@ -106,6 +115,7 @@ from data_loader import (
 from signal_injection import change_in_TOAs_days_population_nufft, _antenna_response_vec, _get_psr_radec
 from SMBHB_pop_synth import PopulationArrays
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
+from memory_tracking import MemoryTracker
 
 
 # =============================================================================
@@ -710,7 +720,7 @@ def parse_args():
     p.add_argument(
         '--freq-mass-hist',
         action='store_true',
-        default=True,
+        default=False,
         help='Write a per-sub-chunk (frequency x log10(Mtot) x redshift) '
              'histogram of the FULL, unfiltered population to '
              'metadata/freq_mass_z_hist/{chunk:03d}_{sub:03d}.npz — the '
@@ -722,6 +732,25 @@ def parse_args():
              '(e.g. Fig 9 of Agarwal et al. 2026) from the unbiased '
              'population rather than the CGW-candidate-biased filtered '
              'shards.',
+    )
+    p.add_argument(
+        '--track-memory',
+        action='store_true',
+        default=True,
+        help='Enable RSS memory tracking for HPC job-sizing: records RSS '
+             'at named checkpoints throughout the run, samples in a '
+             'background thread to catch peaks between checkpoints, and '
+             'writes a JSON report to '
+             'metadata/memory_profile/stage1_chunk{chunk_id:03d}.json at '
+             'the end. Off by default: zero cost, zero behavior change, '
+             'unless explicitly requested.',
+    )
+    p.add_argument(
+        '--memory-sample-interval',
+        type=float,
+        default=5.0,
+        help='Seconds between background RSS samples when --track-memory '
+             'is set. [5.0]',
     )
     return p.parse_args()
 
@@ -886,12 +915,22 @@ def main():
     os.makedirs(pop_dir,  exist_ok=True)
     os.makedirs(meta_dir, exist_ok=True)
 
+    # ── Memory tracker (opt-in, default off) ──────────────────────────────────
+    mem = MemoryTracker(
+        enabled=args.track_memory,
+        label=f'stage1 chunk{chunk_id:03d}',
+        sample_interval=args.memory_sample_interval,
+    )
+    mem.start_background_sampling()
+    mem.checkpoint('task start')
+
     print(f'\n{"="*62}')
     print(f'Stage 1 — task_id={task_id}  sim_id={sim_id}  chunk_id={chunk_id}')
     print(f'  config={args.config}  chunk_size={args.chunk_size:,}')
     print(f'  n_sub_chunks={args.n_sub_chunks}  sub_chunk_size={sub_chunk_size:,}')
     print(f'  sub_ids to process: {sub_ids}')
     print(f'  freq_mass_hist={args.freq_mass_hist}')
+    print(f'  track_memory={args.track_memory}')
     print(f'  output → {sim_out_dir}')
     print(f'{"="*62}')
 
@@ -940,6 +979,7 @@ def main():
     print(f'✓ {len(psrs_baseline)} baseline pulsars, '
           f'Tspan={Tspan_seconds / (365.25 * 86400):.1f} yr')
     _log_mem('after loading baseline pulsars')
+    mem.checkpoint('after loading baseline pulsars')
 
     # ── Frequency floor must cover the LONGEST scenario Tspan, not just
     #    the real baseline — otherwise low-frequency binaries that only
@@ -974,6 +1014,7 @@ def main():
         smbhb_module=smbhb_module,
     )
     _log_mem('after generating population batches')
+    mem.checkpoint('after generating population batches')
 
 
     # =========================================================================
@@ -990,6 +1031,7 @@ def main():
         sim_out_dir=sim_out_dir,
         t_nufft_ref=t_nufft_total,
     )
+    mem.checkpoint('after baseline NUFFT')
 
     # =========================================================================
     # STEP 4 — synthetic scenarios, ONE PTA's pulsars in memory at a time
@@ -1015,6 +1057,7 @@ def main():
         t_load_total += time.time() - t_l0
         print(f'✓ {len(kept_psrs)} pulsars loaded for "{scenario_label}"')
         _log_mem(f'after loading "{scenario_label}" pulsars')
+        mem.checkpoint(f'after loading "{scenario_label}" pulsars')
 
         print(f'\n⚡ NUFFT → scenario={scenario_label} '
               f'({len(sub_ids)} sub-chunk(s))...')
@@ -1028,12 +1071,14 @@ def main():
             sim_out_dir=sim_out_dir,
             t_nufft_ref=t_nufft_total,
         )
+        mem.checkpoint(f'after NUFFT for "{scenario_label}"')
 
         # Free this scenario's pulsars before the next one is loaded —
         # this is the key memory saving vs. the previous revision.
         del kept_psrs
         gc.collect()
         _log_mem(f'after freeing "{scenario_label}" pulsars')
+        mem.checkpoint(f'after freeing "{scenario_label}" pulsars')
 
     # =========================================================================
     # STEP 5 — histogram (optional) + filter + write shards
@@ -1063,10 +1108,13 @@ def main():
         population_batches[i] = None
         gc.collect()
 
+    mem.checkpoint('after filtering + writing all shards')
+
     # Baseline pulsars no longer needed.
     del psrs_baseline, population_batches
     gc.collect()
     _log_mem('after freeing baseline pulsars')
+    mem.checkpoint('after freeing baseline pulsars')
 
     # ── Write metadata (chunk 0, sub-chunk 0 wins; content is idempotent) ────
     config_path = os.path.join(meta_dir, 'config.json')
@@ -1093,6 +1141,14 @@ def main():
     n_done = len(sub_ids)
     print(f'\n✅ Stage 1 chunk={chunk_id} (sim={sim_id})  '
           f'{n_done} sub-chunk(s) complete in {elapsed/60:.1f} min')
+
+    # ── Memory report ─────────────────────────────────────────────────────────
+    mem.stop_background_sampling()
+    mem.write_report(
+        os.path.join(meta_dir, 'memory_profile', f'stage1_chunk{chunk_id:03d}.json'),
+        extra={'sim_id': sim_id, 'chunk_id': chunk_id,
+               'sub_ids': sub_ids, 'elapsed_sec': elapsed},
+    )
 
 
 if __name__ == '__main__':

@@ -14,6 +14,8 @@ venv/
 *.hdf5
 *.npz
 *.npy
+*.tar.gz
+
 
 # Logs/text files
 *.out
@@ -26,6 +28,7 @@ data/
 cache/
 figures/
 test_runs/
+extra_runs/
 tables/
 min_7nHz_MPTA/
 nanograv_pulsars_cache.pkl

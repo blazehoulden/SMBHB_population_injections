@@ -40,6 +40,19 @@ Output layout (per sim)
   residuals/       noise/ population/ combined/    (baseline, active sub-chunks only)
   residuals_<scen>/                                (synthetic scenarios)
   metadata/        config.json  phase_handoff.json  stage2_complete.json
+
+Optional: memory tracking (--track-memory)
+───────────────────────────────────────────
+Passing --track-memory turns on the shared MemoryTracker: RSS is recorded
+at named checkpoints in the orchestrator AND in each phase subprocess
+(baseline / each synthetic scenario), since those are where the real
+memory pressure — pulsar loading, PTA construction, CGW SNR passes — lives.
+The flag is propagated to every subprocess automatically. Each phase
+writes its own report to
+metadata/memory_profile/stage2_{baseline|<scenario>}.json so peak usage
+per phase is visible even though phases run in separate processes.
+Off by default: zero cost, zero behavior change, unless explicitly
+requested.
 """
 
 import argparse
@@ -51,6 +64,7 @@ import json
 import os
 import pickle
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -84,6 +98,20 @@ try:
     _STAGE1_SETUP_IMPORTED = True
 except ImportError:
     _STAGE1_SETUP_IMPORTED = False
+
+try:
+    from memory_tracking import MemoryTracker
+except ImportError:
+    # Self-contained fallback, mirroring the ShardedPickleStore pattern
+    # above, so stage2 still runs (with tracking silently disabled) even
+    # if memory_tracking.py isn't on the path for some reason.
+    class MemoryTracker:  # type: ignore[no-redef]
+        def __init__(self, enabled=True, label='', sample_interval=5.0):
+            self.enabled = enabled
+        def checkpoint(self, tag): pass
+        def start_background_sampling(self): pass
+        def stop_background_sampling(self): pass
+        def write_report(self, path, extra=None): pass
 
 from enterprise.pulsar import Pulsar as EnterprisePulsar
 from pta_builder import build_pta_and_params
@@ -1001,6 +1029,11 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
 
+    mem = MemoryTracker(enabled=args.track_memory, label='stage2 baseline',
+                         sample_interval=args.memory_sample_interval)
+    mem.start_background_sampling()
+    mem.checkpoint('phase start')
+
     with open(os.path.join(meta_dir, 'config.json')) as fh:
         run_config = json.load(fh)
     Tspan_seconds = run_config['Tspan_seconds']
@@ -1022,6 +1055,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
             psrs_unfiltered, verbose=True)
     del psrs_unfiltered; gc.collect()
     psr_names = [p.name for p in psrs_clean]
+    mem.checkpoint('after loading baseline pulsars')
 
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
 
@@ -1034,6 +1068,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
             raw_noise_params=raw_noise_params, Tspan=Tspan_seconds,
             current_stoas=noise_stoas, return_psrs_pta=True,
         )
+        mem.checkpoint('after building PTA (proxy-only)')
         validate_cgw_proxy(
             store=store, chunk_ids=all_shards, pta=pta,
             enterprise_psrs=enterprise_psrs,
@@ -1058,6 +1093,11 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
                        'Tspan_seconds': Tspan_seconds,
                        'noise_seed': noise_seed,
                        'baseline_candidates': [], 'baseline_snrs': []}, fh)
+        mem.stop_background_sampling()
+        mem.write_report(
+            os.path.join(meta_dir, 'memory_profile', 'stage2_baseline.json'),
+            extra={'sim_id': args.sim_id, 'proxy_only': True},
+        )
         return
 
     # ── Noise simulation with retry on high noise floor or NaN SNR ───────────────
@@ -1153,6 +1193,8 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
         except RuntimeError as e:
             sys.exit(f'ERROR: {e}')
 
+    mem.checkpoint('after active sub-chunk selection')
+
     n_active = len(active_shards)
     print(f'\n  Active sub-chunks: {n_active}/{N_total} '
           f'({100 * n_active / N_total:.1f}%)')
@@ -1166,6 +1208,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
                         combined_delta, n_active, N_total, scenario=None)
     _cleanup_shard_stoas(sim_out_dir, all_shards, scenario=None)
     del combined_delta; gc.collect()
+    mem.checkpoint('after saving residuals + cleaning stoas')
 
     # delete unused shards
     _cleanup_inactive_population_shards(store, all_shards, active_shards)
@@ -1186,6 +1229,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
         Tspan=Tspan_seconds,
         current_stoas=signal_stoas,
     )
+    mem.checkpoint('after rebuilding PTA')
 
     baseline_candidates: Optional[List] = None
     baseline_snrs:       Optional[np.ndarray] = None
@@ -1211,10 +1255,12 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
             meta_dir=meta_dir,
         )
         print('✓ Baseline CGW complete')
+        mem.checkpoint('after baseline CGW SNR computation')
     else:
         print('\n(CGW skipped — use --cgw to enable)')
 
     del pta, enterprise_psrs, psrs_clean; gc.collect()
+    mem.checkpoint('after freeing PTA + pulsars')
 
     _record_sgwb_snr(
         meta_dir, 'baseline', snr_achieved, Tspan_seconds,
@@ -1240,6 +1286,13 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
           f'(k={n_active}/{N_total}, noise_seed={winning_seed}, '
           f'SGWB SNR={snr_achieved:.4f})')
 
+    mem.stop_background_sampling()
+    mem.write_report(
+        os.path.join(meta_dir, 'memory_profile', 'stage2_baseline.json'),
+        extra={'sim_id': args.sim_id, 'n_active_sub_chunks': n_active,
+               'n_total_sub_chunks': N_total, 'snr_achieved': snr_achieved},
+    )
+
 
 def _phase_scenario(args, scenario_label, combined_scenarios):
     """
@@ -1258,6 +1311,11 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
     """
     sim_out_dir = os.path.join(args.output_dir, f'sim{args.sim_id:03d}')
     meta_dir    = os.path.join(sim_out_dir, 'metadata')
+
+    mem = MemoryTracker(enabled=args.track_memory, label=f'stage2 {scenario_label}',
+                         sample_interval=args.memory_sample_interval)
+    mem.start_background_sampling()
+    mem.checkpoint('phase start')
  
     handoff_path = os.path.join(meta_dir, HANDOFF_FILENAME)
     if not os.path.isfile(handoff_path):
@@ -1289,6 +1347,7 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
             psrs_unfiltered, verbose=False)
     del psrs_unfiltered; gc.collect()
     psr_names = [p.name for p in psrs_clean]
+    mem.checkpoint(f'after loading "{scenario_label}" pulsars')
  
     print(f'  [{scenario_label}] Tspan: {Tspan_seconds / (365.25*86400):.2f} yr '
           f'(baseline was {Tspan_seconds_baseline / (365.25*86400):.2f} yr)')
@@ -1309,6 +1368,7 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
                         combined_delta, n_active, n_total, scenario=scenario_label)
     _cleanup_shard_stoas(sim_out_dir, all_shards, scenario=scenario_label)
     del noise_stoas, combined_delta; gc.collect()
+    mem.checkpoint('after saving residuals + cleaning stoas')
  
     # Reconstruct signal stoas (noise + population) from saved residuals
     resid_base   = os.path.join(sim_out_dir, f'residuals_{scenario_label}', 'combined')
@@ -1329,6 +1389,7 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
     )
     print(f'  ✓ [{scenario_label}] SGWB (OS) SNR = {snr_sgwb_scenario:.4f}  '
           f'(baseline 4.5yr calibration target: {args.target_snr})')
+    mem.checkpoint('after building PTA + SGWB SNR')
  
     _record_sgwb_snr(
         meta_dir, scenario_label, snr_sgwb_scenario, Tspan_seconds,
@@ -1353,11 +1414,20 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
             baseline_snrs=baseline_snrs,
             n_candidates=N_SCENARIO_CGW_CANDIDATES,
         )
+        mem.checkpoint('after scenario CGW SNR computation')
     elif args.cgw:
         print(f'  WARNING: no baseline candidates, skipping CGW for {scenario_label}')
  
     del pta, epsrs; gc.collect()
     print(f'✓ [{scenario_label}] Phase complete')
+
+    mem.stop_background_sampling()
+    safe_label = re.sub(r'[^A-Za-z0-9_.-]', '_', scenario_label)
+    mem.write_report(
+        os.path.join(meta_dir, 'memory_profile', f'stage2_{safe_label}.json'),
+        extra={'sim_id': args.sim_id, 'scenario': scenario_label,
+               'sgwb_snr': snr_sgwb_scenario},
+    )
 
 def _determine_reference_tspan(syn_scenarios, combined_scenarios) -> Optional[float]:
     """
@@ -1430,6 +1500,13 @@ def process_sim(
             argv += ['--synthetic-pta-config', args.synthetic_pta_config]
         if reference_tspan_seconds is not None:
             argv += ['--tspan-reference-seconds', str(reference_tspan_seconds)]
+        # Propagate memory tracking to every phase subprocess — this is
+        # where the real memory pressure (pulsar loading, PTA construction,
+        # CGW passes) actually happens, so the orchestrator process alone
+        # wouldn't see it.
+        if args.track_memory:
+            argv.append('--track-memory')
+            argv += ['--memory-sample-interval', str(args.memory_sample_interval)]
         return argv
 
     try:
@@ -1617,6 +1694,56 @@ def _build_summary_object(
 
 
 # =============================================================================
+# Final cleanup — keep only summary.pkl.gz and metadata/
+# =============================================================================
+
+def _cleanup_sim_directory(output_dir: str, sim_id: int) -> None:
+    """
+    Runs once, after the summary object has been built successfully.
+
+    Everything a sim directory needs downstream is either in summary.pkl.gz
+    (the per-binary arrays + category indices + SNR summaries) or in
+    metadata/ (config, phase handoff, per-scenario SGWB SNRs, sentinel,
+    top CGW breakdowns). Everything else — populations/ (raw shard pickles),
+    residuals*/ (per-pulsar noise/population/combined .npy files, one per
+    scenario), and stoas/ (should already be gone, but just in case) — is
+    reproducible/intermediate and safe to delete.
+
+    NOTE: logs/ (stage2_*.out / .err) lives outside sim{id:03d}/, under
+    the job's own logs directory, so it isn't touched here — trim that
+    separately if/when you want to drop the .err files.
+    """
+    sim_out_dir = os.path.join(output_dir, f'sim{sim_id:03d}')
+    if not os.path.isdir(sim_out_dir):
+        print(f'  ⚠️  Cleanup skipped — {sim_out_dir} does not exist')
+        return
+
+    keep = {'metadata', 'summary.pkl.gz'}
+
+    print(f'\n🧹 Final cleanup — sim{sim_id:03d}/  (keeping: {sorted(keep)})')
+    removed_dirs, removed_files, freed_bytes = 0, 0, 0
+
+    for entry in sorted(os.listdir(sim_out_dir)):
+        if entry in keep:
+            continue
+        path = os.path.join(sim_out_dir, entry)
+        if os.path.isdir(path):
+            freed_bytes += sum(
+                f.stat().st_size for f in Path(path).rglob('*') if f.is_file())
+            shutil.rmtree(path)
+            removed_dirs += 1
+            print(f'  🗑️  Removed directory: {entry}/')
+        else:
+            freed_bytes += os.path.getsize(path)
+            os.remove(path)
+            removed_files += 1
+            print(f'  🗑️  Removed file: {entry}')
+
+    print(f'✓ Cleanup complete — {removed_dirs} dir(s), {removed_files} file(s) removed '
+          f'({freed_bytes / 1e6:.1f} MB freed)')
+
+
+# =============================================================================
 # Argument parsing
 # =============================================================================
 
@@ -1646,6 +1773,29 @@ def parse_args():
     p.add_argument('--phase-scenario',       type=str, default=None,
                    help=argparse.SUPPRESS)
     p.add_argument('--tspan-reference-seconds', type=float, default=None)
+    p.add_argument('--keep-intermediate',    action='store_true', default=False,
+                   help='Skip the final cleanup step and keep populations/, '
+                        'residuals*/, etc. alongside summary.pkl.gz and metadata/.')
+    p.add_argument(
+        '--track-memory',
+        action='store_true',
+        default=True,
+        help='Enable RSS memory tracking for HPC job-sizing. Applies to the '
+             'orchestrator AND is automatically propagated to every phase '
+             'subprocess (baseline / each synthetic scenario), since that '
+             'is where the real memory pressure lives. Each phase writes '
+             'its own report to '
+             'metadata/memory_profile/stage2_{baseline|<scenario>}.json. '
+             'Off by default: zero cost, zero behavior change, unless '
+             'explicitly requested.',
+    )
+    p.add_argument(
+        '--memory-sample-interval',
+        type=float,
+        default=5.0,
+        help='Seconds between background RSS samples when --track-memory '
+             'is set. [5.0]',
+    )
     return p.parse_args()
 
 
@@ -1726,6 +1876,7 @@ def main():
     print(f'  CGW           : {"enabled" if args.cgw else "disabled"}')
     print(f'  Noise seed    : {noise_seed}')
     print(f'  Syn scenarios : {list(syn_scenarios.keys()) or "none"}')
+    print(f'  Track memory  : {args.track_memory}')
     print(f'{"="*60}\n')
 
     success = process_sim(
@@ -1742,6 +1893,11 @@ def main():
 
     _build_summary_object(args.output_dir, sim_id=args.sim_id,
                           n_keep_per_category=200)
+
+    if not args.keep_intermediate:
+        _cleanup_sim_directory(args.output_dir, sim_id=args.sim_id)
+    else:
+        print('\n(--keep-intermediate set — skipping final cleanup)')
 
     elapsed = time.time() - t0
     print(f'\n{"="*60}')

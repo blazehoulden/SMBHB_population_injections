@@ -11,7 +11,7 @@ def apply_apj_style():
         'axes.labelsize':    12,
         'xtick.labelsize':   10,
         'ytick.labelsize':   10,
-        'legend.fontsize':   10,
+        'legend.fontsize':   9,
         'figure.figsize':    (3.5, 2.8),
         'axes.linewidth':    0.8,
         'xtick.major.width': 0.8,
