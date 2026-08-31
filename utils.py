@@ -381,3 +381,58 @@ def print_scaling_summary(results, N_needed, target_SNR):
     if N_needed:
         print(f"N required: {N_needed} binaries")
     print("="*70)
+
+
+def get_sgwb_snr_map(runs_root, scenario_label='baseline', as_dataframe=True):
+    """Scan a `runs` tree for metadata/sgwb_snr_summary.json files and
+    return a tidy mapping of per-simulation SGWB SNRs.
+
+    Parameters
+    - runs_root: path-like root under which `runs/<run_dir>/<sim>/metadata/...` live
+    - scenario_label: which scenario key to extract (e.g. 'baseline' or 'baseline_forecast')
+    - as_dataframe: if True return a `pandas.DataFrame`, else return a dict {sim_key: sgwb_snr}
+
+    Returned DataFrame columns: ['run_dir', 'sim_name', 'sim_key', 'sim_id', 'sgwb_snr']
+    """
+    from pathlib import Path
+    import json
+    import numpy as _np
+    import pandas as _pd
+
+    root = Path(runs_root)
+    rows = []
+    for p in sorted(root.rglob('metadata/sgwb_snr_summary.json')):
+        try:
+            with open(p) as fh:
+                rec = json.load(fh)
+        except Exception:
+            continue
+
+        # path: .../runs/<run_dir>/<sim_name>/metadata/sgwb_snr_summary.json
+        sim_name = p.parent.parent.name
+        run_dir = p.parent.parent.parent.name
+        sim_key = f"{run_dir}/{sim_name}"
+
+        sgwb_val = _np.nan
+        if isinstance(rec, dict):
+            # Prefer scenario-specific entry if present
+            if scenario_label in rec and isinstance(rec[scenario_label], dict):
+                sgwb_val = rec[scenario_label].get('sgwb_snr', _np.nan)
+            # Fallback: flat structure with 'sgwb_snr'
+            elif 'sgwb_snr' in rec:
+                sgwb_val = rec.get('sgwb_snr', _np.nan)
+
+        # convert sim id if possible
+        sim_id = None
+        if sim_name.startswith('sim'):
+            try:
+                sim_id = int(sim_name.replace('sim', ''))
+            except Exception:
+                sim_id = None
+
+        rows.append({'run_dir': run_dir, 'sim_name': sim_name, 'sim_key': sim_key, 'sim_id': sim_id, 'sgwb_snr': float(sgwb_val) if _np.isfinite(sgwb_val) else _np.nan})
+
+    df = _pd.DataFrame(rows)
+    if as_dataframe:
+        return df
+    return {r['sim_key']: r['sgwb_snr'] for r in rows}

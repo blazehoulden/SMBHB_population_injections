@@ -22,21 +22,21 @@ POPULATION_CONFIGS = {
         'n_binaries': 200_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(8.7),
-        'z_max': 3.0,
+        'z_max': 2.0,
         'description': 'Lower mass, higher population size'
     },
     'realistic': {
         'n_binaries': 20_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.0),
-        'z_max': 3.0,
+        'z_max': 2.0,
         'description': 'Medium mass, medium population size'
     },
     'optimistic': {
         'n_binaries': 2_250_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.3),
-        'z_max': 3.0,
+        'z_max': 2.0,
         'description': 'Higher mass, lower population size'
     }
 }
@@ -130,6 +130,7 @@ def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, 
         population = smbhb_module.generate_smbhb_population(
             n_binaries=n_binaries if n_binaries is not None else config['n_binaries'],
             mass_distribution=config['mass_distribution'],
+            z_max=config['z_max'],
             alpha_0=1.21,
             alpha_z=0.03,
             mass_min=10**(7.5),
