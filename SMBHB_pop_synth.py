@@ -781,7 +781,7 @@ def chosen_population(
         T_obs_seconds: float,
         chirp_mass_msun: float = 1e10,
         mass_ratio: float = 0.5,
-        gw_frequency: float = 1e-8,
+        gw_frequency: float = 6e-9,
         redshift: float = 0.5,
         polarization: float = 0.0,
         inclination: float = 0.0,

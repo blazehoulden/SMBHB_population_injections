@@ -4,11 +4,17 @@ Main execution script for SMBHB population analysis.
 Run with: python main.py
 """
 import os
+import pickle
 import sys
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import gzip
 from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling, suppress_enterprise_warnings
 from debug.test_CGW_sky_loc import sky_sensitivity_weight, test_sky_CGW_SNR_location
+from debug.plot_cgw_freq_amp import test_freq_amp_CGW_SNR
+from debug.plot_cgw_freq_redshift import test_freq_redshift_CGW_SNR
+from debug.plot_cgw_mass_redshift import test_mass_redshift_CGW_SNR
+from debug.plot_cgw_mass_amp import test_mass_amp_CGW_SNR
 from sensitivity_curves import make_pta_sensitivity
 import argparse
 import config
@@ -23,8 +29,8 @@ try:
 except Exception:
     inject_population_nufft = None
 from pta_builder import build_pta_and_params
-from scaling_analysis import run_scaling_analysis
-from individual_binary import analyze_individual_binaries
+# from scaling_analysis import run_scaling_analysis
+# from individual_binary import analyze_individual_binaries
 from memory_profile import log_memory
 from consistent_pop_synth import compute_population_snr
 # from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
@@ -51,12 +57,12 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--target-snr", type=float, default=4.0,
+        "--target-snr", type=float, default=3.2,
         help="Target SNR for ensemble/scaling analyses"
     )
 
     parser.add_argument(
-        "--snr-range", nargs=2, type=float, default=[3.5, 4.25],
+        "--snr-range", nargs=2, type=float, default=[3.0, 3.4],
         help="SNR range for ensemble search (low high)"
     )
 
@@ -106,7 +112,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--n-chunks", type=int, default=100,
+        "--n-chunks", type=int, default=1,
         help="Number of chunks for chunked injection (used when --chunked-injection)",
     )
 
@@ -133,6 +139,30 @@ def parse_args():
     parser.add_argument(
         "--minimal-pop-storage", action="store_true",
         help="Store only injection/CGW-required fields in mixed precision to reduce disk usage",
+    )
+    parser.add_argument(
+    "--chunk-size", type=int, default=5_000_000,
+    help="Total binaries per chunk (must be divisible by --n-sub-chunks)"
+    )
+    parser.add_argument(
+        "--n-sub-chunks", type=int, default=10,
+        help="Sub-chunks per stage1 chunk"
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help="Parallel stage1 chunk subprocesses to run locally"
+    )
+    parser.add_argument(
+        "--synthetic-ptas", action="store_true",
+        help="Enable synthetic PTA scenarios in stage1/stage2"
+    )
+    parser.add_argument(
+        "--synthetic-pta-config", type=str, default=None,
+        help="JSON string overriding default synthetic scenario definitions"
+    )
+    parser.add_argument(
+        "--noise-seed-base", type=int, default=26072001,
+        help="Base seed for stage1/stage2 noise seeding"
     )
 
     return parser.parse_args()
@@ -255,207 +285,136 @@ def main():
         population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
     # print_population_diagnostics(population)
     
-    # Used to make a sky sensitivity map for CGW SNR analysis later, the same for each network of pulsars since it only depends on pulsar sky locations.
-    # _, _ = test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
-        
+
+    # # Was (implicitly or explicitly): scenario='baseline'  -> real-only ~4.5 yr
+    # psrs_9yr = load_pulsars(
+    #     scenario='baseline_forecast',   # cadence x1, toaerr x1, +4.46 yr forecast
+    #     verbose=True,
+    # )
+
+
+    # psrs_clean_9yr, Tspan_9yr = get_clean_pulsars_and_tspan(psrs_9yr)
+
+    # #Used to make a sky sensitivity map for CGW SNR analysis later, the same for each network of pulsars since it only depends on pulsar sky locations.
+    # # _, _ = test_sky_CGW_SNR_location(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
+    # population, snrs = test_sky_CGW_SNR_location(
+    #     psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr,
+    #     save_data_path=f"{save_dir}/sky_sensitivity_data/",
+    #     make_plot=False,
+    # )
+    # plot frequency vs amplitude for CGW SNR analysis, for a given chirp mass and redshift
+    # _ = test_freq_amp_CGW_SNR(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
+
     consistent_results = None
+
+    # plot frequency vs redshift for CGW SNR analysis, for a given chirp mass and amplitude
+    # _ = test_freq_redshift_CGW_SNR(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
+
+    # plot mass vs redshift for CGW SNR analysis, for a given chirp mass and amplitude
+    # _ = test_mass_redshift_CGW_SNR(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
+
+    # plot mass vs amplitude for CGW SNR analysis, for a given chirp mass and amplitude
+    # _ = test_mass_amp_CGW_SNR(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
+
 
     # ========== CONSISTENT POPULATION SYNTHESIS ==========
     if config.RUN_CONSISTENT_POP_SYNTH:
         print("\n" + "="*70)
-        print("CONSISTENT POPULATION SYNTHESIS")
+        print("STAGE1/STAGE2 PIPELINE (local)")
         print("="*70)
 
-        N_initial_guess = (
-            int(selected_config['n_binaries'])
-            if args.initial_guess == "auto"
-            else int(args.initial_guess)
-        )
+        cmd = [
+            "bash", "submit_main_local.sh",
+            "--config", CONFIG_NAME,
+            "--target-snr", str(args.target_snr),
+            "--snr-range", str(args.snr_range[0]), str(args.snr_range[1]),
+            "--simulations", str(args.simulations),
+            "--n-chunks", str(args.n_chunks),
+            "--chunk-size", str(args.chunk_size),
+            "--n-sub-chunks", str(args.n_sub_chunks),
+            "--output-dir", save_dir,
+            "--jobs", str(args.jobs),
+            "--noise-seed-base", str(args.noise_seed_base),
+        ]
 
-        SNR_low, SNR_high = args.snr_range
+        # CGW_SNR_ANALYSIS now maps directly onto stage2's --cgw/--no-cgw
+        cmd.append("--cgw" if config.CGW_SNR_ANALYSIS else "--no-cgw")
 
-        original_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+        if args.synthetic_ptas:
+            cmd.append("--synthetic-ptas")
+        if args.synthetic_pta_config:
+            cmd += ["--synthetic-pta-config", args.synthetic_pta_config]
 
-        consistent_results = generate_snr_consistent_populations_distance_scaling(
-            config_template=selected_config,
-            smbhb_module=smbhb_module,
-            psrs_clean=psrs_clean,
-            raw_noise_params=raw_noise_params,
-            Tspan=Tspan_seconds,
-            original_stoas=original_stoas,
-            target_SNR=args.target_snr,
-            SNR_range=args.snr_range,
-            N_sims=args.simulations,
-            verbose=True,
-            save_populations=True,
-            profile=True,
-            n_iterations=100,
-            toggle_memory_profiling=False,
-            keep_amplitudes_in_result=False,
-            precompute_parallel=True,
-            inject_eps=1e-6,
-            max_retries_per_sim=args.max_retries_per_sim,
-            require_snr_in_range=True,
-        )
+        print("Running:", " ".join(cmd))
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            raise RuntimeError("Local stage1/stage2 pipeline failed")
+
+        # ---- load summaries for downstream plotting/analysis ----
+        summaries = []
+        for sim_id in range(args.simulations):
+            p = os.path.join(save_dir, f"sim{sim_id:03d}", "summary.pkl.gz")
+            with gzip.open(p, "rb") as fh:
+                summaries.append(pickle.load(fh))
+        print(f"✓ Loaded {len(summaries)} sim summaries")
+
+        if config.CGW_SNR_ANALYSIS:
+            class _BinaryView:
+                """Lightweight stand-in for a binary object, built from summary arrays."""
+                __slots__ = ("f", "Mc", "Mtot", "h0", "D_comov", "z",
+                            "ra", "dec", "psi", "iota", "phi0")
+
+                def __init__(self, arrays, global_idx):
+                    for k in self.__slots__:
+                        if k in arrays:
+                            setattr(self, k, float(arrays[k][global_idx]))
 
 
-        file_name = f'consistent_population_{CONFIG_NAME}_targetSNR{SNR_high}_sims{args.simulations}.json'
-        save_path = os.path.join(save_dir, file_name)
-        compact_results = compact_consistent_results_for_storage(
-            consistent_results,
-            max_mb_per_sim=args.max_save_mb_per_sim,
-            n_nearest=args.save_nearest,
-            n_loudest=args.save_loudest,
-        )
-        # Strip unpicklable pta objects before saving
-        for pop in compact_results.get("populations", []):
-            pop.pop("pta", None)
-            pop.pop("psrs", None)
+            def get_top_cgw_binaries(summary, snr_field="cgw_snr", n_top=50):
+                """
+                Pull the top-N CGW candidates out of a stage2 summary.pkl.gz object,
+                using the pre-computed 'cgw_snr_high' extreme category (kept during
+                _build_summary_object) rather than rescanning all binaries.
 
-        save_results_dual(compact_results, save_path, save_compact_npz=False)
-
-        
-    if config.CGW_SNR_ANALYSIS:
-        print("\n" + "="*70)
-        print("CONTINUOUS WAVE SNR ANALYSIS")
-        print("="*70)
-
-        if not config.RUN_CONSISTENT_POP_SYNTH or consistent_results is None:
-            raise RuntimeError(
-                "CGW_SNR_ANALYSIS requires RUN_CONSISTENT_POP_SYNTH to have run first."
-            )
-
-        N_PRE_FILTER  = 2000
-        N_TOP_SOURCES = 50
-
-        all_population_cgw_snrs = []
-        cadence  = 14 * 24 * 3600
-        time_arr = np.arange(0, Tspan_seconds, cadence) # 14-day cadence just for the time_array used in NUFFT injection and CGW SNR calculation; the actual PTA objects are built with the full Tspan and original TOAs.
-
-        for pop_idx, result in enumerate(consistent_results["populations"]):
-            print(f"\n--- Population {pop_idx + 1} ---")
-            population = result["population"]
-            pta        = result["pta"]
-            psrs       = result["psrs"]
-
-            # ------------------------------------------------------------------
-            # Pre-filter: h0/(2πf)  ×  sky_weight
-            # sky_weight ~ 1 at median sky sensitivity, up to ~3 at hotspots.
-            # This lifts hotspot binaries that would otherwise be buried by the
-            # crude h0 proxy and suppresses coldspot binaries that waste SNR
-            # compute budget.
-            # ------------------------------------------------------------------
-            pre_filtered = sorted(
-                (
-                    {
-                        "global_index": idx,
-                        "binary": b,
-                        "sky_weight": sky_sensitivity_weight(b.ra, b.dec),
-                        "proxy": (b.h0 / (2.0 * np.pi * b.f))
-                                * sky_sensitivity_weight(b.ra, b.dec),
-                    }
-                    for idx, b in enumerate(population)
-                ),
-                key=lambda item: item["proxy"],
-                reverse=True,
-            )[:N_PRE_FILTER]
-
-            pre_filter_snrs = compute_cgw_snr_optimal_population(
-                psrs                = psrs,
-                pta                 = pta,
-                population          = [item["binary"] for item in pre_filtered],
-                raw_noise_params    = raw_noise_params,
-                parsed_noise_params = parsed_noise_params,
-                Tspan               = Tspan_seconds,
-                profile             = True,
-            )
-
-            ranked_sources = sorted(
-                (
-                    {
-                        "proxy_rank":  proxy_rank,
-                        "global_index": item["global_index"],
-                        "proxy_value": item["proxy"],
-                        "sky_weight":  item["sky_weight"],
-                        "binary":      item["binary"],
-                        "snr":         snr,
-                    }
-                    for proxy_rank, (item, snr) in enumerate(
-                        zip(pre_filtered, pre_filter_snrs), start=1
+                Returns (binaries, snrs) — same shapes plot_cgw_analysis expects.
+                """
+                arrays = summary["arrays"]
+                cat_key = f"{snr_field}_high"
+                if cat_key not in summary["meta"]["category_indices"]:
+                    raise KeyError(
+                        f"'{cat_key}' not in category_indices — available: "
+                        f"{list(summary['meta']['category_indices'].keys())}"
                     )
-                ),
-                key=lambda x: x["snr"],
-                reverse=True,
-            )
-            top_sources = ranked_sources[:N_TOP_SOURCES]
 
-            top_binaries = [entry["binary"] for entry in top_sources]
-            top_snrs     = [entry["snr"]    for entry in top_sources]
+                idxs = summary["meta"]["category_indices"][cat_key]
+                snrs_all = arrays[snr_field][idxs]
+                order = np.argsort(snrs_all)[::-1][:n_top]
+                top_idxs = np.array(idxs)[order]
 
-            print(f"Top {N_TOP_SOURCES} CGW candidates:")
-            for snr_rank, entry in enumerate(top_sources, start=1):
-                b          = entry["binary"]
-                snr        = entry["snr"]
-                proxy_rank = entry["proxy_rank"]
-                sky_w      = entry["sky_weight"]
-                print(
-                    f"  {snr_rank:2d}. proxy_rank={proxy_rank:4d}  "
-                    f"sky_w={sky_w:.2f}  "
-                    f"f={b.f:.2e} Hz  "
-                    f"Mc={b.Mc:.2e} Msun  "
-                    f"h0={b.h0:.2e}  "
-                    f"SNR={snr:.3f}"
+                binaries = [_BinaryView(arrays, i) for i in top_idxs]
+                snrs = arrays[snr_field][top_idxs]
+                return binaries, snrs
+            
+            for i, s in enumerate(summaries):
+                n_cgw = len(s["meta"].get("top_cgw_breakdowns", []))
+                print(f"  sim{i:03d}: {n_cgw} top-CGW breakdowns, "
+                    f"SGWB SNR summary: {s['meta'].get('sgwb_snr_summary')}")
+            from plot_cgw_snr import plot_cgw_analysis
+            for sim_idx, summary in enumerate(summaries):
+                top_binaries, top_snrs = get_top_cgw_binaries(
+                    summary, snr_field="cgw_snr", n_top=50
                 )
+                if len(top_binaries) == 0:
+                    print(f"  sim{sim_idx:03d}: no CGW candidates found, skipping plot")
+                    continue
 
-            all_population_cgw_snrs.append(list(top_snrs))
-
-            # Persist CGW candidate diagnostics into the same compact save object.
-            if "populations" in compact_results and pop_idx < len(compact_results["populations"]):
-                compact_results["populations"][pop_idx]["cgw_analysis"] = {
-                    "n_pre_filter": int(N_PRE_FILTER),
-                    "n_top_sources": int(N_TOP_SOURCES),
-                    "top_sources": [
-                        {
-                            "snr_rank": int(snr_rank),
-                            "proxy_rank": int(entry["proxy_rank"]),
-                            "global_index": int(entry["global_index"]),
-                            "proxy_value": float(entry["proxy_value"]),
-                            "snr": float(entry["snr"]),
-                            "f": float(entry["binary"].f),
-                            "Mc": float(entry["binary"].Mc),
-                            "h0": float(entry["binary"].h0),
-                            "D_comov": float(entry["binary"].D_comov),
-                            "z": float(entry["binary"].z),
-                            "ra": float(entry["binary"].ra),
-                            "dec": float(entry["binary"].dec),
-                            "psi": float(entry["binary"].psi),
-                            "iota": float(entry["binary"].iota),
-                            "phi0": float(entry["binary"].phi0),
-                        }
-                        for snr_rank, entry in enumerate(top_sources, start=1)
-                    ],
-                }
-
-        compact_results["cgw_analysis"] = {
-            "enabled": True,
-            "n_populations": int(len(all_population_cgw_snrs)),
-            "n_pre_filter": int(N_PRE_FILTER),
-            "n_top_sources": int(N_TOP_SOURCES),
-            "snr_lists_top_only": [[float(v) for v in snrs] for snrs in all_population_cgw_snrs],
-        }
-
-        # Re-save the same consistent-population file with CGW diagnostics included.
-        save_results_dual(compact_results, save_path, save_compact_npz=False)
-        from plot_cgw_snr import plot_cgw_analysis
-        plot_cgw_analysis(
-            top_binaries=top_binaries,
-            top_snrs=top_snrs,
-            psrs=psrs,
-            save_path=f"figures/cgw_analysis_{CONFIG_NAME}.pdf",
-            style="dark_background",
-            annotate_top=0,
-        )
-
+                plot_cgw_analysis(
+                    top_binaries=top_binaries,
+                    top_snrs=top_snrs,
+                    psrs=psrs_clean,   # still loaded earlier in main(), unchanged
+                    save_path=f"figures/cgw_analysis_{CONFIG_NAME}_sim{sim_idx:03d}.pdf",
+                    annotate_top=0,
+                )
 
 
 
@@ -487,9 +446,25 @@ def main():
         print("MAKING SENSITIVITY CURVES")
         print("="*70)
         from data_loader import BEST_PSRS, SCENARIOS
-        real_sc, real_dsc, curves = make_pta_sensitivity(
-            psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds, thin = 30,
-            scenarios = SCENARIOS, best_psrs = BEST_PSRS,
+
+        scenario_names = [
+            r"Unchanged (4.5 yr)", r"Unchanged (9.0 yr)",
+            r"$4 \times$ Cadence", r"$2 \times$ Precision",
+            r"$4 \times$ Cadence, $2 \times$ Precision",
+        ]
+        scenario_names = ['baseline', 'baseline_forecast', '4x_cadence', '2x_precision', '4x_cad_2x_prec']
+
+        curves = make_pta_sensitivity(
+            scenario_names   = scenario_names,
+            raw_noise_params = raw_noise_params,
+            scenarios        = SCENARIOS,
+            figsize          = (3.5, 3.5),
+        )
+        curves = make_pta_sensitivity(
+            scenario_names=scenario_names, raw_noise_params=raw_noise_params,
+            save_data_path='data/sensitivity_curves/run01',
+            make_plot=False,
+        )
             # synthetic_configs=[
             #     dict(label='5× cadence (best 5)', color='magenta',
             #         mode='best_cadence', cadence_factor=5),
@@ -500,358 +475,358 @@ def main():
             #         dict(label='5× cadence, 4× precision (best 5)', color='navy',
             #         mode='best_both', cadence_factor=5, toaerr_factor=0.25),
             # ]
-        )
+        
 
-    if config.OPTIMAL_SNR_POPULATION:
-        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
+    # if config.OPTIMAL_SNR_POPULATION:
+    #     population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
 
-            # print("\nFinding optimal SNR population using enterprise noise model...")
-            # selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
-            #         population, psrs_clean, parsed_noise_params, raw_noise_params, strain_data, Tspan_seconds,
-            #         target_SNR=args.target_snr, noise_method='enterprise')
+    #         # print("\nFinding optimal SNR population using enterprise noise model...")
+    #         # selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
+    #         #         population, psrs_clean, parsed_noise_params, raw_noise_params, strain_data, Tspan_seconds,
+    #         #         target_SNR=args.target_snr, noise_method='enterprise')
             
-            # # print("\nFinding optimal SNR population using analytic noise model...")
-            # # selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
-            # #         population, psrs_clean, parsed_noise_params, raw_noise_params, strain_data, Tspan_seconds,
-            # #         target_SNR=args.target_snr, noise_method='analytic')
-            # results = {
-            #     'population': (selected_population[:N_needed], N_needed, final_SNR, SNR_sq_binaries),
-            #         }
-            # # Save results
-            # save_path = os.path.join(save_dir, 'optimal_SNR_population.json')
-            # save_results(results, save_path)
+    #         # # print("\nFinding optimal SNR population using analytic noise model...")
+    #         # # selected_population, N_needed, final_SNR, SNR_sq_binaries = find_N_needed(
+    #         # #         population, psrs_clean, parsed_noise_params, raw_noise_params, strain_data, Tspan_seconds,
+    #         # #         target_SNR=args.target_snr, noise_method='analytic')
+    #         # results = {
+    #         #     'population': (selected_population[:N_needed], N_needed, final_SNR, SNR_sq_binaries),
+    #         #         }
+    #         # # Save results
+    #         # save_path = os.path.join(save_dir, 'optimal_SNR_population.json')
+    #         # save_results(results, save_path)
 
         
-        # plot_snr_population(
-        #     binaries=selected_population,
-        #     SNR_sq_binaries=SNR_sq_binaries[:N_needed],
-        #     psrs=psrs_clean,
-        #     top_N=50,
-        #     selected_binaries=selected_population,   # marks N_needed on the cumulative plot
-        #     savepath='figures/snr_population_analysis.png'
-        # )
-        # convergence_results = convergence_test(
-        #     binaries=population, pulsars=psrs_clean, pulsar_noise_params=pulsar_noise_params, strain_data=strain_data, T_obs=Tspan_seconds
-        # )
+    #     # plot_snr_population(
+    #     #     binaries=selected_population,
+    #     #     SNR_sq_binaries=SNR_sq_binaries[:N_needed],
+    #     #     psrs=psrs_clean,
+    #     #     top_N=50,
+    #     #     selected_binaries=selected_population,   # marks N_needed on the cumulative plot
+    #     #     savepath='figures/snr_population_analysis.png'
+    #     # )
+    #     # convergence_results = convergence_test(
+    #     #     binaries=population, pulsars=psrs_clean, pulsar_noise_params=pulsar_noise_params, strain_data=strain_data, T_obs=Tspan_seconds
+    #     # )
     
-        # plot_overlap_reduction_function(
-        #     pulsars=psrs_clean, binaries=population, pulsar_noise_params=pulsar_noise_params
-        # )
-        # pta, model, params_complete = build_pta_and_params(
-        #     psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan_seconds
-        # )
-        # get_noise_matrix(psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan_seconds)
-        # save_results({
-        #     'N_needed': N_needed,
-        #     'final_SNR': final_SNR,
-        #     'selected_population': selected_population
-        # }, os.path.join(save_dir, 'optimal_snr_population.json'))
+    #     # plot_overlap_reduction_function(
+    #     #     pulsars=psrs_clean, binaries=population, pulsar_noise_params=pulsar_noise_params
+    #     # )
+    #     # pta, model, params_complete = build_pta_and_params(
+    #     #     psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan_seconds
+    #     # )
+    #     # get_noise_matrix(psrs=psrs_clean, noise_params=noise_params, Tspan=Tspan_seconds)
+    #     # save_results({
+    #     #     'N_needed': N_needed,
+    #     #     'final_SNR': final_SNR,
+    #     #     'selected_population': selected_population
+    #     # }, os.path.join(save_dir, 'optimal_snr_population.json'))
 
-        # from debug_snr import analyze_snr_calculation_complete, diagnose_high_snr
-        # results = analyze_snr_calculation_complete(
-        #     population, 
-        #     strain_data, 
-        #     psrs_clean, 
-        #     pulsar_noise_params, 
-        #     Tspan_seconds,
-        #     output_file='complete_breakdown.json'
-        # )
+    #     # from debug_snr import analyze_snr_calculation_complete, diagnose_high_snr
+    #     # results = analyze_snr_calculation_complete(
+    #     #     population, 
+    #     #     strain_data, 
+    #     #     psrs_clean, 
+    #     #     pulsar_noise_params, 
+    #     #     Tspan_seconds,
+    #     #     output_file='complete_breakdown.json'
+    #     # )
         
-        # Then diagnose:
-        # diagnose_high_snr('complete_breakdown.json')
-    if config.SNR_COMPARISON_CHOSEN_POP:
+    #     # Then diagnose:
+    #     # diagnose_high_snr('complete_breakdown.json')
+    # if config.SNR_COMPARISON_CHOSEN_POP:
 
-        sample_pop, strain_data = chosen_population(
-            n_binaries = 1,
-            chirp_mass_msun=1e10,
-            mass_ratio=0.5,
-            gw_frequency=5e-9,
-            redshift=0.5,
-            polarization=0.0,
-            inclination=0.0,
-            initial_phase=0.0,
-            right_ascension=np.pi/4,
-            declination=np.pi/4,
-            compute_strain=True,
-            T_obs_seconds=Tspan_seconds,
-            )
-        print(sample_pop)
-        snr_sq, psd_interpolators = SNR_sq_all_pairs_all_binaries_vectorised(
-            binaries=sample_pop,
-            pulsars=psrs_clean,
-            parsed_noise_params=parsed_noise_params,
-            raw_noise_params=raw_noise_params,
-            strain_data=strain_data,
-            Tspan=Tspan_seconds
-            )
-        snr, ostat = compute_population_snr(
-            population=sample_pop, 
-            psrs_clean=psrs_clean, 
-            raw_noise_params=raw_noise_params, 
-            parsed_noise_params=parsed_noise_params,
-            Tspan=Tspan_seconds
-            )
-        snr_optimal = np.sqrt(np.sum(snr_sq))
-        print(f"Chosen population SNR, from enterprise: {snr:.8f}")
-        print(f"Chosen population SNR, from optimal: {snr_optimal:.8f}")
-        # from optimal_SNR_calc import compare_to_enterprise_os
+    #     sample_pop, strain_data = chosen_population(
+    #         n_binaries = 1,
+    #         chirp_mass_msun=1e10,
+    #         mass_ratio=0.5,
+    #         gw_frequency=5e-9,
+    #         redshift=0.5,
+    #         polarization=0.0,
+    #         inclination=0.0,
+    #         initial_phase=0.0,
+    #         right_ascension=np.pi/4,
+    #         declination=np.pi/4,
+    #         compute_strain=True,
+    #         T_obs_seconds=Tspan_seconds,
+    #         )
+    #     print(sample_pop)
+    #     snr_sq, psd_interpolators = SNR_sq_all_pairs_all_binaries_vectorised(
+    #         binaries=sample_pop,
+    #         pulsars=psrs_clean,
+    #         parsed_noise_params=parsed_noise_params,
+    #         raw_noise_params=raw_noise_params,
+    #         strain_data=strain_data,
+    #         Tspan=Tspan_seconds
+    #         )
+    #     snr, ostat = compute_population_snr(
+    #         population=sample_pop, 
+    #         psrs_clean=psrs_clean, 
+    #         raw_noise_params=raw_noise_params, 
+    #         parsed_noise_params=parsed_noise_params,
+    #         Tspan=Tspan_seconds
+    #         )
+    #     snr_optimal = np.sqrt(np.sum(snr_sq))
+    #     print(f"Chosen population SNR, from enterprise: {snr:.8f}")
+    #     print(f"Chosen population SNR, from optimal: {snr_optimal:.8f}")
+    #     # from optimal_SNR_calc import compare_to_enterprise_os
 
-        # results = compare_to_enterprise_os(
-        #         os_obj            = ostat,
-        #         raw_noise_params  = raw_noise_params,
-        #         pulsars           = psrs_clean,
-        #         Tspan             = Tspan_seconds,
-        #         psd_interpolators = psd_interpolators,   # from inside your SNR function — return these
-        #         snr_sq_arr        = snr_sq,
-        #         binaries          = sample_pop,
-        #         nmodes            = 301,
-        #     )
-    if config.PSD_COMPARISON:
-        population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
+    #     # results = compare_to_enterprise_os(
+    #     #         os_obj            = ostat,
+    #     #         raw_noise_params  = raw_noise_params,
+    #     #         pulsars           = psrs_clean,
+    #     #         Tspan             = Tspan_seconds,
+    #     #         psd_interpolators = psd_interpolators,   # from inside your SNR function — return these
+    #     #         snr_sq_arr        = snr_sq,
+    #     #         binaries          = sample_pop,
+    #     #         nmodes            = 301,
+    #     #     )
+    # if config.PSD_COMPARISON:
+    #     population, strain_data = config.generate_population(selected_config, smbhb_module, compute_strain=True, T_obs_seconds=Tspan_seconds)
 
 
-        from optimal_SNR_calc import get_pulsar_noise_psd
-        pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_clean, noise_params=raw_noise_params, Tspan=Tspan_seconds
-        )
-        psd_list = []
-        for i in range(len(psrs_clean)):
-            psr_name = psrs_clean[i].name
-            freqs, psd = get_pulsar_noise_psd(pta, params=params_complete, pulsar_idx=i, T_span=Tspan_seconds)
-            psd_list.append(psd)
-            # # plt.loglog(freqs, psd)
-            # # plt.show()
-        # print(freqs)
+    #     from optimal_SNR_calc import get_pulsar_noise_psd
+    #     pta, model, params_complete = build_pta_and_params(
+    #         psrs=psrs_clean, noise_params=raw_noise_params, Tspan=Tspan_seconds
+    #     )
+    #     psd_list = []
+    #     for i in range(len(psrs_clean)):
+    #         psr_name = psrs_clean[i].name
+    #         freqs, psd = get_pulsar_noise_psd(pta, params=params_complete, pulsar_idx=i, T_span=Tspan_seconds)
+    #         psd_list.append(psd)
+    #         # # plt.loglog(freqs, psd)
+    #         # # plt.show()
+    #     # print(freqs)
 
-        from optimal_SNR_calc import sigma_ab, sigma_ab_all_pairs
-        pulsar_a = psrs_clean[10]
-        pulsar_b = psrs_clean[31]
-        psrs_test = np.array([pulsar_a, pulsar_b])
-        # test all the pulsar pairs
+    #     from optimal_SNR_calc import sigma_ab, sigma_ab_all_pairs
+    #     pulsar_a = psrs_clean[10]
+    #     pulsar_b = psrs_clean[31]
+    #     psrs_test = np.array([pulsar_a, pulsar_b])
+    #     # test all the pulsar pairs
 
-        # sigma_ab_arr = []
-        # for i in range(len(psrs_clean)):
-        #     pulsar_a = psrs_clean[i]
-        #     for j in range(i+1, len(psrs_clean)):
-        #         pulsar_b = psrs_clean[j]
-        #         sigma_psrs_ab = sigma_ab(pulsar_a, pulsar_b, parsed_noise_params, raw_noise_params, Tspan_seconds, nmodes=301)
-        #         sigma_ab_arr.append(sigma_psrs_ab)
+    #     # sigma_ab_arr = []
+    #     # for i in range(len(psrs_clean)):
+    #     #     pulsar_a = psrs_clean[i]
+    #     #     for j in range(i+1, len(psrs_clean)):
+    #     #         pulsar_b = psrs_clean[j]
+    #     #         sigma_psrs_ab = sigma_ab(pulsar_a, pulsar_b, parsed_noise_params, raw_noise_params, Tspan_seconds, nmodes=301)
+    #     #         sigma_ab_arr.append(sigma_psrs_ab)
 
-        sigma_ab_arr, _, noise = sigma_ab_all_pairs(psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds, nmodes=150, psd=psd_list)
-        # sigma_psrs_ab = sigma_ab(pulsar_a, pulsar_b, parsed_noise_params, raw_noise_params, Tspan_seconds, nmodes=301)
-        from consistent_pop_synth import compute_population_snr
-        snr, sig = compute_population_snr(population, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
-        print(noise)
+    #     sigma_ab_arr, _, noise = sigma_ab_all_pairs(psrs_clean, parsed_noise_params, raw_noise_params, Tspan_seconds, nmodes=150, psd=psd_list)
+    #     # sigma_psrs_ab = sigma_ab(pulsar_a, pulsar_b, parsed_noise_params, raw_noise_params, Tspan_seconds, nmodes=301)
+    #     from consistent_pop_synth import compute_population_snr
+    #     snr, sig = compute_population_snr(population, psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
+    #     print(noise)
         
-        print(sigma_ab_arr.shape, sigma_ab_arr)
+    #     print(sigma_ab_arr.shape, sigma_ab_arr)
 
-        print(sig.shape, sig)
+    #     print(sig.shape, sig)
 
-        print("sigma ratio mine/enterprise:", sigma_ab_arr/sig)
-        print("median ratio:", np.median(sigma_ab_arr/sig), "mean ratio:", np.mean(sigma_ab_arr/sig))
-        #     # selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
-        #     #         population, psrs_clean, pulsar_noise_params, strain_data,
-        #     #         target_SNR=args.target_snr, T_obs=Tspan_seconds )
+    #     print("sigma ratio mine/enterprise:", sigma_ab_arr/sig)
+    #     print("median ratio:", np.median(sigma_ab_arr/sig), "mean ratio:", np.mean(sigma_ab_arr/sig))
+    #     #     # selected_population, N_needed, final_SNR, SNR_sq_binaries = N_needed_for_population(
+    #     #     #         population, psrs_clean, pulsar_noise_params, strain_data,
+    #     #     #         target_SNR=args.target_snr, T_obs=Tspan_seconds )
 
-        #     # results = compare_pulsar_psd_methods(psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
-        #     # for psr in psrs_clean:
-        #     #     fig = plot_psd_comparison(results, pulsar_name=psr.name)                 
-        #     #     plt.show()
+    #     #     # results = compare_pulsar_psd_methods(psrs_clean, raw_noise_params, parsed_noise_params, Tspan_seconds)
+    #     #     # for psr in psrs_clean:
+    #     #     #     fig = plot_psd_comparison(results, pulsar_name=psr.name)                 
+    #     #     #     plt.show()
 
-        #     # fig = plot_psd_comparison(results, pulsar_name="B1937+21")                        # first pulsar
-        #     # plt.show()
-        #     # fig = plot_psd_comparison(results, pulsar_name="B1953+29")                        # first pulsar
-        #     # plt.show()
-        #     # fig = plot_psd_comparison(results)                        # first pulsar
-        #     # plt.show()
-        #     # results = test_psd_vs_residuals_consistency(
-        #     #     psrs                = psrs_clean,
-        #     #     parsed_noise_params = parsed_noise_params,
-        #     #     raw_noise_params    = raw_noise_params,
-        #     #     Tspan               = Tspan_seconds,
-        #     #     nmodes              = 30,
-        #     #     n_realisations      = 500,
-        #     #     test_pulsar_idx     = 57,
-        #     # )
-        #     # Your SNR: signal / sigma
-        #     # signal for pair (i,j) = Gamma_ij * sum_k P_gw(fk)  (at A=1)
-        #     # then combine pairs optimally
-
-
-
-        from enterprise_extensions.frequentist.optimal_statistic import OptimalStatistic
-        pta_clean, _, params_clean = build_pta_and_params(psrs_clean, raw_noise_params, Tspan_seconds, gw_log10_A=0.0)
-        ostat_clean = opt_stat.OptimalStatistic(psrs_clean, pta=pta_clean, orf='hd')
-        xi_c, rho_c, sig_c, OS_c, OS_sig_c = ostat_clean.compute_os(params=params_clean)
-
-        def hd_from_xi(xi):
-            x = 0.5 * (1 - np.cos(xi))
-            return 1.5 * x * np.log(x) - 0.25 * x + 0.5
-
-        Gamma_enterprise = hd_from_xi(xi_c)
-
-        # Recompute your Gamma for the same pairs using pulsar positions
-        N = len(psrs_clean)
-        ii, jj = np.tril_indices(N, k=-1)
-        i_idx, j_idx = jj, ii
-
-        Gamma_mine = np.array([
-            hd_from_xi(np.arccos(np.clip(np.dot(psrs_clean[i].pos, psrs_clean[j].pos), -1, 1)))
-            for i, j in zip(i_idx, j_idx)
-        ])
-
-        print("Gamma enterprise[:5]: ", Gamma_enterprise[:5])
-        print("Gamma mine[:5]:       ", Gamma_mine[:5])
-        print("ratio[:5]:            ", Gamma_enterprise[:5] / Gamma_mine[:5])
-
-        # Check if the ratio sig/sigma is cleaner when you remove Gamma dependence
-        # i.e. compute sigma without Gamma to isolate the integral part
-        df = 1.0 / Tspan_seconds
-        freqs = np.arange(1, 151) * df
-        fyr = 1.0 / (86400.0 * 365.25)
-        gamma = 13.0/3.0
-        P_gw = (1.0/(12*np.pi**2)) * freqs**(-gamma) * fyr**(gamma-3)
-        P_noise = np.array(psd_list)
-
-        integral_all = np.sum(P_gw[None,:]**2 / (P_noise[i_idx] * P_noise[j_idx]), axis=-1) * df
-        sigma_no_gamma = (2.0 * Tspan_seconds * integral_all) ** (-0.5)
-
-        print("P_gw[:3]:         ", P_gw[:3])
-        print("P_noise[0,:3]:    ", P_noise[0,:3])
-        print("ratio P_gw/P_n:   ", (P_gw/P_noise[0])[:3])
-        print("integrand[:3]:    ", (P_gw**2/P_noise[0]**2)[:3])
+    #     #     # fig = plot_psd_comparison(results, pulsar_name="B1937+21")                        # first pulsar
+    #     #     # plt.show()
+    #     #     # fig = plot_psd_comparison(results, pulsar_name="B1953+29")                        # first pulsar
+    #     #     # plt.show()
+    #     #     # fig = plot_psd_comparison(results)                        # first pulsar
+    #     #     # plt.show()
+    #     #     # results = test_psd_vs_residuals_consistency(
+    #     #     #     psrs                = psrs_clean,
+    #     #     #     parsed_noise_params = parsed_noise_params,
+    #     #     #     raw_noise_params    = raw_noise_params,
+    #     #     #     Tspan               = Tspan_seconds,
+    #     #     #     nmodes              = 30,
+    #     #     #     n_realisations      = 500,
+    #     #     #     test_pulsar_idx     = 57,
+    #     #     # )
+    #     #     # Your SNR: signal / sigma
+    #     #     # signal for pair (i,j) = Gamma_ij * sum_k P_gw(fk)  (at A=1)
+    #     #     # then combine pairs optimally
 
 
-        # Get the GWB signal matrix that enterprise actually uses
-        # This is S_ab(f) = Gamma_ab * P_gw(f) used inside compute_os
-        phi_full = pta_clean.get_phi(params_clean)
 
-        # The GWB contribution to phi for pulsar 0 is the diagonal
-        # phi_a includes both red noise AND GWB — red noise alone is from the per-pulsar model
-        # Difference = GWB contribution
-        phi_0 = np.array(phi_full[0], dtype=float)
-        real_mask = phi_0 < 1e30
-        phi_0_real = phi_0[real_mask]
+    #     from enterprise_extensions.frequentist.optimal_statistic import OptimalStatistic
+    #     pta_clean, _, params_clean = build_pta_and_params(psrs_clean, raw_noise_params, Tspan_seconds, gw_log10_A=0.0)
+    #     ostat_clean = opt_stat.OptimalStatistic(psrs_clean, pta=pta_clean, orf='hd')
+    #     xi_c, rho_c, sig_c, OS_c, OS_sig_c = ostat_clean.compute_os(params=params_clean)
 
-        # For Gamma_aa = 0.5 (self-overlap), GWB adds 0.5*P_gwb*df to each diagonal
-        # So P_gwb = phi_gwb_contribution / (0.5 * df)
-        # But we need to separate GWB from red noise — build a noise-only PTA to get phi_rn
-        print("phi_0_real[:6]:  ", phi_0_real[:6])
-        print("P_gw[:3]:        ", P_gw[:3])
-        print("P_gw*df[:3]:     ", (P_gw*df)[:3])
-        print("phi_0_real[::2] / (P_gw*df)[:3] =", phi_0_real[::2][:3] / (P_gw*df)[:3])
+    #     def hd_from_xi(xi):
+    #         x = 0.5 * (1 - np.cos(xi))
+    #         return 1.5 * x * np.log(x) - 0.25 * x + 0.5
+
+    #     Gamma_enterprise = hd_from_xi(xi_c)
+
+    #     # Recompute your Gamma for the same pairs using pulsar positions
+    #     N = len(psrs_clean)
+    #     ii, jj = np.tril_indices(N, k=-1)
+    #     i_idx, j_idx = jj, ii
+
+    #     Gamma_mine = np.array([
+    #         hd_from_xi(np.arccos(np.clip(np.dot(psrs_clean[i].pos, psrs_clean[j].pos), -1, 1)))
+    #         for i, j in zip(i_idx, j_idx)
+    #     ])
+
+    #     print("Gamma enterprise[:5]: ", Gamma_enterprise[:5])
+    #     print("Gamma mine[:5]:       ", Gamma_mine[:5])
+    #     print("ratio[:5]:            ", Gamma_enterprise[:5] / Gamma_mine[:5])
+
+    #     # Check if the ratio sig/sigma is cleaner when you remove Gamma dependence
+    #     # i.e. compute sigma without Gamma to isolate the integral part
+    #     df = 1.0 / Tspan_seconds
+    #     freqs = np.arange(1, 151) * df
+    #     fyr = 1.0 / (86400.0 * 365.25)
+    #     gamma = 13.0/3.0
+    #     P_gw = (1.0/(12*np.pi**2)) * freqs**(-gamma) * fyr**(gamma-3)
+    #     P_noise = np.array(psd_list)
+
+    #     integral_all = np.sum(P_gw[None,:]**2 / (P_noise[i_idx] * P_noise[j_idx]), axis=-1) * df
+    #     sigma_no_gamma = (2.0 * Tspan_seconds * integral_all) ** (-0.5)
+
+    #     print("P_gw[:3]:         ", P_gw[:3])
+    #     print("P_noise[0,:3]:    ", P_noise[0,:3])
+    #     print("ratio P_gw/P_n:   ", (P_gw/P_noise[0])[:3])
+    #     print("integrand[:3]:    ", (P_gw**2/P_noise[0]**2)[:3])
 
 
-    # ========== INITIAL INJECTION (OPTIONAL) ==========
-    if config.RUN_INITIAL_INJECTION_ANALYSIS:
-        print("\n" + "="*70)
-        print("INITIAL INJECTION ANALYSIS")
-        print("="*70)
+    #     # Get the GWB signal matrix that enterprise actually uses
+    #     # This is S_ab(f) = Gamma_ab * P_gw(f) used inside compute_os
+    #     phi_full = pta_clean.get_phi(params_clean)
+
+    #     # The GWB contribution to phi for pulsar 0 is the diagonal
+    #     # phi_a includes both red noise AND GWB — red noise alone is from the per-pulsar model
+    #     # Difference = GWB contribution
+    #     phi_0 = np.array(phi_full[0], dtype=float)
+    #     real_mask = phi_0 < 1e30
+    #     phi_0_real = phi_0[real_mask]
+
+    #     # For Gamma_aa = 0.5 (self-overlap), GWB adds 0.5*P_gwb*df to each diagonal
+    #     # So P_gwb = phi_gwb_contribution / (0.5 * df)
+    #     # But we need to separate GWB from red noise — build a noise-only PTA to get phi_rn
+    #     print("phi_0_real[:6]:  ", phi_0_real[:6])
+    #     print("P_gw[:3]:        ", P_gw[:3])
+    #     print("P_gw*df[:3]:     ", (P_gw*df)[:3])
+    #     print("phi_0_real[::2] / (P_gw*df)[:3] =", phi_0_real[::2][:3] / (P_gw*df)[:3])
+
+
+    # # ========== INITIAL INJECTION (OPTIONAL) ==========
+    # if config.RUN_INITIAL_INJECTION_ANALYSIS:
+    #     print("\n" + "="*70)
+    #     print("INITIAL INJECTION ANALYSIS")
+    #     print("="*70)
         
-        psrs_injected = inject_population_nufft(
-            psrs_clean, population, pure_signal=True, verbose=True
-        )
+    #     psrs_injected = inject_population_nufft(
+    #         psrs_clean, population, pure_signal=True, verbose=True
+    #     )
         
-        pta, model, params_complete = build_pta_and_params(
-            psrs=psrs_injected, noise_params=raw_noise_params, Tspan=Tspan_seconds
-        )
+    #     pta, model, params_complete = build_pta_and_params(
+    #         psrs=psrs_injected, noise_params=raw_noise_params, Tspan=Tspan_seconds
+    #     )
         
-        print(f"✓ PTA built with {len(pta.params)} parameters")
-        ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
-        xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_complete)
+    #     print(f"✓ PTA built with {len(pta.params)} parameters")
+    #     ostat = opt_stat.OptimalStatistic(psrs_injected, pta=pta, orf='hd')
+    #     xi, rho, sig, OS, OS_sig = ostat.compute_os(params=params_complete)
 
-        snr = OS / OS_sig
-        print(f"\n✓ Initial Injection SNR: {snr:.3f}")
+    #     snr = OS / OS_sig
+    #     print(f"\n✓ Initial Injection SNR: {snr:.3f}")
         
-        # Save with organized naming
-        plot_initial_injection_analysis(
-            psrs_injected, population, snr, xi, rho,
-            save_dir=save_dir, run_name=run_name
-        )
+    #     # Save with organized naming
+    #     plot_initial_injection_analysis(
+    #         psrs_injected, population, snr, xi, rho,
+    #         save_dir=save_dir, run_name=run_name
+    #     )
     
-    # ========== SCALING ANALYSIS ==========
-    if config.RUN_SCALING_ANALYSIS:
-        print("\n" + "="*70)
-        print("SCALING ANALYSIS")
-        print("="*70)
+    # # ========== SCALING ANALYSIS ==========
+    # if config.RUN_SCALING_ANALYSIS:
+    #     print("\n" + "="*70)
+    #     print("SCALING ANALYSIS")
+    #     print("="*70)
         
-        results, N_needed = run_scaling_analysis(
-            population, psrs_clean, raw_noise_params, Tspan_seconds, 
-            target_SNR=4.0, n_test_points=5
-        )
+    #     results, N_needed = run_scaling_analysis(
+    #         population, psrs_clean, raw_noise_params, Tspan_seconds, 
+    #         target_SNR=4.0, n_test_points=5
+    #     )
         
-        print_scaling_summary(results, N_needed, target_SNR=4.0)
+    #     print_scaling_summary(results, N_needed, target_SNR=4.0)
         
-        # Save results
-        save_path = os.path.join(save_dir, f'scaling_results.json')
-        save_results_dual({'scaling': results, 'N_needed': N_needed}, save_path)
+    #     # Save results
+    #     save_path = os.path.join(save_dir, f'scaling_results.json')
+    #     save_results_dual({'scaling': results, 'N_needed': N_needed}, save_path)
         
-        # Save plots
-        plot_scaling_results(
-            results, N_needed, 4.0, 
-            save_dir=save_dir, run_name=run_name
-        )
+    #     # Save plots
+    #     plot_scaling_results(
+    #         results, N_needed, 4.0, 
+    #         save_dir=save_dir, run_name=run_name
+    #     )
     
-    # ========== INDIVIDUAL BINARY ANALYSIS ==========
-    if config.RUN_INDIVIDUAL_BINARY_ANALYSIS:
-        print("\n" + "="*70)
-        print("INDIVIDUAL BINARY ANALYSIS")
-        print("="*70)
+    # # ========== INDIVIDUAL BINARY ANALYSIS ==========
+    # if config.RUN_INDIVIDUAL_BINARY_ANALYSIS:
+    #     print("\n" + "="*70)
+    #     print("INDIVIDUAL BINARY ANALYSIS")
+    #     print("="*70)
         
-        df = analyze_individual_binaries(
-            population, psrs_clean, raw_noise_params, Tspan_seconds, max_binaries=50
-        )
-        print(df.head())
+    #     df = analyze_individual_binaries(
+    #         population, psrs_clean, raw_noise_params, Tspan_seconds, max_binaries=50
+    #     )
+    #     print(df.head())
         
-        if df is not None:
-            print_binary_statistics(df, top_n=10)
-            print(f"\n✓ Analyzed {len(df)} binaries")
-            print(f"  Loudest SNR: {df.iloc[0]['SNR']:+.3f}")
+    #     if df is not None:
+    #         print_binary_statistics(df, top_n=10)
+    #         print(f"\n✓ Analyzed {len(df)} binaries")
+    #         print(f"  Loudest SNR: {df.iloc[0]['SNR']:+.3f}")
             
-            # Save results
-            csv_path = os.path.join(save_dir, 'individual_binary_results.csv')
-            df.to_csv(csv_path, index=False)
-            print(f"💾 Saved: {csv_path}")
+    #         # Save results
+    #         csv_path = os.path.join(save_dir, 'individual_binary_results.csv')
+    #         df.to_csv(csv_path, index=False)
+    #         print(f"💾 Saved: {csv_path}")
             
-            # Save plots
-            plot_individual_binaries(
-                df, psrs_injected=psrs_clean, top_N=20,
-                save_dir=save_dir, run_name=run_name
-            )
+    #         # Save plots
+    #         plot_individual_binaries(
+    #             df, psrs_injected=psrs_clean, top_N=20,
+    #             save_dir=save_dir, run_name=run_name
+    #         )
     
-    # ========== ENSEMBLE ANALYSIS ==========
-    # if config.RUN_ENSEMBLE_ANALYSIS:
-        # print("\n" + "="*70)
-        # print("ENSEMBLE ANALYSIS")
-        # print("="*70)
+    # # ========== ENSEMBLE ANALYSIS ==========
+    # # if config.RUN_ENSEMBLE_ANALYSIS:
+    #     # print("\n" + "="*70)
+    #     # print("ENSEMBLE ANALYSIS")
+    #     # print("="*70)
         
-        # # auto guess: default = 0.5 * n_binaries
-        # if args.initial_guess == "auto":
-        #     N_initial_guess = int(0.5 * selected_config['n_binaries'])
-        # else:
-        #     N_initial_guess = int(args.initial_guess)
+    #     # # auto guess: default = 0.5 * n_binaries
+    #     # if args.initial_guess == "auto":
+    #     #     N_initial_guess = int(0.5 * selected_config['n_binaries'])
+    #     # else:
+    #     #     N_initial_guess = int(args.initial_guess)
 
-        # SNR_low, SNR_high = args.snr_range
+    #     # SNR_low, SNR_high = args.snr_range
 
-        # ensemble_results = find_N_ensemble(
-        #     selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan_seconds,
-        #     target_SNR=args.target_snr,
-        #     SNR_range=(SNR_low, SNR_high),
-        #     n_realisations=args.realisations,
-        #     N_initial_guess=N_initial_guess,
-        #     N_max_initial=selected_config['n_binaries'] * 3
-        # )
+    #     # ensemble_results = find_N_ensemble(
+    #     #     selected_config, smbhb_module, psrs_clean, raw_noise_params, Tspan_seconds,
+    #     #     target_SNR=args.target_snr,
+    #     #     SNR_range=(SNR_low, SNR_high),
+    #     #     n_realisations=args.realisations,
+    #     #     N_initial_guess=N_initial_guess,
+    #     #     N_max_initial=selected_config['n_binaries'] * 3
+    #     # )
         
-        # if 'statistics' in ensemble_results:
-        #     stats = ensemble_results['statistics']
-        #     print(f"\nn_binaries statistics:")
-        #     print(f"  Mean: {stats['mean']:.0f}")
-        #     print(f"  Median: {stats['median']:.0f}")
-        #     print(f"  Std: {stats['std']:.0f}")
+    #     # if 'statistics' in ensemble_results:
+    #     #     stats = ensemble_results['statistics']
+    #     #     print(f"\nn_binaries statistics:")
+    #     #     print(f"  Mean: {stats['mean']:.0f}")
+    #     #     print(f"  Median: {stats['median']:.0f}")
+    #     #     print(f"  Std: {stats['std']:.0f}")
 
-        # # Save results
-        # save_path = os.path.join(save_dir, 'ensemble_results.json')
-        # save_results(ensemble_results, save_path)
+    #     # # Save results
+    #     # save_path = os.path.join(save_dir, 'ensemble_results.json')
+    #     # save_results(ensemble_results, save_path)
 
 logger.close()
 
