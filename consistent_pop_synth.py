@@ -13,7 +13,7 @@ except Exception:
     simulate_psr = None
 from pta_builder import build_pta_and_params
 from data_loader import restore_original_residuals
-from memory_profile import log_memory
+from debug.memory_profile import log_memory
 import scipy.linalg as sl
 from enterprise_extensions.frequentist import optimal_statistic as opt_stat
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor

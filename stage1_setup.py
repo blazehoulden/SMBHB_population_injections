@@ -115,7 +115,7 @@ from data_loader import (
 from signal_injection import change_in_TOAs_days_population_nufft, _antenna_response_vec, _get_psr_radec
 from SMBHB_pop_synth import PopulationArrays
 from debug.test_CGW_sky_loc import sky_sensitivity_weight
-from memory_tracking import MemoryTracker
+from debug.memory_tracking import MemoryTracker
 
 
 # =============================================================================

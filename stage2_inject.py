@@ -100,7 +100,7 @@ except ImportError:
     _STAGE1_SETUP_IMPORTED = False
 
 try:
-    from memory_tracking import MemoryTracker
+    from debug.memory_tracking import MemoryTracker
 except ImportError:
     # Self-contained fallback, mirroring the ShardedPickleStore pattern
     # above, so stage2 still runs (with tracking silently disabled) even

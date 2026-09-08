@@ -31,7 +31,7 @@ except Exception:
 from pta_builder import build_pta_and_params
 # from scaling_analysis import run_scaling_analysis
 # from individual_binary import analyze_individual_binaries
-from memory_profile import log_memory
+from debug.memory_profile import log_memory
 from consistent_pop_synth import compute_population_snr
 # from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
 # from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
