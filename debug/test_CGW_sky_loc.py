@@ -20,7 +20,7 @@ def _concat_population_arrays(populations):
         raise ValueError("No populations provided for concatenation.")
 
     fields = (
-        "f", "Mc", "Mtot", "D_comov", "z", "h0",
+        "f", "Mc", "Mtot", "D_comov", "z", "h0", "ecc",
         "ra", "dec", "psi", "iota", "phi0", "cgw_snr",   # cgw_snr added
     )
     merged = {
@@ -40,6 +40,7 @@ def _population_arrays_to_binary_rows(population):
             D_comov=float(population.D_comov[i]),
             z=float(population.z[i]),
             h0=float(population.h0[i]),
+            ecc=float(population.ecc[i]),
             ra=float(population.ra[i]),
             dec=float(population.dec[i]),
             psi=float(population.psi[i]),

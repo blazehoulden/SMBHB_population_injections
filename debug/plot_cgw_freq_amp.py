@@ -64,11 +64,11 @@ from plot_cgw_snr import _snr_colormap
 # duplicating them -- adjust this import path/module name to wherever
 # _concat_population_arrays / _population_arrays_to_binary_rows /
 # _SKY_SURVEY actually live in your repo.
-from plot_cgw_full_sky_analysis import (
+from debug.test_CGW_sky_loc import (
     _concat_population_arrays,
     _population_arrays_to_binary_rows,
-    _SKY_SURVEY,
 )
+from debug.test_CGW_sky_loc import get_sky_survey_points  # or wherever you put the patch
 
 
 def _best_sky_location():
@@ -81,7 +81,8 @@ def _best_sky_location():
     interpolator, is the true best sky location (no optimisation loop
     needed).
     """
-    ra_best, dec_best, snr_best = max(_SKY_SURVEY, key=lambda entry: entry[2])
+    sky_survey_points = get_sky_survey_points()
+    ra_best, dec_best, snr_best = max(sky_survey_points, key=lambda entry: entry[2])
     return ra_best, dec_best
 
 # ---------------------------------------------------------------------------

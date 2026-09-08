@@ -64,6 +64,7 @@ class PopulationArrays:
     D_comov : np.ndarray    # comoving distance [Mpc]              shape (N,)
     z       : np.ndarray    # redshift                             shape (N,)
     h0      : np.ndarray    # strain amplitude                     shape (N,)
+    ecc     : np.ndarray    # eccentricity (0 for circular)        shape (N,)
     ra      : np.ndarray    # right ascension [rad]                shape (N,)
     dec     : np.ndarray    # declination [rad]                    shape (N,)
     psi     : np.ndarray    # polarisation angle [rad]             shape (N,)
@@ -86,6 +87,7 @@ class PopulationArrays:
             D_comov = self.D_comov[idx],
             z       = self.z[idx],
             h0      = self.h0[idx],
+            ecc     = self.ecc[idx],
             ra      = self.ra[idx],
             dec     = self.dec[idx],
             psi     = self.psi[idx],
@@ -118,8 +120,8 @@ class PopulationArrays:
         Convert back to list-of-dicts format for compatibility with
         code that still expects the old format.  Avoid for large N.
         """
-        keys = ['f','Mc','Mtot','D_comov','z','h0','ra','dec','psi','iota','phi0','cgw_snr']
-        arrays = [self.f, self.Mc, self.Mtot, self.D_comov, self.z, self.h0,
+        keys = ['f','Mc','Mtot','D_comov','z','h0','ra','dec','psi','iota','phi0','cgw_snr','ecc']
+        arrays = [self.f, self.Mc, self.Mtot, self.D_comov, self.z, self.h0, self.ecc,
                   self.ra, self.dec, self.psi, self.iota, self.phi0, self.cgw_snr]
         return [dict(zip(keys, vals)) for vals in zip(*arrays)]
 
@@ -534,6 +536,140 @@ def sample_mass_ratios_and_compute_chirp_mass(n_binaries, primary_masses,
 
 
 # ============================================================================
+# SAMPLING — ECCENTRICITY  (vectorised; independent of frequency — see caveat)
+# ============================================================================
+
+# Default Peters (1964) enhancement-factor threshold for treating a binary
+# as "circular enough" to use the standard single-harmonic h0 formula.
+# F(e) - 1 < ECC_ENHANCEMENT_TOL  =>  circular approximation accepted.
+# Default of 0.01 (1% enhancement) corresponds to e ~ 0.057.
+ECC_ENHANCEMENT_TOL_DEFAULT = 0.01
+
+def sample_eccentricities(n_binaries: int,
+                                  f_frac: float,
+                                  sigma_low: float = 0.1,
+                                  scale_high: float = 0.3,
+                                  e_max: float = 0.999,
+                                  n_grid: int = 20_000,
+                                  normalize_components_separately: bool = True,
+                                  rng: Optional[np.random.Generator] = None
+                                  ) -> np.ndarray:
+    """
+    Sample eccentricities from the mixture:
+
+        p(e) = (1 - f) * N(e; 0, sigma_low^2)          [truncated to e >= 0]
+             +      f  * 2 e exp(-e / scale_high)        [Gamma(2, scale_high)-shaped]
+
+    ASSUMPTIONS
+    -----------
+    - f_frac is a constant in [0.1, 0.5] (not itself a random draw).
+    - The Normal component is truncated to e >= 0 (eccentricity is
+      non-negative) and renormalized — NOT folded/doubled. Truncating
+      removes exactly the negative-e half of its mass; renormalization is
+      handled automatically by the grid-based approach below, not by
+      assuming a fixed factor of 2.
+    - The "2e*exp(-e/scale)" term is the unnormalized kernel of a
+      Gamma(shape=2, scale=scale_high) distribution. As written it does
+      NOT integrate to 1 (it integrates to 2*scale_high^2 over [0, inf)).
+    - If normalize_components_separately=True (default), each component is
+      turned into a proper density (integral 1) BEFORE mixing — this makes
+      f_frac an exact mixing weight, matching the most natural reading of
+      "p(e) = (1-f)*A + f*B" as a proper mixture of two densities.
+      If False, the formula is used exactly as written and the *combined*
+      result is normalized at the end instead — f_frac is then only
+      approximately the mixing weight.
+    - Truncated to e_max < 1 (default 0.999) to keep the domain physical
+      (e=1 is a parabolic/unbound orbit) and to avoid grid edge effects.
+    - No dependence on frequency (see earlier discussion of the
+      independence assumption between e and f).
+
+    Parameters
+    ----------
+    n_binaries : number of binaries
+    f_frac     : mixing weight of the high-e (Gamma-shaped) component,
+                 intended to lie in [0.1, 0.5]
+    sigma_low  : std dev of the low-e Gaussian component
+    scale_high : scale parameter of the high-e Gamma-shaped component
+    e_max      : upper truncation of eccentricity domain
+    n_grid     : number of grid points for the numerical CDF
+    normalize_components_separately : see ASSUMPTIONS above
+    rng        : numpy random Generator
+
+    Returns
+    -------
+    ecc : (n_binaries,) array of eccentricities in [0, e_max]
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if not (0.0 <= f_frac <= 1.0):
+        raise ValueError(f"f_frac should be in [0,1] (expected [0.1, 0.5]); got {f_frac}")
+
+    e_grid = np.linspace(0.0, e_max, n_grid)
+
+    # Low-e Gaussian component (evaluated on e >= 0 only)
+    p_low = np.exp(-0.5 * (e_grid / sigma_low)**2) / (sigma_low * np.sqrt(2 * np.pi))
+
+    # High-e Gamma-shaped component, exactly as written: 2 e exp(-e/scale)
+    p_high = 2.0 * e_grid * np.exp(-e_grid / scale_high)
+
+    if normalize_components_separately:
+        # Renormalize each piece over [0, e_max] so f_frac is an exact
+        # mixing weight between two proper densities.
+        norm_low  = np.trapz(p_low,  e_grid)
+        norm_high = np.trapz(p_high, e_grid)
+        p_low  = p_low  / norm_low
+        p_high = p_high / norm_high
+        p_mix  = (1.0 - f_frac) * p_low + f_frac * p_high
+        # p_mix now integrates to ~1 already, but renormalize once more
+        # to absorb residual truncation error at e_max.
+        p_mix /= np.trapz(p_mix, e_grid)
+    else:
+        # Use the formula exactly as written, normalize only the combined result.
+        p_mix = (1.0 - f_frac) * p_low + f_frac * p_high
+        p_mix /= np.trapz(p_mix, e_grid)
+
+    # Build CDF via cumulative trapezoidal integration
+    cdf = np.zeros(n_grid)
+    cdf[1:] = np.cumsum(0.5 * (p_mix[:-1] + p_mix[1:]) * np.diff(e_grid))
+    cdf /= cdf[-1]
+
+    # np.interp needs strictly increasing x — deduplicate any flat regions
+    cdf_unique, unique_idx = np.unique(cdf, return_index=True)
+    e_unique = e_grid[unique_idx]
+
+    u = rng.random(n_binaries)
+    return np.interp(u, cdf_unique, e_unique)
+
+
+def peters_enhancement_factor(e: np.ndarray) -> np.ndarray:
+    """
+    Peters (1964) eccentricity enhancement factor for GW-driven orbital decay:
+
+        F(e) = 1 + (73/24) e^2 + (37/96) e^4
+
+    F(e) = 1 for circular orbits; grows (and formally diverges as e -> 1)
+    for eccentric orbits. Used here as a proxy for "how eccentric is this
+    binary", not as an exact criterion for n=2 harmonic strain specifically
+    (that would require the Peters-Mathews g(2,e) factor).
+    """
+    e2 = e**2
+    return 1.0 + (73.0/24.0) * e2 + (37.0/96.0) * e2**2
+
+
+def is_circular_enough(e: np.ndarray,
+                       tol: float = ECC_ENHANCEMENT_TOL_DEFAULT
+                       ) -> np.ndarray:
+    """
+    Boolean mask: True where the binary is close enough to circular that the
+    standard single-harmonic (quadrupole) h0 formula is an acceptable
+    approximation, based on the Peters enhancement factor F(e).
+
+    tol=0.01 (default) means F(e) - 1 < 1%, i.e. e ≲ 0.057.
+    """
+    return (peters_enhancement_factor(e) - 1.0) < tol
+
+# ============================================================================
 # STRAIN AMPLITUDE  (vectorised)
 # ============================================================================
 
@@ -541,7 +677,9 @@ def compute_strain_amplitude(gw_frequencies: np.ndarray,
                              chirp_masses_msun: np.ndarray,
                              D_comov_mpc: np.ndarray,
                              redshifts: np.ndarray,
-                             inclinations: Optional[np.ndarray] = None
+                             inclinations: Optional[np.ndarray] = None,
+                             eccentricities: Optional[np.ndarray] = None,
+                             ecc_tol : float = ECC_ENHANCEMENT_TOL_DEFAULT
                              ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Vectorised characteristic strain.  Pure numpy — no Numba overhead.
@@ -555,6 +693,14 @@ def compute_strain_amplitude(gw_frequencies: np.ndarray,
     h0  = 2 (G Mc)^(5/3) (2π f_rest)^(2/3) / (c^4 D_comov)
     h²  = (32/5) * (h0/2)²    [orientation-averaged]
        or the inclination-weighted version if inclinations is supplied.
+
+    NOTE: h0/h_sq are computed identically regardless of eccentricity.
+    Eccentricity does not change the total radiated-power normalization at
+    leading (quadrupole) order — it only changes how that power splits
+    across harmonics of the orbital frequency (n=1,2,3,...), which is
+    handled downstream by signal_injection.py's per-harmonic Bessel
+    weighting (source_harmonic_coeffs), NOT by gating h0 here. See
+    signal_injection.py module docstring.
     """
     f_rest  = 0.5 * (1.0 + redshifts) * gw_frequencies   # rest-frame orbital f
     Mc_SI   = chirp_masses_msun * SOLAR_MASS_KG            # kg
@@ -643,10 +789,14 @@ def generate_smbhb_population(
         mass_max: float = 10**(12.5),
         mass_cutoff_0: float = 10**(9),
         mass_cutoff_z: float = 0.0,
-        compute_strain: bool = True,
+        compute_strain: bool = False,
         f_obs_max: float = 300e-9,
         f_obs_min: Optional[float] = None,
         random_seed: Optional[int] = None,
+        ecc_tol: float = ECC_ENHANCEMENT_TOL_DEFAULT,
+        f_frac: float = 0.3,
+        sigma_low: float = 0.1,
+        scale_high: float = 0.3,
 ) -> PopulationArrays | Tuple[PopulationArrays, dict]:
     """
     Generate a synthetic SMBHB population.
@@ -735,6 +885,8 @@ def generate_smbhb_population(
 
     Mtot, Mc = compute_chirp_mass(M1, rng=rng)
 
+    ecc = sample_eccentricities(n_binaries, f_frac=f_frac, sigma_low=sigma_low, scale_high=scale_high, rng=rng)
+
     # ── sky positions & orientations ──────────────────────────────────────────
     ra   = rng.uniform(0,       2*np.pi, n_binaries)
     dec  = np.arcsin(rng.uniform(-1, 1,  n_binaries))
@@ -743,12 +895,12 @@ def generate_smbhb_population(
     phi0 = rng.uniform(0,       2*np.pi, n_binaries)
 
     # ── strain amplitude (f is already observed-frame) ────────────────────────
-    h_sq, h0 = compute_strain_amplitude(f, Mc, D_comov, z, iota)
+    h_sq, h0 = compute_strain_amplitude(f, Mc, D_comov, z, iota, eccentricities=ecc, ecc_tol=ecc_tol)
 
     # ── assemble PopulationArrays ─────────────────────────────────────────────
     pop = PopulationArrays(
         f=f, Mc=Mc, Mtot=Mtot, D_comov=D_comov, z=z, h0=h0,
-        ra=ra, dec=dec, psi=psi, iota=iota, phi0=phi0,
+        ra=ra, dec=dec, psi=psi, iota=iota, phi0=phi0, ecc=ecc,
         cgw_snr=np.zeros(n_binaries, dtype=np.float16)
     )
 
@@ -783,12 +935,17 @@ def chosen_population(
         mass_ratio: float = 0.5,
         gw_frequency: float = 6e-9,
         redshift: float = 0.5,
+        eccentricity: float = 0.0,
+        ecc_tol: float = ECC_ENHANCEMENT_TOL_DEFAULT,
         polarization: float = 0.0,
         inclination: float = 0.0,
         initial_phase: float = 0.0,
         right_ascension: float = 0.0,
         declination: float = 0.0,
         compute_strain: bool = True,
+        f_frac: float = 0.3,
+        sigma_low: float = 0.1,
+        scale_high: float = 0.3,
 ) -> PopulationArrays | Tuple[PopulationArrays, dict]:
     """
     Population of identical SMBHBs with user-specified properties.
@@ -804,8 +961,9 @@ def chosen_population(
     z_arr   = np.full(n_binaries, redshift)
     D_arr   = np.full(n_binaries, np.interp(redshift, _Z_GRID, _CHI_GRID))
     iota_arr= np.full(n_binaries, inclination)
+    ecc_arr = np.full(n_binaries, eccentricity)
 
-    h_sq, h0 = compute_strain_amplitude(f_arr, Mc_arr, D_arr, z_arr, iota_arr)
+    h_sq, h0 = compute_strain_amplitude(f_arr, Mc_arr, D_arr, z_arr, iota_arr, eccentricities=ecc_arr, ecc_tol=ecc_tol)
 
     pop = PopulationArrays(
         f       = f_arr,
@@ -819,7 +977,8 @@ def chosen_population(
         psi     = np.full(n_binaries, polarization),
         iota    = iota_arr,
         phi0    = np.full(n_binaries, initial_phase),
-        cgw_snr = np.zeros(n_binaries, dtype=np.float16)
+        cgw_snr = np.zeros(n_binaries, dtype=np.float16),
+        ecc     = ecc_arr
     )
 
     if not compute_strain:

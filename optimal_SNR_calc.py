@@ -2,7 +2,7 @@ import numpy as np
 from SMBHB_pop_synth import H0_KMS_MPC, MEGAPARSEC_M
 import sys
 from config import generate_population
-from signal_injection import draw_red_noise_residuals, strain_amplitude, white_noise_residual
+from signal_injection import draw_red_noise_residuals, white_noise_residual
 from pta_builder import build_pta_and_params
 from enterprise.signals.gp_bases import createfourierdesignmatrix_red
 from enterprise.signals.utils import create_quantization_matrix

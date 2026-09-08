@@ -2,7 +2,7 @@ import numpy as np
 from enterprise_extensions.frequentist.Fe_statistic import innerProduct_rr
 from enterprise_extensions.deterministic import cw_delay
 from optimal_SNR_calc import measured_strain_all_binaries_all_pulsars
-from signal_injection import population_residuals, get_base_name
+from signal_injection import population_residuals, get_base_name, population_residuals_eccentric
 from scipy.linalg import cho_factor, cho_solve
 import time
 def compute_cgw_signal_enterprise(psr, binary):
@@ -78,6 +78,8 @@ def compute_cgw_snr_optimal_population_fast(
     return_breakdown=False,
     regularise_sigma=True,
     regularisation=1e-10,
+    power_tol=1e-4,
+    n_max_cap=100,
 ):
 
     import time
@@ -191,38 +193,47 @@ def compute_cgw_snr_optimal_population_fast(
     results   = np.empty(len(population), dtype=np.float64)
     breakdowns = [] if return_breakdown else None
 
-    for i, binary in enumerate(population):
+    N_binary = len(population)
+    results    = np.empty(N_binary, dtype=np.float64)
+    breakdowns = [] if return_breakdown else None
+
+    for i in range(N_binary):
+        binary = population[i]   # however your candidate list yields single binaries
+                                  # (e.g. a _MiniPop-like scalar-attribute object,
+                                  # NOT a PopulationArrays slice)
         rho_sq     = 0.0
         per_pulsar = {} if return_breakdown else None
+        n_failed   = 0
 
         for (psr_name, psr_obj, toas, psr_noise_params,
              Nvec, T, cf) in precomputed:
 
             try:
-                s_a = population_residuals(
-                    toas,           # always a numpy array now
-                    psr_obj,
-                    [binary],
-                    Tspan,
-                    psr_noise_params,
+                s_a = population_residuals_eccentric(
+                    toas, psr_obj, [binary], Tspan,
+                    pulsar_noise_params=psr_noise_params,
+                    power_tol=power_tol, n_max_cap=n_max_cap,
                 )
             except Exception as e:
-                print(f"  Warning: population_residuals failed for "
-                      f"{psr_name}: {e}")
+                n_failed += 1
+                print(f"  Warning: population_residuals failed for {psr_name}: {e}")
                 continue
 
             contrib = float(np.real(
                 fast_inner_product_rr_exact(s_a, s_a, Nvec, T, cf)
             ))
-
             rho_sq += contrib
             if return_breakdown:
                 base_name = get_base_name(psr_name)
-                per_pulsar[base_name] = (
-                    per_pulsar.get(base_name, 0.0) + max(contrib, 0.0)
-                )
+                per_pulsar[base_name] = per_pulsar.get(base_name, 0.0) + max(contrib, 0.0)
 
-        # Guard against negative rho_sq from numerical errors
+        if n_failed == len(precomputed):
+            raise RuntimeError(
+                f"population_residuals_eccentric failed for ALL {n_failed} "
+                f"pulsars on binary {i} — likely structural, not per-pulsar. "
+                f"See warnings above."
+            )
+
         results[i] = np.sqrt(max(rho_sq, 0.0))
         if return_breakdown:
             breakdowns.append(per_pulsar)
@@ -232,88 +243,6 @@ def compute_cgw_snr_optimal_population_fast(
 
     return (results, breakdowns) if return_breakdown else results
  
-
-def compute_cgw_snr_optimal_population_with_gwb(
-    psrs,
-    pta,
-    population,
-    raw_noise_params,
-    parsed_noise_params,
-    Tspan,
-    profile=False,
-    cadence_days: float = 14.0,
-):
-    """
-    Compute per-source optimal CGW SNRs including the SGWB (discrete-population)
-    contribution to the per-pulsar covariance. This method:
-
-    1. Builds a time-array using `cadence_days` and `Tspan`.
-    2. Computes the population GWB timing-residual PSD via
-       `compute_population_gwb_psd_from_psrs`.
-    3. Builds per-pulsar covariance matrices and Cholesky factors using
-       `get_per_pulsar_covariance_from_population`.
-    4. For each binary, computes s_a (timing residual at each pulsar) and
-       evaluates s_a^T C_a^{-1} s_a via Cholesky solves.
-
-    Returns
-    -------
-    results : list[float]
-        optimal SNR for each binary in the provided population (same order).
-    """
-    if profile:
-        import time
-        start_time = time.time()
-
-    # Build time array (seconds) using a default cadence similar to the main
-    cadence = float(cadence_days) * 24.0 * 3600.0
-    time_arr = np.arange(0.0, Tspan, cadence)
-
-    # Compute GWB PSD from the discrete population on this time grid
-    freqs_gwb, S_GWB = compute_population_gwb_psd_from_psrs(population, psrs, time_arr)
-
-    if profile:
-        print(f"Computed population GWB PSD on grid (F={len(freqs_gwb)})")
-
-    # Build per-pulsar covariance matrices and Cholesky factors that include
-    # the SGWB auto-covariance (C_a = N_a + S_RN,a + C_GWB,a)
-    cov_matrices, chol_factors = get_per_pulsar_covariance_from_population(
-        psrs=psrs,
-        pta=pta,
-        noise_params=raw_noise_params,
-        S_GWB=S_GWB,
-        freqs_gwb=freqs_gwb,
-    )
-
-    if profile:
-        print("Built per-pulsar covariances and Cholesky factors including SGWB")
-
-    # Local import to avoid adding top-level dependency if unused elsewhere
-    from scipy.linalg import cho_solve
-
-    results = []
-    for binary in population:
-        rho_sq = 0.0
-        for psr in psrs:
-            # Get the injected signal (timing residual) for this pulsar and binary
-            psr_noise_params = parsed_noise_params.get(psr.name, {})
-            s_a = population_residuals(psr.toas, psr, [binary], Tspan, psr_noise_params)
-
-            # cho_solve expects the cho_factor output from scipy.linalg. Use
-            # the precomputed Cholesky factor for this pulsar.
-            chol = chol_factors.get(psr.name)
-            if chol is None:
-                # Fallback: skip this pulsar (should not normally happen)
-                continue
-            contrib = float(np.real(s_a @ cho_solve(chol, s_a)))
-            rho_sq += max(contrib, 0.0)
-
-        results.append(np.sqrt(rho_sq))
-
-    if profile:
-        elapsed = time.time() - start_time
-        print(f"Total SNR computation (with SGWB) for population took {elapsed:.2f} seconds.")
-
-    return results
 
 
 def compute_population_gwb_psd(
@@ -608,161 +537,3 @@ def compute_population_gwb_psd_from_psrs(
     S_GWB    = S_h / (4.0 * np.pi**2 * freqs[None, :]**2)  # (N, F) [s^3]
 
     return freqs, S_GWB
-
-def compute_cgw_snr_optimal_single(
-    psrs:          list,
-    chol_factors:  dict,
-    binary,
-    verbose:       bool = False,
-) -> float:
-    """
-    Optimal matched-filter SNR for a single CGW source:
-
-        rho^2 = sum_a  s_a^T C_a^{-1} s_a
-
-    where C_a = N_a + S_{RN,a} + S_{GWB,aa} is precomputed and Cholesky-
-    factorised. Cost is O(n_toa^2) per pulsar (triangular solve), not
-    O(n_toa^3) (full inversion).
-
-    References
-    ----------
-    Babak & Sesana (2012) PRD 85 044034, Eq. (13)
-    Ellis, Siemens & Creighton (2012) ApJ 756 175, Eq. (14)
-    Rosado, Sesana & Gair (2015) MNRAS 451 2417, Section 2.2
-    """
-    from enterprise_extensions.deterministic import cw_delay
-
-    rho_sq = 0.0
-    for psr in psrs:
-        # CGW timing residual at this pulsar (Earth term only)
-        s_a = cw_delay(
-            toas        = psr.toas,
-            pos         = psr.pos,
-            pdist       = psr.pdist,
-            cos_gwtheta = np.cos(np.pi / 2.0 - binary.dec),
-            gwphi       = binary.ra,
-            cos_inc     = np.cos(binary.iota),
-            log10_mc    = np.log10(binary.Mc),
-            log10_fgw   = np.log10(binary.f),
-            log10_dist  = None,
-            log10_h     = np.log10(binary.h0),
-            phase0      = binary.phi0,
-            psi         = binary.psi,
-            psrTerm     = False,
-        )
-
-        # s_a^T C_a^{-1} s_a via Cholesky solve — numerically stable
-        contrib = float(np.real(s_a @ cho_solve(chol_factors[psr.name], s_a)))
-
-        if verbose:
-            print(f"  [{psr.name}]  rho^2 contribution = {max(contrib, 0.0):.6f}")
-
-        rho_sq += max(contrib, 0.0)
-
-    snr = np.sqrt(rho_sq)
-    if verbose:
-        print(f"  Total optimal SNR = {snr:.4f}")
-    return snr
-
-
-def compute_cgw_snr_matched_filter(
-    psrs:         list,
-    chol_factors: dict,
-    binary,
-    snr_type:     str  = "matched",   # "optimal" | "matched" | "log_likelihood"
-    verbose:      bool = False,
-) -> float:
-    """
-    Compute CGW SNR for a single source, with choice of statistic:
-
-        "optimal"       : S/N_s   = sqrt( (s|s) )            [Gardiner+2025 Eq. 9]
-        "matched"       : S/N_rho = (d|s) / sqrt( (s|s) )    [Gardiner+2025 Eq. 13]
-        "log_likelihood": S/N_Lam = sqrt( 2(d|s) - (s|s) )   [Gardiner+2025 Eq. 14]
-
-    All use the same noise-weighted inner product (a|b) = a^T C^{-1} b
-    with C_a = N_a + S_RN,a + S_GWB,aa precomputed and Cholesky-factorised.
-
-    Parameters
-    ----------
-    psrs         : enterprise Pulsar objects — psr.residuals is d_a
-    chol_factors : precomputed Cholesky factorisations from
-                   get_per_pulsar_covariance_from_population
-    binary       : single binary object with CGW parameters
-    snr_type     : which SNR definition to use (see above)
-    verbose      : print per-pulsar contributions
-
-    References
-    ----------
-    Gardiner, Becsy, Kelley & Cornish (2025) arXiv:2502.16016, Eqs. 9, 13, 14
-    Ellis, Siemens & Creighton (2012) ApJ 756 175, Eq. (14) for ln Lambda
-    Di Matteo et al. (2019) for matched filter expectation value derivation
-    """
-    from enterprise_extensions.deterministic import cw_delay
-
-    ss = 0.0   # (s|s) — accumulates over pulsars
-    ds = 0.0   # (d|s) — accumulates over pulsars
-
-    for psr in psrs:
-
-        # --- Injected signal at this pulsar's TOAs ---
-        s_a = cw_delay(
-            toas        = psr.toas,
-            pos         = psr.pos,
-            pdist       = psr.pdist,
-            cos_gwtheta = np.cos(np.pi / 2.0 - binary.dec),
-            gwphi       = binary.ra,
-            cos_inc     = np.cos(binary.iota),
-            log10_mc    = np.log10(binary.Mc),
-            log10_fgw   = np.log10(binary.f),
-            log10_dist  = None,
-            log10_h     = np.log10(binary.h0),
-            phase0      = binary.phi0,
-            psi         = binary.psi,
-            psrTerm     = False,
-        )
-
-        # --- Data: timing residuals at this pulsar ---
-        # psr.residuals is d_a = s_a + n_a after your injection pipeline
-        # This is what Gardiner+2025 call d — residuals after timing model fit
-        d_a = psr.residuals   # shape (n_toa,) in seconds
-
-        # --- C_a^{-1} s_a via Cholesky solve (same for both inner products) ---
-        Cinv_s_a = cho_solve(chol_factors[psr.name], s_a)   # C^{-1} s
-
-        # --- Inner products ---
-        ss_a = float(np.real(s_a @ Cinv_s_a))          # (s|s)_a = s^T C^{-1} s
-        ds_a = float(np.real(d_a @ Cinv_s_a))          # (d|s)_a = d^T C^{-1} s
-
-        if verbose:
-            print(f"  [{psr.name}]  (s|s)={ss_a:.4f}  (d|s)={ds_a:.4f}")
-
-        ss += max(ss_a, 0.0)
-        ds += ds_a          # (d|s) can legitimately be negative for a bad noise draw
-
-    # --- Form the requested SNR ---
-    sqrt_ss = np.sqrt(max(ss, 0.0))
-
-    if snr_type == "optimal":
-        # S/N_s = sqrt((s|s))  [Eq. 9]
-        snr = sqrt_ss
-
-    elif snr_type == "matched":
-        # S/N_rho = (d|s) / sqrt((s|s))  [Eq. 13]
-        # Can be negative if the noise draw is particularly bad
-        snr = ds / sqrt_ss if sqrt_ss > 0 else 0.0
-
-    elif snr_type == "log_likelihood":
-        # S/N_Lambda = sqrt(2(d|s) - (s|s))  [Eq. 14]
-        # Can be imaginary (i.e. argument negative) for bad noise draws —
-        # return signed sqrt to preserve the sign information, which is
-        # meaningful: negative means noise-only hypothesis is preferred
-        val = 2.0 * ds - ss
-        snr = np.sign(val) * np.sqrt(abs(val))
-
-    else:
-        raise ValueError(f"snr_type must be 'optimal', 'matched', or 'log_likelihood', got '{snr_type}'")
-
-    if verbose:
-        print(f"  (s|s)={ss:.4f}  (d|s)={ds:.4f}  SNR_{snr_type}={snr:.4f}")
-
-    return snr

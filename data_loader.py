@@ -74,31 +74,34 @@ def filter_pulsars_15yr(psrs, min_baseline_years=0.0, verbose=True):
     return psrs_filtered, params, Tspan_seconds
 
 
+_ORIGINAL_RESIDUALS = {}  # module-level cache: psr.name -> np.ndarray
+
+
 def get_clean_pulsars_and_tspan(psrs_filtered):
     """
     Get pulsars and calculate Tspan.
 
     Note: Returns original pulsars (not copies) to save memory.
-    Original residuals are saved for restoration between injections.
+    Original residuals are cached externally (keyed by pulsar name) for
+    restoration between injections, since libstempo's tempopulsar is a
+    Cython extension type and doesn't support arbitrary attribute assignment.
     """
     tmin = min(min(p.toas()) for p in psrs_filtered)
     tmax = max(max(p.toas()) for p in psrs_filtered)
     Tspan = tmax - tmin
 
     for psr in psrs_filtered:
-        if not hasattr(psr, '_original_residuals'):
-            psr._original_residuals = np.copy(psr.residuals)
+        if psr.name not in _ORIGINAL_RESIDUALS:
+            _ORIGINAL_RESIDUALS[psr.name] = np.copy(psr.residuals)
 
     return psrs_filtered, Tspan
-
 
 def restore_original_residuals(psrs):
     """Restore pulsars to original state before next injection."""
     for psr in psrs:
-        if hasattr(psr, '_original_residuals'):
-            psr._residuals = np.copy(psr._original_residuals)
+        if psr.name in _ORIGINAL_RESIDUALS:
+            psr.residuals[:] = _ORIGINAL_RESIDUALS[psr.name]
     gc.collect()
-
 
 def parse_pulsar_parameters(json_file_path):
     """
@@ -260,26 +263,26 @@ SCENARIOS = {
         extension_years = 4.46,
     ),
 
-    # '4x_cadence': dict(
-    #     cadence_factor  = 4,
-    #     toaerr_factor   = 1.0,
-    #     best_only       = True,
-    #     extension_years = 4.46,
-    # ),
+    '4x_cadence': dict(
+        cadence_factor  = 4,
+        toaerr_factor   = 1.0,
+        best_only       = True,
+        extension_years = 4.46,
+    ),
 
-    # '2x_precision': dict(
-    #     cadence_factor  = 1,
-    #     toaerr_factor   = 0.5,
-    #     best_only       = True,
-    #     extension_years = 4.46,
-    # ),
+    '2x_precision': dict(
+        cadence_factor  = 1,
+        toaerr_factor   = 0.5,
+        best_only       = True,
+        extension_years = 4.46,
+    ),
 
-    # '4x_cad_2x_prec': dict(
-    #     cadence_factor  = 4,
-    #     toaerr_factor   = 0.5,
-    #     best_only       = True,
-    #     extension_years = 4.46,
-    # ),
+    '4x_cad_2x_prec': dict(
+        cadence_factor  = 4,
+        toaerr_factor   = 0.5,
+        best_only       = True,
+        extension_years = 4.46,
+    ),
     # '4x_cadence_conserved': dict(
     #     cadence_factor          = 4,
     #     toaerr_factor           = 1.0,
@@ -297,7 +300,8 @@ SCENARIOS = {
     # '4x_cad_2x_prec_conserved': dict(
     #     cadence_factor  = 4,
     #     toaerr_factor   = 0.5,
-    #     best_only       = True,
+    #    
+    #  best_only       = True,
     #     extension_years = 4.46,
     #     conserve_telescope_time = True,
     # ),

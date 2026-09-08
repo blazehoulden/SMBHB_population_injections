@@ -605,7 +605,6 @@ def _select_active_shards(
 
             # We want floor_shards + [one extra chunk] to land in [snr_low, snr_high]
             hits   = []   # (snr, chunk_id, sub_id) — landed in band
-            near   = []   # (snr, chunk_id, sub_id) — overshot but closest
 
             for cid, sid in candidate_chunks:
                 trial_shards = floor_shards + [(cid, sid)]
@@ -618,26 +617,23 @@ def _select_active_shards(
 
                 if snr_low <= snr_trial <= snr_high:
                     hits.append((snr_trial, cid, sid))
-                elif snr_trial > snr_high:
-                    near.append((snr_trial, cid, sid))
 
-                # Take the first hit we find — no need to scan all chunks
-                if hits:
-                    best_snr, best_c, best_s = hits[0]
-                    active = floor_shards + [(best_c, best_s)]
-                    print(f'  ✓ Chunk-addition found: floor({k_floor}) + '
-                          f'chunk({best_c},{best_s}) → SNR={best_snr:.4f}')
-                    return active, best_snr
-
-            # All candidates either undershot or overshot — take closest overshoot
-            if near:
-                near.sort(key=lambda x: x[0])   # ascending SNR — smallest overshoot first
-                best_snr, best_c, best_s = near[0]
+            # Done scanning all candidates — pick the best hit, if any
+            if hits:
+                hits.sort(key=lambda x: abs(x[0] - target_snr))  # closest to target
+                best_snr, best_c, best_s = hits[0]
                 active = floor_shards + [(best_c, best_s)]
-                print(f'  ⚠️  No chunk landed in band. '
-                      f'Taking closest overshoot: chunk({best_c},{best_s}) '
-                      f'SNR={best_snr:.4f} (target=[{snr_low},{snr_high}])')
+                print(f'  ✓ Chunk-addition found: floor({k_floor}) + '
+                      f'chunk({best_c},{best_s}) → SNR={best_snr:.4f} '
+                      f'(best of {len(hits)} candidates in band)')
                 return active, best_snr
+
+            # No candidate landed in band after checking all of them — hard fail
+            raise RuntimeError(
+                f'Simulation failed: chunk-addition scan checked all '
+                f'{len(candidate_chunks)} remaining chunks and none brought '
+                f'SNR from {snr_floor:.4f} (floor k={k_floor}) into '
+                f'[{snr_low},{snr_high}]. Aborting.')
 
             # Every candidate undershot even when added to the floor — give up
             raise RuntimeError(

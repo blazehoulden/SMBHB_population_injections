@@ -34,7 +34,7 @@ from pta_builder import build_pta_and_params
 from memory_profile import log_memory
 from consistent_pop_synth import compute_population_snr
 # from ensemble_analysis import find_N_ensemble, find_N_binaries_for_target_snr
-from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
+# from optimal_SNR_calc import N_needed_for_population, SNR_sq_all_pairs_all_binaries_vectorised, convergence_test, plot_overlap_reduction_function, plot_overlap_reduction_function, find_N_needed, compare_pulsar_psd_methods, plot_psd_comparison, sigma_ab, test_psd_vs_residuals_consistency
 from CGW_SNR import compute_cgw_snr_optimal_population, compute_population_gwb_psd_from_psrs, get_per_pulsar_covariance_from_population
 from visualisation import plot_binaries_vs_frequency_mc, plot_scaling_results, plot_individual_binaries, plot_ensemble_results, plot_initial_injection_analysis, plot_snr_population, print_binary_statistics, plot_binaries_vs_frequency
 from utils import save_results, save_results_dual, print_population_diagnostics, print_scaling_summary, compact_consistent_results_for_storage
@@ -145,7 +145,7 @@ def parse_args():
     help="Total binaries per chunk (must be divisible by --n-sub-chunks)"
     )
     parser.add_argument(
-        "--n-sub-chunks", type=int, default=10,
+        "--n-sub-chunks", type=int, default=50,
         help="Sub-chunks per stage1 chunk"
     )
     parser.add_argument(
@@ -299,7 +299,7 @@ def main():
     # # _, _ = test_sky_CGW_SNR_location(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
     # population, snrs = test_sky_CGW_SNR_location(
     #     psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr,
-    #     save_data_path=f"{save_dir}/sky_sensitivity_data/",
+    #     save_data_path="data/sky_snr/sky_survey",
     #     make_plot=False,
     # )
     # plot frequency vs amplitude for CGW SNR analysis, for a given chirp mass and redshift

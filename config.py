@@ -33,7 +33,7 @@ POPULATION_CONFIGS = {
         'description': 'Medium mass, medium population size'
     },
     'optimistic': {
-        'n_binaries': 2_250_000,
+        'n_binaries': 1_250_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.3),
         'z_max': 2.0,
