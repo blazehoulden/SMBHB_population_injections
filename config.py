@@ -1,7 +1,17 @@
 import numpy as np
 from pathlib import Path
 import importlib.util
+import os
 import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _configured_path(variable_name, default):
+    """Return a path from the environment, relative to the repository root."""
+    configured = os.environ.get(variable_name, default)
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 # Physical constants
 c = 2.99792458e8      # Speed of light [m/s]
@@ -48,23 +58,26 @@ MEERKAT_PULSARS = True
 if NANOGRAV_PULSARS:
     # PAR_DIR = "./psars_narrowband/alternate/tempo2"
     # TIM_DIR = "./psars_narrowband/alternate/tim/initial"
-    PAR_DIR = "./psars_narrowband/par/"
-    TIM_DIR = "./psars_narrowband/tim/"
+    PAR_DIR = _configured_path("SMBHB_PAR_DIR", "psars_narrowband/par")
+    TIM_DIR = _configured_path("SMBHB_TIM_DIR", "psars_narrowband/tim")
     USE_PULSAR_CACHE = True
-    PULSAR_CACHE = "nanograv_pulsars_cache.pkl"
-    NOISEFILE = '15yr_noise.json'
+    PULSAR_CACHE = _configured_path(
+        "SMBHB_PULSAR_CACHE", "nanograv_pulsars_cache.pkl"
+    )
+    NOISEFILE = _configured_path("SMBHB_NOISE_FILE", "15yr_noise.json")
 
 elif MEERKAT_PULSARS:
-    PAR_DIR = "meerkat_partim/"
-    TIM_DIR = "meerkat_partim/"
+    PAR_DIR = _configured_path("SMBHB_PAR_DIR", "meerkat_partim")
+    TIM_DIR = _configured_path("SMBHB_TIM_DIR", "meerkat_partim")
     USE_PULSAR_CACHE = False
     PULSAR_CACHE = None
-    NOISEFILE = 'meerkat_45yr_noise.json'
+    NOISEFILE = _configured_path("SMBHB_NOISE_FILE", "meerkat_45yr_noise.json")
 else:
-    PAR_DIR = "pulsars/"
-    TIM_DIR = "pulsars/"
+    PAR_DIR = _configured_path("SMBHB_PAR_DIR", "pulsars")
+    TIM_DIR = _configured_path("SMBHB_TIM_DIR", "pulsars")
     USE_PULSAR_CACHE = False
-    NOISEFILE = '15yr_noise.json'
+    PULSAR_CACHE = None
+    NOISEFILE = _configured_path("SMBHB_NOISE_FILE", "15yr_noise.json")
 
 # Analysis flags
 # RUN_INITIAL_INJECTION_ANALYSIS = False
@@ -86,6 +99,8 @@ MEMORY_PROFILE_ENABLED = True
 def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     """Load the SMBHB population synthesis module."""
     file_path = Path(module_path)
+    if not file_path.is_absolute():
+        file_path = PROJECT_ROOT / file_path
     module_name = "SMBHB_pop_synth"
     
     spec = importlib.util.spec_from_file_location(module_name, file_path)
@@ -98,7 +113,7 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
 
 def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, compute_strain=False, seed=None, f_obs_min=2e-9):
     """
-    Generate SMBHB population with given configuration. 
+    Generate SMBHB population with given configuration.
     Set minimum frequency of population to f_obs_min -- we leave it as 2 nHz for simplicity.
     NANOGrav's lowest frequency is 1/T_obs ~ 2 nHz, while MPTA's is ~7 nHz for 4.5yrs, and ~3.5 nHz for 6yrs.
     2 nHz allows for a slight buffer at the lowest frequency, and avoids requiring large numbers of binaries.
