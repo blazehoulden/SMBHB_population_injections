@@ -6,6 +6,7 @@ Run with: python main.py
 import os
 import pickle
 import sys
+import json
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import gzip
@@ -165,6 +166,21 @@ def parse_args():
         help="Base seed for stage1/stage2 noise seeding"
     )
 
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Reproducibility seed; overrides --noise-seed-base when supplied"
+    )
+
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate the selected configuration and input paths without running simulations"
+    )
+
+    parser.add_argument(
+        "--list-configs", action="store_true",
+        help="List available population configurations and exit"
+    )
+
     return parser.parse_args()
 
 
@@ -187,7 +203,7 @@ def setup_save_directory(args):
     # Determine save directory
     if args.save_dir:
         # User-specified directory
-        save_dir = args.save_dir
+        save_dir = os.path.abspath(args.save_dir)
     else:
         # Default: data/{date}/{run_name}/
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -200,6 +216,31 @@ def setup_save_directory(args):
     print(f"📝 Run name: {run_name}\n")
     
     return save_dir, run_name
+
+
+def write_run_metadata(save_dir, args):
+    """Save the command, configuration, and environment details for a run."""
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_commit = None
+
+    metadata = {
+        "command": " ".join(sys.argv),
+        "git_commit": git_commit,
+        "python": sys.version,
+        "config": vars(args),
+        "paths": {
+            "par_dir": str(config.PAR_DIR),
+            "tim_dir": str(config.TIM_DIR),
+            "noise_file": str(config.NOISEFILE),
+            "pulsar_cache": str(config.PULSAR_CACHE),
+        },
+    }
+    with open(os.path.join(save_dir, "run_metadata.json"), "w") as metadata_file:
+        json.dump(metadata, metadata_file, indent=2)
 
 import io
 
@@ -221,15 +262,36 @@ class TeeLogger:
         self.log.close()
         sys.stdout = self.terminal
 
-logger = TeeLogger("run_log.txt")
-sys.stdout = logger
-
 def main():
     """Main analysis workflow."""
     args = parse_args()
+
+    if args.list_configs:
+        for name, population_config in config.POPULATION_CONFIGS.items():
+            print(f"{name}: {population_config['description']}")
+        return
+
+    if args.seed is not None:
+        args.noise_seed_base = args.seed
+
+    if args.dry_run:
+        selected_config = config.POPULATION_CONFIGS[args.config]
+        print(f"Configuration: {args.config}")
+        print(f"  {selected_config['description']}")
+        print(f"  N_binaries: {selected_config['n_binaries']}")
+        for label, path in (
+            ("PAR_DIR", config.PAR_DIR),
+            ("TIM_DIR", config.TIM_DIR),
+            ("NOISEFILE", config.NOISEFILE),
+        ):
+            print(f"{label}: {path} ({'found' if os.path.exists(path) else 'missing'})")
+        return
     
     # Setup save directory
     save_dir, run_name = setup_save_directory(args)
+    write_run_metadata(save_dir, args)
+    logger = TeeLogger(os.path.join(save_dir, "run.log"))
+    sys.stdout = logger
 
     toggle_memory_profiling = config.MEMORY_PROFILE_ENABLED
     if toggle_memory_profiling:
@@ -827,12 +889,7 @@ def main():
     #     # # Save results
     #     # save_path = os.path.join(save_dir, 'ensemble_results.json')
     #     # save_results(ensemble_results, save_path)
-
-logger.close()
-
-
-
-                
+    logger.close()
 
 if __name__ == "__main__":
     main()

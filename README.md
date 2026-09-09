@@ -191,6 +191,9 @@ Important options:
 --save-dir         Explicit output directory
 --save-nearest     Number of nearest binaries retained in compact results
 --save-loudest     Number of loudest binaries retained in compact results
+--seed             Reproducibility seed; overrides --noise-seed-base
+--dry-run          Validate configuration and data paths without running
+--list-configs     List available population presets
 ```
 
 The analysis stages are controlled by switches in `config.py`, for example:
@@ -205,6 +208,24 @@ MEMORY_PROFILE_ENABLED = True
 These switches currently require editing `config.py`. Keep a copy of any
 configuration used for a production run, and record the Git commit alongside
 the output.
+
+Every normal run now writes `run_metadata.json` and `run.log` into its output
+directory. The metadata records the command, Git commit, Python version,
+selected options, and resolved input paths. Use `--seed` for repeatable
+stage1/stage2 noise and population seeding:
+
+```bash
+python main.py --config test --simulations 1 --seed 12345 \
+  --save-dir outputs/test-seed-12345
+```
+
+Before a long run, inspect the selected configuration and paths without
+starting the pipeline:
+
+```bash
+python main.py --config test --dry-run
+python main.py --list-configs
+```
 
 ## Running on an HPC cluster
 
@@ -308,11 +329,47 @@ artifacts unless they are deliberately retained as example results.
 
 For reproducible studies:
 
-1. Save the exact command line.
-2. Record the Git commit with `git rev-parse HEAD`.
-3. Record the environment with `conda env export --no-builds`.
-4. Preserve the input noise-file and pulsar-data provenance.
-5. Keep separate output directories for each configuration and seed.
+1. Use `--seed` and keep the generated `run_metadata.json`.
+2. Record the environment with `conda env export --no-builds`.
+3. Preserve the input noise-file and pulsar-data provenance.
+4. Keep separate output directories for each configuration and seed.
+
+## Dependency environment maintenance
+
+`environment.yml` is a hand-maintained, Python 3.11 conda environment rather
+than a guaranteed export from one machine. To determine whether it is the
+correct environment for a cluster, create it on a clean test allocation and
+run:
+
+```bash
+conda env create -f environment.yml
+conda activate SMBHB312
+python -m py_compile config.py main.py stage1_setup.py stage2_inject.py
+python -m unittest discover -s tests -p "test_config.py"
+python - <<'PY'
+import astropy, enterprise, enterprise_extensions, finufft, libstempo, numba
+print("scientific and pulsar-timing imports succeeded")
+PY
+```
+
+After a successful installation, capture the tested environment:
+
+```bash
+conda env export --no-builds > environment-tested.yml
+```
+
+Do not replace `environment.yml` with that export until it has been tested on
+the target HPC system. Compare the files and keep only packages actually
+required by the supported workflow. In particular, check the cluster's
+available compiler, MPI/OpenMP configuration, and whether `libstempo`,
+`enterprise_extensions`, and `finufft` are available from the chosen channels.
+The repository's quick CI checks intentionally avoid these compiled
+dependencies; full scientific validation must be done in the target conda
+environment.
+
+The existing `tests/test_chunked_pipeline.py` is an integration test for the
+chunked pipeline and requires the full scientific environment plus the
+chunked I/O dependencies. It is not part of the dependency-free CI check.
 
 ## Notebooks and validation scripts
 
