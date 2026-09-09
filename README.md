@@ -61,9 +61,21 @@ psars_narrowband/par/J1713+0747.par
 psars_narrowband/tim/J1713+0747.tim
 ```
 
-The exact filenames supplied by the NANOGrav data release may differ. Place
-the files in the directories configured by `PAR_DIR` and `TIM_DIR` in
-`config.py`, or update those settings before running.
+The exact filenames supplied by the NANOGrav data release may differ. By
+default, the project resolves these paths relative to the repository root,
+even when the command is launched from another directory. You can override
+them without editing source code:
+
+```bash
+export SMBHB_PAR_DIR=/path/to/par
+export SMBHB_TIM_DIR=/path/to/tim
+export SMBHB_NOISE_FILE=/path/to/15yr_noise.json
+export SMBHB_PULSAR_CACHE=/path/to/nanograv_pulsars_cache.pkl
+```
+
+Relative override paths are resolved relative to the repository root. The
+corresponding Python settings are `PAR_DIR`, `TIM_DIR`, and `NOISEFILE` in
+`config.py`.
 
 `15yr_noise_params.json` is retained for auxiliary analyses; the main
 pipeline currently reads `15yr_noise.json` through `config.NOISEFILE`.
@@ -121,8 +133,9 @@ instructions below.
 
 ## First run: smoke test
 
-Run commands from the repository root. The current code uses relative paths
-for the pulsar data and noise file.
+Run commands from any directory. The default input paths are resolved relative
+to the repository root, or can be overridden with the environment variables
+above.
 
 Before a full simulation, use one simulation and a dedicated output directory:
 
@@ -311,6 +324,10 @@ python -m ipykernel install --user --name SMBHB312 --display-name "Python (SMBHB
 jupyter lab
 ```
 
+When using a notebook, start Jupyter from the repository root or set the
+`SMBHB_PAR_DIR`, `SMBHB_TIM_DIR`, and `SMBHB_NOISE_FILE` variables before
+launching it.
+
 Useful validation scripts include:
 
 ```bash
@@ -325,14 +342,15 @@ temporary output directory if you do not want to modify the repository root.
 
 ### `FileNotFoundError` for pulsar or noise files
 
-Run from the repository root and check `PAR_DIR`, `TIM_DIR`, and `NOISEFILE`
-in `config.py`:
+Check the configured paths and input files:
 
 ```bash
-pwd
-ls psars_narrowband/par
-ls psars_narrowband/tim
-ls 15yr_noise.json
+python - <<'PY'
+from config import PAR_DIR, TIM_DIR, NOISEFILE
+print("PAR_DIR:", PAR_DIR)
+print("TIM_DIR:", TIM_DIR)
+print("NOISEFILE:", NOISEFILE)
+PY
 ```
 
 ### No pulsars are loaded

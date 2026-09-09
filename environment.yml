@@ -15,6 +15,7 @@ dependencies:
   - bqplot=0.12.37
   - numba=0.63.1
   - h5py=3.15.1
+  - finufft
   - pillow=10.1.0
   - requests=2.32.5
   - pytz=2025.2
@@ -58,6 +59,7 @@ dependencies:
       - packaging==24.2
       - parso==0.8.3
       - pathos==0.3.4
+      - pympler
       - pexpect==4.8.0
       - pint==0.25.2
       - pint-pulsar==1.1.4
