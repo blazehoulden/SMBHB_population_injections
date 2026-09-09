@@ -13,9 +13,37 @@ venv/
 *.pkl
 *.hdf5
 *.npz
+*.npy
+*.tar.gz
+
+
+# Logs/text files
+*.out
+*.txt
+*.err
+*.tex
 
 # Local data
 data/
 cache/
-
+figures/
+test_runs/
+extra_runs/
+tables/
+min_7nHz_MPTA/
 nanograv_pulsars_cache.pkl
+tempo2_runtime.tar.gz
+data/2026-02-17/pessimistic/optimal_snr_population.json
+logs/
+runs/
+nanograv_runs/
+nanograv_scenario_tims/
+nanograv_comp_runs/
+old_successful_run_logs/
+psars_narrowband/
+meerkat_partim/
+dodgy_meerkat_partim/
+scenario_tims/
+pre_synth_ptas_runs/
+tables/
+previous_run_old_configurations/

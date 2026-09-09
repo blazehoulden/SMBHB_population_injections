@@ -24,7 +24,7 @@ def compute_os_for_N_binaries_incremental(N_total, N_prev, population, psrs_prev
             )
         
         pta_temp, _, params_out = build_pta_and_params(
-            psrs=psrs_new, noise_params_15yr=params, Tspan=Tspan,
+            psrs=psrs_new, noise_params=params, Tspan=Tspan,
         )
         
         ostat = opt_stat.OptimalStatistic(psrs_new, pta=pta_temp, orf='hd')
