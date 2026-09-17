@@ -208,8 +208,9 @@ def compute_cgw_snr_optimal_population_fast(
         for (psr_name, psr_obj, toas, psr_noise_params,
              Nvec, T, cf) in precomputed:
 
-            try:
-                s_a = population_residuals_eccentric(
+            try: # In PTA searches, they do not scan over the eccentricity parameter space
+                # s_a = population_residuals_eccentric(
+                s_a = population_residuals(
                     toas, psr_obj, [binary], Tspan,
                     pulsar_noise_params=psr_noise_params,
                     power_tol=power_tol, n_max_cap=n_max_cap,
@@ -229,7 +230,7 @@ def compute_cgw_snr_optimal_population_fast(
 
         if n_failed == len(precomputed):
             raise RuntimeError(
-                f"population_residuals_eccentric failed for ALL {n_failed} "
+                f"population_residuals failed for ALL {n_failed} "
                 f"pulsars on binary {i} — likely structural, not per-pulsar. "
                 f"See warnings above."
             )

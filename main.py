@@ -10,11 +10,11 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import gzip
 from consistent_pop_synth import generate_snr_consistent_populations_distance_scaling, suppress_enterprise_warnings
-from debug.test_CGW_sky_loc import sky_sensitivity_weight, test_sky_CGW_SNR_location
+from debug.test_CGW_sky_loc import sky_sensitivity_weight, test_sky_CGW_SNR_location, test_sky_CGW_SNR_location_multi_freq 
 from debug.plot_cgw_freq_amp import test_freq_amp_CGW_SNR
 from debug.plot_cgw_freq_redshift import test_freq_redshift_CGW_SNR
-from debug.plot_cgw_mass_redshift import test_mass_redshift_CGW_SNR
-from debug.plot_cgw_mass_amp import test_mass_amp_CGW_SNR
+from debug.plot_cgw_mass_redshift import _Z_MIN_SAFE, test_mass_redshift_CGW_SNR
+from debug.plot_cgw_mass_amp import _h0_at_redshift, test_mass_amp_CGW_SNR
 from sensitivity_curves import make_pta_sensitivity
 import argparse
 import config
@@ -285,16 +285,22 @@ def main():
         population = config.generate_population(selected_config, smbhb_module, T_obs_seconds=Tspan_seconds)
     # print_population_diagnostics(population)
     
+    
+    # Was (implicitly or explicitly): scenario='baseline'  -> real-only ~4.5 yr
+    psrs_9yr = load_pulsars(
+        scenario='baseline_forecast',   # cadence x1, toaerr x1, +4.46 yr forecast
+        verbose=True,
+    )
 
-    # # Was (implicitly or explicitly): scenario='baseline'  -> real-only ~4.5 yr
-    # psrs_9yr = load_pulsars(
-    #     scenario='baseline_forecast',   # cadence x1, toaerr x1, +4.46 yr forecast
-    #     verbose=True,
-    # )
 
+    psrs_clean_9yr, Tspan_9yr = get_clean_pulsars_and_tspan(psrs_9yr)
 
-    # psrs_clean_9yr, Tspan_9yr = get_clean_pulsars_and_tspan(psrs_9yr)
-
+    freqs = [2e-9, 5e-9, 10e-9, 20e-9, 50e-9, 100e-9]  # 10, 31.6, 100 nHz
+    results = test_sky_CGW_SNR_location_multi_freq(
+        psrs_clean, raw_noise_params, parsed_noise_params, Tspan_9yr,
+        freqs_hz=freqs,
+        save_data_dir="data/sky_snr",
+    )
     # #Used to make a sky sensitivity map for CGW SNR analysis later, the same for each network of pulsars since it only depends on pulsar sky locations.
     # # _, _ = test_sky_CGW_SNR_location(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
     # population, snrs = test_sky_CGW_SNR_location(
@@ -316,7 +322,78 @@ def main():
     # plot mass vs amplitude for CGW SNR analysis, for a given chirp mass and amplitude
     # _ = test_mass_amp_CGW_SNR(psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr)
 
+    import numpy as np
+    from debug.test_CGW_sky_loc import get_sky_survey_points, _concat_population_arrays, _population_arrays_to_binary_rows
+    from SMBHB_pop_synth import chosen_population
+    from consistent_pop_synth import compute_population_snr
+    from CGW_SNR import compute_cgw_snr_optimal_population
+    from debug.plot_cgw_freq_amp import _redshift_for_target_h0, _h0_at_redshift, _Z_MIN_SAFE, _Z_MAX_SAFE
 
+    sky_points = get_sky_survey_points()
+    sky_points_sorted = sorted(sky_points, key=lambda p: p[2])
+    n = len(sky_points_sorted)
+
+    # more samples this time, evenly spaced by rank, for a smoother envelope
+    sample_idx = np.linspace(0, n - 1, 9).astype(int)
+    sky_sample = [sky_points_sorted[i] for i in sample_idx]
+    labels = [f'pctile_{int(100*i/(n-1))}' for i in sample_idx]
+
+    def suggest_h0_for_mass(freqs_hz, chirp_mass_msun, iota=0.0):
+        h0_maxes, h0_mins = [], []
+        for f_val in freqs_hz:
+            h0_maxes.append(_h0_at_redshift(f_val, _Z_MIN_SAFE, chirp_mass_msun, iota))
+            h0_mins.append(_h0_at_redshift(f_val, _Z_MAX_SAFE, chirp_mass_msun, iota))
+        return max(h0_mins), min(h0_maxes)
+
+    def compute_R_of_f_at_sky_position(chirp_mass_msun, freqs_hz, ra, dec,
+                                        psrs_clean, raw_noise_params,
+                                        parsed_noise_params, Tspan, iota=0.0):
+        h0_lo, h0_hi = suggest_h0_for_mass(freqs_hz, chirp_mass_msun, iota)
+        h0_fixed = np.sqrt(h0_lo * h0_hi)
+
+        sub_populations = []
+        for f_val in freqs_hz:
+            z_val = _redshift_for_target_h0(f_val, h0_fixed, chirp_mass_msun, iota)
+            pop = chosen_population(
+                n_binaries=1, T_obs_seconds=Tspan, chirp_mass_msun=chirp_mass_msun,
+                gw_frequency=float(f_val), redshift=float(z_val), inclination=float(iota),
+                right_ascension=float(ra), declination=float(dec), compute_strain=False,
+            )
+            sub_populations.append(pop)
+
+        population = _concat_population_arrays(sub_populations)
+        original_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
+        _, pta, enterprise_psrs = compute_population_snr(
+            population=population, psrs_clean=psrs_clean, current_stoas=original_stoas,
+            raw_noise_params=raw_noise_params, Tspan=Tspan, return_psrs_pta=True,
+        )
+        binary_rows = _population_arrays_to_binary_rows(population)
+        snrs = compute_cgw_snr_optimal_population(
+            psrs=enterprise_psrs, pta=pta, population=binary_rows, Tspan=Tspan,
+            raw_noise_params=raw_noise_params, parsed_noise_params=parsed_noise_params,
+        )
+        return np.array(snrs, dtype=float) / h0_fixed
+
+    # match resolution to your validated mass-matched grid
+    freqs_hz_fine = np.geomspace(1e-9, 3e-7, 200)
+    mc_fixed = 2e9
+
+    R_by_sky = {}
+    for lbl, (ra, dec, _) in zip(labels, sky_sample):
+        print(f"computing R(f) at sky position: {lbl}...")
+        R_by_sky[lbl] = compute_R_of_f_at_sky_position(
+            mc_fixed, freqs_hz_fine, ra, dec,
+            psrs_clean_9yr, raw_noise_params, parsed_noise_params, Tspan_9yr,
+        )
+
+    R_stack = np.stack(list(R_by_sky.values()))  # shape (9, 200)
+
+    np.savez('R_of_f_sky_envelope.npz',
+            freqs_hz=freqs_hz_fine,
+            R_stack=R_stack,
+            labels=np.array(labels))
+    print("saved R_of_f_sky_envelope.npz")
+    return
     # ========== CONSISTENT POPULATION SYNTHESIS ==========
     if config.RUN_CONSISTENT_POP_SYNTH:
         print("\n" + "="*70)
