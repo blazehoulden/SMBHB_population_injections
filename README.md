@@ -311,6 +311,40 @@ The `pessimistic` preset contains ten million binaries and should not be used
 as a first test. It may require changes to the job resources and storage
 strategy.
 
+## Perturbing the loudest CW source
+
+`analyze_cgw_source_perturbations.py` finds the binary with the largest saved
+`cgw_snr`, rebuilds the PTA from that simulation's combined residuals, removes
+the original source waveform, and reinjects it with changed parameters. The
+original simulation is not modified. This is intended for a copied HPC run
+whose `summary.pkl.gz`, `metadata/config.json`, and combined residuals are
+available.
+
+For one simulation:
+
+```bash
+python analyze_cgw_source_perturbations.py \
+  --sim-dir runs/2026-01-01_realistic/sim000 \
+  --parameter ra \
+  --values 0.0,1.0,2.0 \
+  --output cgw-ra-perturbations.json
+```
+
+Use native units from the summary (`f` is Hz and angular parameters are
+radians). To change both sky coordinates, use semicolon-separated
+`ra,dec` pairs:
+
+```bash
+python analyze_cgw_source_perturbations.py \
+  --sim-dir runs/2026-01-01_realistic/sim000 \
+  --parameter sky --values '0.0,0.5;1.0,0.5'
+```
+
+The script accepts either an extracted `residuals/combined/` directory or a
+`combined*.tar.gz` archive. It requires the full scientific environment
+(Enterprise, libstempo, and Tempo2), so run it on the HPC environment if those
+packages are not installed locally.
+
 ## Outputs
 
 By default, `main.py` creates a date-based directory under `data/`. Supplying
