@@ -88,13 +88,22 @@ def _safe_extract(archive: Path, destination: Path) -> None:
         tar.extractall(destination)
 
 
-def load_combined_residuals(sim_dir: Path, names: Iterable[str]) -> tuple[dict[str, np.ndarray], tempfile.TemporaryDirectory | None]:
-    residual_dir = sim_dir / "residuals" / "combined"
+def load_combined_residuals(
+    sim_dir: Path,
+    names: Iterable[str],
+    scenario: str,
+) -> tuple[dict[str, np.ndarray], tempfile.TemporaryDirectory | None]:
+    residual_root = sim_dir / "residuals"
+    if scenario != "baseline":
+        residual_root = sim_dir / f"residuals_{scenario}"
+    residual_dir = residual_root / "combined"
     temporary = None
     if not residual_dir.is_dir():
-        archive = next(iter(sorted((sim_dir / "residuals").glob("combined*.tar.gz"))), None)
+        archive = next(iter(sorted(residual_root.glob("combined*.tar.gz"))), None)
         if archive is None:
-            raise FileNotFoundError(f"No combined residual directory/archive in {sim_dir / 'residuals'}")
+            raise FileNotFoundError(
+                f"No combined residual directory/archive in {residual_root}"
+            )
         temporary = tempfile.TemporaryDirectory(prefix="cgw-residuals-")
         extracted = Path(temporary.name)
         _safe_extract(archive, extracted)
@@ -110,6 +119,15 @@ def load_combined_residuals(sim_dir: Path, names: Iterable[str]) -> tuple[dict[s
             raise FileNotFoundError(f"Missing combined residual: {path}")
         result[name] = np.load(path).astype(np.float64, copy=False)
     return result, temporary
+
+
+def scenario_from_snr_field(snr_field: str) -> str:
+    prefix = "cgw_snr_"
+    if snr_field == "cgw_snr":
+        return "baseline"
+    if not snr_field.startswith(prefix):
+        raise ValueError(f"Cannot infer scenario from S/N field {snr_field!r}")
+    return snr_field[len(prefix):]
 
 
 def make_source(summary: dict, index: int) -> SimpleNamespace:
@@ -184,17 +202,28 @@ def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) 
     import config
     from CGW_SNR import compute_cgw_snr_optimal_population_fast
     from consistent_pop_synth import compute_population_snr
-    from data_loader import filter_pulsars_15yr, load_pulsars, parse_pulsar_parameters
-    from signal_injection import population_residuals_eccentric
+    from data_loader import (
+        SCENARIOS,
+        filter_pulsars_15yr,
+        load_pulsars,
+        parse_pulsar_parameters,
+    )
+    from signal_injection import population_residuals
 
     summary = load_summary(sim_dir / "summary.pkl.gz")
     index, snr_field, saved_snr = select_loudest(summary)
+    scenario = scenario_from_snr_field(snr_field)
+    if scenario not in SCENARIOS:
+        raise KeyError(
+            f"Summary uses scenario {scenario!r}, which is not configured in "
+            f"data_loader.SCENARIOS"
+        )
     source = make_source(summary, index)
-    psrs = load_pulsars(verbose=True)
-    psrs_clean, raw_noise, _ = filter_pulsars_15yr(psrs, verbose=True)
+    psrs = load_pulsars(verbose=True, scenario=scenario, scenarios=SCENARIOS)
+    psrs_clean, raw_noise, tspan = filter_pulsars_15yr(psrs, verbose=True)
     parsed_noise = parse_pulsar_parameters(config.NOISEFILE)
     names = [psr.name for psr in psrs_clean]
-    combined, temporary = load_combined_residuals(sim_dir, names)
+    combined, temporary = load_combined_residuals(sim_dir, names, scenario)
     try:
         toas = {psr.name: np.array(psr.stoas, copy=True) for psr in psrs_clean}
         for psr in psrs_clean:
@@ -202,36 +231,37 @@ def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) 
                 raise ValueError(f"Residual/TOA length mismatch for {psr.name}")
 
         original_signal = {
-            psr.name: population_residuals_eccentric(
-                toas[psr.name], psr, [source], float(_tspan(sim_dir)),
+            psr.name: population_residuals(
+                toas[psr.name], psr, [source], tspan,
             )
             for psr in psrs_clean
         }
         baseline_pta = _build_pta(compute_population_snr, psrs_clean, raw_noise,
-                                  combined, float(_tspan(sim_dir)))
+                                  combined, tspan)
         baseline = float(compute_cgw_snr_optimal_population_fast(
             baseline_pta[1], baseline_pta[0], [source], raw_noise, parsed_noise,
-            float(_tspan(sim_dir)))[0])
+            tspan)[0])
         records = []
         for change in values:
             perturbed, record_change = _apply_change(source, change)
             modified = {
-                name: combined[name] - original_signal[name] + population_residuals_eccentric(
-                    toas[name], psr, [perturbed], float(_tspan(sim_dir)),
+                name: combined[name] - original_signal[name] + population_residuals(
+                    toas[name], psr, [perturbed], tspan,
                 )
                 for name, psr in ((p.name, p) for p in psrs_clean)
             }
             pta, enterprise_psrs = _build_pta(
                 compute_population_snr, psrs_clean, raw_noise, modified,
-                float(_tspan(sim_dir)),
+                tspan,
             )[0:2]
             snr = float(compute_cgw_snr_optimal_population_fast(
                 enterprise_psrs, pta, [perturbed], raw_noise, parsed_noise,
-                float(_tspan(sim_dir)))[0])
+                tspan)[0])
             records.append({"change": record_change, "cgw_snr_baseline_forecast": snr, "delta": snr - baseline})
         return {
             "simulation": str(sim_dir), "source_index": index,
-            "snr_field": snr_field, "saved_snr": saved_snr,
+            "snr_field": snr_field, "scenario": scenario, "saved_snr": saved_snr,
+            "tspan_seconds": float(tspan),
             "baseline_recomputed_snr": baseline, "source": vars(source),
             "results": records,
         }
