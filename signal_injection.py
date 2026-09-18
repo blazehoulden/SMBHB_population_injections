@@ -698,18 +698,30 @@ def population_residuals(t, psr, population, Tspan,
                          include_GW=True,
                          include_RN=False,
                          include_WN=False,
-                         power_tol=1e-4,
-                         n_max_cap=100
                          ):
     """
     Scalar (loop-based) total timing residuals for one pulsar, for a small
-    list of binary objects. Legacy — used by CGW_SNR script; circular only.
+    list of binary objects — CIRCULAR-ONLY.
+
+    This is the standard PTA CW search template (matches
+    enterprise_extensions.deterministic.cw_delay, which is single-
+    harmonic/quadrupole): real PTA CW searches do not scan over
+    eccentricity, so this is what should be used for SNR / candidate
+    selection / detection statistics, regardless of whether the
+    underlying injected population is eccentric. Using this template on
+    an eccentric injection deliberately produces a lower recovered SNR
+    than the injected/optimal value — that mismatch IS the physics
+    result (fitting-factor loss from a circular template on an eccentric
+    source), not a bug.
+
+    For the matched (eccentricity-aware) template, use
+    population_residuals_eccentric instead.
     """
     total_r = np.zeros_like(t, dtype=float)
 
     if include_GW:
         for binary in population:
-            total_r += r_k_eccentric(t, psr, binary, power_tol=power_tol, n_max_cap=n_max_cap)
+            total_r += r_k(t, psr, binary)
 
     if include_RN:
         if pulsar_noise_params is None:

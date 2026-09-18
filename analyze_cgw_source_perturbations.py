@@ -11,8 +11,12 @@ Example (on a machine with the project environment installed)::
         --runs-root runs --parameter ra --values 0.0,1.0,2.0
 
 The values use the native units in the summary: radians for angles and Hz for
-frequency.  ``--parameter sky`` changes both right ascension and declination;
-its values must be ``ra,dec`` pairs separated by semicolons.
+frequency. ``--parameter sky`` is the exception: instead of absolute
+coordinates, it takes *offsets in degrees* from the loudest source's own
+saved (ra, dec) -- i.e. its "standard" initial sky location. Offsets are
+converted to radians and added to that initial position when the source is
+perturbed. Each value must be a ``dra_deg,ddec_deg`` pair, and multiple
+offsets are separated by semicolons.
 """
 
 from __future__ import annotations
@@ -51,14 +55,14 @@ def select_loudest(summary: dict) -> tuple[int, str, float]:
     arrays = summary["arrays"]
     candidates = [
         name for name in summary.get("meta", {}).get("snr_fields", [])
-        if name in arrays and name.startswith("cgw_snr")
+        if name in arrays and name.startswith("cgw_snr_baseline_forecast")
     ]
-    if "cgw_snr" in arrays:
-        field = "cgw_snr"
+    if "cgw_snr_baseline_forecast" in arrays:
+        field = "cgw_snr_baseline_forecast"
     elif candidates:
         field = candidates[0]
     else:
-        raise KeyError("summary contains no cgw_snr array")
+        raise KeyError("summary contains no cgw_snr_baseline_forecast array")
     values = np.asarray(arrays[field], dtype=float)
     if values.size == 0 or not np.isfinite(values).any():
         raise ValueError(f"SNR array {field!r} is empty or non-finite")
@@ -126,17 +130,52 @@ def make_source(summary: dict, index: int) -> SimpleNamespace:
 
 
 def parse_values(parameter: str, text: str) -> list[dict[str, float]]:
+    """Parse --values into a list of "change" dicts.
+
+    For ``parameter == "sky"`` each change dict holds *degree offsets*
+    (``ra_offset_deg`` / ``dec_offset_deg``) rather than absolute
+    coordinates. The offsets are only resolved into absolute radian
+    coordinates later, in ``run_analysis``, once the source's own initial
+    (ra, dec) is known.
+    """
     if parameter == "sky":
         values = []
         for item in text.split(";"):
             pair = [float(value.strip()) for value in item.split(",")]
             if len(pair) != 2:
-                raise ValueError("sky values must be ra,dec pairs separated by ';'")
-            values.append({"ra": pair[0], "dec": pair[1]})
+                raise ValueError(
+                    "sky values must be dra_deg,ddec_deg offset pairs separated by ';'"
+                )
+            values.append({"ra_offset_deg": pair[0], "dec_offset_deg": pair[1]})
         return values
     if parameter not in PERTURBABLE_FIELDS:
         raise ValueError(f"parameter must be one of {PERTURBABLE_FIELDS} or 'sky'")
     return [{parameter: float(item.strip())} for item in text.split(",") if item.strip()]
+
+
+def _apply_change(source: SimpleNamespace, change: dict[str, float]) -> tuple[SimpleNamespace, dict]:
+    """Return a perturbed copy of ``source`` plus a change record for output.
+
+    Handles the special sky-offset keys (degrees, relative to the source's
+    own saved ra/dec) as well as ordinary absolute-field overrides.
+    """
+    perturbed = SimpleNamespace(**vars(source))
+    if "ra_offset_deg" in change or "dec_offset_deg" in change:
+        ra_offset_deg = change.get("ra_offset_deg", 0.0)
+        dec_offset_deg = change.get("dec_offset_deg", 0.0)
+        perturbed.ra = source.ra + np.deg2rad(ra_offset_deg)
+        perturbed.dec = source.dec + np.deg2rad(dec_offset_deg)
+        record = {
+            "ra_offset_deg": ra_offset_deg,
+            "dec_offset_deg": dec_offset_deg,
+            "ra": perturbed.ra,
+            "dec": perturbed.dec,
+        }
+        return perturbed, record
+
+    for field, value in change.items():
+        setattr(perturbed, field, value)
+    return perturbed, dict(change)
 
 
 def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) -> dict:
@@ -175,9 +214,7 @@ def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) 
             float(_tspan(sim_dir)))[0])
         records = []
         for change in values:
-            perturbed = SimpleNamespace(**vars(source))
-            for field, value in change.items():
-                setattr(perturbed, field, value)
+            perturbed, record_change = _apply_change(source, change)
             modified = {
                 name: combined[name] - original_signal[name] + population_residuals_eccentric(
                     toas[name], psr, [perturbed], float(_tspan(sim_dir)),
@@ -191,7 +228,7 @@ def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) 
             snr = float(compute_cgw_snr_optimal_population_fast(
                 enterprise_psrs, pta, [perturbed], raw_noise, parsed_noise,
                 float(_tspan(sim_dir)))[0])
-            records.append({"change": change, "cgw_snr": snr, "delta": snr - baseline})
+            records.append({"change": record_change, "cgw_snr_baseline_forecast": snr, "delta": snr - baseline})
         return {
             "simulation": str(sim_dir), "source_index": index,
             "snr_field": snr_field, "saved_snr": saved_snr,
@@ -212,7 +249,6 @@ def _build_pta(compute_population_snr, psrs, noise, residuals, tspan):
     _, pta, enterprise_psrs = compute_population_snr(
         population=None, psrs_clean=psrs, raw_noise_params=noise,
         Tspan=tspan, current_stoas=residuals, return_psrs_pta=True,
-        curn_components=14, rn_components=30,
     )
     return pta, enterprise_psrs
 
@@ -223,7 +259,14 @@ def main() -> None:
     group.add_argument("--runs-root", type=Path)
     group.add_argument("--sim-dir", type=Path)
     parser.add_argument("--parameter", required=True, help="Source field or 'sky'")
-    parser.add_argument("--values", required=True, help="Comma-separated values; sky uses ra,dec;ra,dec")
+    parser.add_argument(
+        "--values", required=True,
+        help=(
+            "Comma-separated values; for 'sky' these are semicolon-separated "
+            "dra_deg,ddec_deg offsets from the source's saved position, e.g. "
+            "'0.5,-0.5;1.0,0.0'"
+        ),
+    )
     parser.add_argument("--output", type=Path, default=Path("cgw_source_perturbations.json"))
     args = parser.parse_args()
     simulations = [args.sim_dir] if args.sim_dir else find_simulations(args.runs_root)
@@ -237,3 +280,19 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+"""
+Sample Use:
+
+python analyze_cgw_source_perturbations.py \
+  --sim-dir runs/2026-07-17_pessimistic/sim342 \
+  --parameter sky \
+  --values '1.0,0.0;0.0,1.0;1.0,1.0'
+
+Each value is a "dra_deg,ddec_deg" offset (in degrees) applied to the
+loudest source's own saved (ra, dec) -- its standard initial sky location,
+read straight from the simulation's summary.pkl.gz. Offsets are converted
+to radians internally before being added, so you no longer need to know or
+pass the absolute coordinates by hand.
+"""

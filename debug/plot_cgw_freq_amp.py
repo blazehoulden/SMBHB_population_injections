@@ -94,20 +94,46 @@ MSUN = 1.98892e30             # kg
 MPC = 3.0856775814913673e22   # m
 
 
-def _h0_to_distance_m(chirp_mass_msun, f_gw_hz, h0):
-    """
-    Invert h0 = 4 G^(5/3)/c^4 * Mc^(5/3) * (pi f)^(2/3) / D_L for D_L
-    (metres), given Mc (Msun) and f (Hz). Vectorised over f_gw_hz / h0.
-    """
-    Mc_kg = np.asarray(chirp_mass_msun) * MSUN
-    numerator = 4.0 * G ** (5.0 / 3.0) / C ** 4
-    numerator *= Mc_kg ** (5.0 / 3.0) * (np.pi * np.asarray(f_gw_hz)) ** (2.0 / 3.0)
-    return numerator / np.asarray(h0)
+from scipy.optimize import brentq
+from SMBHB_pop_synth import compute_strain_amplitude, _Z_GRID, _CHI_GRID
+
+_Z_MIN_SAFE = max(float(_Z_GRID.min()), 1e-6)
+_Z_MAX_SAFE = float(_Z_GRID.max())
 
 
-# ---------------------------------------------------------------------------
-# Grid population builder
-# ---------------------------------------------------------------------------
+def _h0_at_redshift(f_hz, z, chirp_mass_msun, iota):
+    """h0 for a single (f, z) point, using the pipeline's own strain calc."""
+    D_comov = np.interp(z, _Z_GRID, _CHI_GRID)
+    _, h0 = compute_strain_amplitude(
+        np.array([f_hz]), np.array([chirp_mass_msun]),
+        np.array([D_comov]), np.array([z]), np.array([iota]),
+    )
+    return float(h0[0])
+
+
+def _redshift_for_target_h0(f_hz, target_h0, chirp_mass_msun, iota):
+    """Root-find z such that h0(f, z) == target_h0, within the cosmology
+    lookup's valid range. h0 decreases monotonically with z."""
+    def resid(z):
+        return _h0_at_redshift(f_hz, z, chirp_mass_msun, iota) - target_h0
+
+    r_lo, r_hi = resid(_Z_MIN_SAFE), resid(_Z_MAX_SAFE)
+
+    if r_lo < 0:
+        raise ValueError(
+            f"target h0={target_h0:.3e} at f={f_hz:.3e} Hz exceeds the max "
+            f"reachable h0 (at z={_Z_MIN_SAFE:.2e}) for this chirp mass -- "
+            "lower h0_max or increase chirp_mass_msun."
+        )
+    if r_hi > 0:
+        raise ValueError(
+            f"target h0={target_h0:.3e} at f={f_hz:.3e} Hz is below the min "
+            f"reachable h0 (at z={_Z_MAX_SAFE:.2e}) for this chirp mass -- "
+            "raise h0_min or increase chirp_mass_msun."
+        )
+
+    return brentq(resid, _Z_MIN_SAFE, _Z_MAX_SAFE)
+
 
 def _build_freq_h0_grid_population(
     chirp_mass_msun,
@@ -116,20 +142,8 @@ def _build_freq_h0_grid_population(
     ra=None,
     dec=None,
     iota=0.0,
-    z=0.02,
     T_obs_seconds=None,
 ):
-    """
-    Build a PopulationArrays with one binary per (f, h0) grid point, all
-    sharing the same sky position, chirp mass, inclination, and redshift.
-    Returns the population plus the (n_f, n_h0) grid shape for reshaping
-    SNRs later.
-
-    ra/dec default to the most sensitive sky location (see
-    _best_sky_location); iota defaults to 0.0 (face-on), which maximises
-    h0 in the standard convention since both h_plus ~ (1+cos^2 iota)/2
-    and h_cross ~ cos(iota) peak at iota=0.
-    """
     if ra is None or dec is None:
         best_ra, best_dec = _best_sky_location()
         ra = best_ra if ra is None else ra
@@ -139,29 +153,33 @@ def _build_freq_h0_grid_population(
     f_flat = F.ravel()
     h0_flat = H0.ravel()
 
-    D_L_m = _h0_to_distance_m(chirp_mass_msun, f_flat, h0_flat)
-    # small-z comoving-distance correction; drop this if chosen_population
-    # wants D_L directly rather than D_comov
-    D_comov_mpc = D_L_m / (1.0 + z) / MPC
-
     sub_populations = []
-    for f_val, d_val in zip(f_flat, D_comov_mpc):
+    valid_mask = np.ones(len(f_flat), dtype=bool)
+
+    for i, (f_val, h0_target) in enumerate(zip(f_flat, h0_flat)):
+        try:
+            z_val = _redshift_for_target_h0(f_val, h0_target, chirp_mass_msun, iota)
+        except ValueError:
+            valid_mask[i] = False
+            continue
         pop = chosen_population(
             n_binaries=1,
+            T_obs_seconds=T_obs_seconds,
             chirp_mass_msun=chirp_mass_msun,
+            gw_frequency=float(f_val),
+            redshift=float(z_val),
+            inclination=float(iota),
             right_ascension=float(ra),
             declination=float(dec),
             compute_strain=False,
-            T_obs_seconds=T_obs_seconds,
-            gw_freq_hz=float(f_val),                 # <-- verify/rename against your signature
-            luminosity_distance_mpc=float(d_val),     # <-- verify/rename against your signature
-            inclination=float(iota),                  # <-- verify/rename against your signature (iota)
-            redshift=z,
         )
         sub_populations.append(pop)
 
+    if not sub_populations:
+        raise RuntimeError("No grid points had a reachable h0 -- check h0_min/h0_max range.")
+
     population = _concat_population_arrays(sub_populations)
-    return population, F.shape, ra, dec
+    return population, F.shape, ra, dec, valid_mask
 
 
 # ---------------------------------------------------------------------------
@@ -169,40 +187,19 @@ def _build_freq_h0_grid_population(
 # ---------------------------------------------------------------------------
 
 def compute_freq_h0_snr_grid(
-    psrs_clean,
-    raw_noise_params,
-    parsed_noise_params,
-    Tspan,
-    chirp_mass_msun=1e9,
-    ra=None,
-    dec=None,
-    iota=0.0,
-    z=0.02,
-    f_min_hz=1e-9,
-    f_max_hz=1e-7,
-    n_f=40,
-    h0_min=1e-16,
-    h0_max=1e-13,
-    n_h0=40,
+    psrs_clean, raw_noise_params, parsed_noise_params, Tspan,
+    chirp_mass_msun=1e9, ra=None, dec=None, iota=0.0,
+    f_min_hz=1e-9, f_max_hz=1e-7, n_f=40,
+    h0_min=1e-16, h0_max=1e-13, n_h0=40,
 ):
-    """
-    Build the (f, h0) grid, inject it, and compute per-point optimal CGW
-    S/N, returning (freqs_hz, h0_vals, snr_grid, (ra, dec)) with
-    snr_grid.shape == (n_f, n_h0). ra/dec default to the most sensitive
-    sky location and iota defaults to face-on (0.0) -- see
-    _build_freq_h0_grid_population.
-    """
     freqs_hz = np.geomspace(f_min_hz, f_max_hz, n_f)
     h0_vals = np.geomspace(h0_min, h0_max, n_h0)
 
-    population, grid_shape, ra_used, dec_used = _build_freq_h0_grid_population(
+    population, grid_shape, ra_used, dec_used, valid_mask = _build_freq_h0_grid_population(
         chirp_mass_msun=chirp_mass_msun,
         freqs_hz=freqs_hz,
         h0_vals=h0_vals,
-        ra=ra,
-        dec=dec,
-        iota=iota,
-        z=z,
+        ra=ra, dec=dec, iota=iota,
         T_obs_seconds=Tspan,
     )
 
@@ -211,25 +208,22 @@ def compute_freq_h0_snr_grid(
 
     original_stoas = {psr.name: np.copy(psr.stoas[:]) for psr in psrs_clean}
     _, pta, enterprise_psrs = compute_population_snr(
-        population=population,
-        psrs_clean=psrs_clean,
-        current_stoas=original_stoas,
-        raw_noise_params=raw_noise_params,
-        Tspan=Tspan,
-        return_psrs_pta=True,
+        population=population, psrs_clean=psrs_clean,
+        current_stoas=original_stoas, raw_noise_params=raw_noise_params,
+        Tspan=Tspan, return_psrs_pta=True,
     )
 
     binary_rows = _population_arrays_to_binary_rows(population)
     cgw_snrs = compute_cgw_snr_optimal_population(
-        psrs=enterprise_psrs,
-        pta=pta,
-        population=binary_rows,
-        Tspan=Tspan,
-        raw_noise_params=raw_noise_params,
+        psrs=enterprise_psrs, pta=pta, population=binary_rows,
+        Tspan=Tspan, raw_noise_params=raw_noise_params,
         parsed_noise_params=parsed_noise_params,
     )
 
-    snr_grid = np.array(cgw_snrs, dtype=float).reshape(grid_shape)
+    snr_flat = np.full(grid_shape[0] * grid_shape[1], np.nan)
+    snr_flat[valid_mask] = np.array(cgw_snrs, dtype=float)
+    snr_grid = snr_flat.reshape(grid_shape)
+
     return freqs_hz, h0_vals, snr_grid, (ra_used, dec_used)
 
 

@@ -171,7 +171,7 @@ from curve_io import save_sky_snr_data
 
 # NICER VERSION OF THE PLOTTING AND TESTING WITH TILING
 def test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params, Tspan,
-                               save_data_path=None, make_plot=True):
+                               save_data_path=None, make_plot=True, gw_freq_hz=None):
     """
     Build a dense sky-grid test population as PopulationArrays, inject it,
     and compute per-source CGW optimal SNRs for tiled skymap rendering.
@@ -205,6 +205,7 @@ def test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params,
             declination=float(dec),
             compute_strain=False,
             T_obs_seconds=Tspan,
+            gw_frequency=gw_freq_hz,
         )
         sub_populations.append(pop)
     population = _concat_population_arrays(sub_populations)
@@ -268,3 +269,67 @@ def test_sky_CGW_SNR_location(psrs_clean, raw_noise_params, parsed_noise_params,
 # ---------------------------------------------------------------------------
 
 from sky_plot import plot_cgw_analysis, plot_skymap, _style_skyax, _wrap_ra
+
+def test_sky_CGW_SNR_location_multi_freq(
+    psrs_clean, raw_noise_params, parsed_noise_params, Tspan,
+    freqs_hz, save_data_dir=None, make_plot=True,
+):
+    """
+    Run test_sky_CGW_SNR_location once per frequency in freqs_hz, so you
+    can compare sky-sensitivity patterns across frequency.
+
+    freqs_hz : iterable of GW frequencies in Hz, e.g. [10e-9, 31.6e-9, 100e-9]
+        for 10/31.6/100 nHz.
+    save_data_dir : if given, each run's data is saved to
+        {save_data_dir}/sky_survey_{label} via save_sky_snr_data().
+    make_plot : if True, each run also saves a figure to
+        figures/cgw_snr_sky_map_{label}.pdf
+    """
+    results = {}
+    for f in freqs_hz:
+        label = _freq_label(f)  # e.g. "10nHz"
+        print(f"\n=== Running sky-SNR grid at f = {label} ===")
+
+        population, cgw_snrs_optimal = test_sky_CGW_SNR_location(
+            psrs_clean=psrs_clean,
+            raw_noise_params=raw_noise_params,
+            parsed_noise_params=parsed_noise_params,
+            Tspan=Tspan,
+            save_data_path=(
+                os.path.join(save_data_dir, f"sky_survey_{label}")
+                if save_data_dir else None
+            ),
+            make_plot=False,  # we render below with a freq-specific filename
+            gw_freq_hz=f,     # <-- placeholder, see note above
+        )
+
+        if make_plot:
+            binary_rows = _population_arrays_to_binary_rows(population)
+            plot_cgw_analysis(
+                binaries=binary_rows,
+                snrs=cgw_snrs_optimal,
+                psrs=psrs_clean,  # only needed if plot_cgw_analysis uses psr positions
+                n_ra=72,
+                n_dec=36,
+                save_path=f"figures/cgw_snr_sky_map_{label}.pdf",
+            )
+
+        results[f] = (population, cgw_snrs_optimal)
+
+    return results
+
+
+def _freq_label(f_hz):
+    """Turn a frequency in Hz into a filename-safe label like '10nHz'."""
+    if f_hz >= 1e-9 and f_hz < 1e-6:
+        val = f_hz * 1e9
+        unit = "nHz"
+    elif f_hz >= 1e-6 and f_hz < 1e-3:
+        val = f_hz * 1e6
+        unit = "uHz"
+    else:
+        val = f_hz
+        unit = "Hz"
+    # trim to a clean-looking number, e.g. 10.0 -> "10", 31.6 -> "31p6"
+    s = f"{val:.3g}".replace(".", "p")
+    return f"{s}{unit}"
