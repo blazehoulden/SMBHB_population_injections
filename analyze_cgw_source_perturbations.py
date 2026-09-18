@@ -51,18 +51,22 @@ def find_simulations(runs_root: Path) -> list[Path]:
     return sorted(p.parent for p in runs_root.rglob("summary.pkl.gz"))
 
 
-def select_loudest(summary: dict) -> tuple[int, str, float]:
+def select_loudest(summary: dict, requested_field: str | None = None) -> tuple[int, str, float]:
     arrays = summary["arrays"]
-    candidates = [
-        name for name in summary.get("meta", {}).get("snr_fields", [])
-        if name in arrays and name.startswith("cgw_snr_baseline_forecast")
-    ]
-    if "cgw_snr_baseline_forecast" in arrays:
-        field = "cgw_snr_baseline_forecast"
-    elif candidates:
-        field = candidates[0]
+    if requested_field is not None:
+        field = requested_field
+    elif "cgw_snr" in arrays:
+        field = "cgw_snr"
     else:
-        raise KeyError("summary contains no cgw_snr_baseline_forecast array")
+        candidates = [
+            name for name in summary.get("meta", {}).get("snr_fields", [])
+            if name in arrays and name.startswith("cgw_snr")
+        ]
+        if not candidates:
+            raise KeyError("summary contains no cgw_snr array")
+        field = candidates[0]
+    if field not in arrays:
+        raise KeyError(f"summary contains no {field!r} array")
     values = np.asarray(arrays[field], dtype=float)
     if values.size == 0 or not np.isfinite(values).any():
         raise ValueError(f"SNR array {field!r} is empty or non-finite")
@@ -70,10 +74,15 @@ def select_loudest(summary: dict) -> tuple[int, str, float]:
     return index, field, float(values[index])
 
 
-def select_loudest_sim(simulations: Iterable[Path]) -> Path:
+def select_loudest_sim(
+    simulations: Iterable[Path],
+    requested_field: str | None = None,
+) -> Path:
     ranked = []
     for sim_dir in simulations:
-        index, field, snr = select_loudest(load_summary(sim_dir / "summary.pkl.gz"))
+        index, field, snr = select_loudest(
+            load_summary(sim_dir / "summary.pkl.gz"), requested_field
+        )
         ranked.append((snr, sim_dir, index, field))
     return max(ranked, key=lambda item: item[0])[1]
 
@@ -196,7 +205,12 @@ def _apply_change(source: SimpleNamespace, change: dict[str, float]) -> tuple[Si
     return perturbed, dict(change)
 
 
-def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) -> dict:
+def run_analysis(
+    sim_dir: Path,
+    parameter: str,
+    values: list[dict[str, float]],
+    requested_field: str | None = None,
+) -> dict:
     # Scientific imports are delayed so --help and summary discovery remain usable
     # without the HPC-only enterprise/libstempo stack installed.
     import config
@@ -211,7 +225,7 @@ def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) 
     from signal_injection import population_residuals
 
     summary = load_summary(sim_dir / "summary.pkl.gz")
-    index, snr_field, saved_snr = select_loudest(summary)
+    index, snr_field, saved_snr = select_loudest(summary, requested_field)
     scenario = scenario_from_snr_field(snr_field)
     if scenario not in SCENARIOS:
         raise KeyError(
@@ -220,7 +234,13 @@ def run_analysis(sim_dir: Path, parameter: str, values: list[dict[str, float]]) 
         )
     source = make_source(summary, index)
     psrs = load_pulsars(verbose=True, scenario=scenario, scenarios=SCENARIOS)
-    psrs_clean, raw_noise, tspan = filter_pulsars_15yr(psrs, verbose=True)
+    psrs_clean, raw_noise, filtered_tspan = filter_pulsars_15yr(
+        psrs, verbose=True
+    )
+    # Stage 2 uses the run's saved reference Tspan when building the PTA and
+    # calculating cgw_snr. Reuse it for the baseline scenario rather than the
+    # data-derived span returned by filter_pulsars_15yr().
+    tspan = _tspan(sim_dir) if scenario == "baseline" else filtered_tspan
     parsed_noise = parse_pulsar_parameters(config.NOISEFILE)
     names = [psr.name for psr in psrs_clean]
     combined, temporary = load_combined_residuals(sim_dir, names, scenario)
@@ -290,6 +310,10 @@ def main() -> None:
     group.add_argument("--sim-dir", type=Path)
     parser.add_argument("--parameter", required=True, help="Source field or 'sky'")
     parser.add_argument(
+        "--snr-field",
+        help="S/N array to maximize (default: cgw_snr, or first available cgw_snr field)",
+    )
+    parser.add_argument(
         "--values", required=True,
         help=(
             "Comma-separated values; for 'sky' these are semicolon-separated "
@@ -302,8 +326,17 @@ def main() -> None:
     simulations = [args.sim_dir] if args.sim_dir else find_simulations(args.runs_root)
     if not simulations:
         raise FileNotFoundError("No simulation directories containing summary.pkl.gz were found")
-    selected = simulations[0] if args.sim_dir else select_loudest_sim(simulations)
-    result = run_analysis(selected, args.parameter, parse_values(args.parameter, args.values))
+    selected = (
+        simulations[0]
+        if args.sim_dir
+        else select_loudest_sim(simulations, args.snr_field)
+    )
+    result = run_analysis(
+        selected,
+        args.parameter,
+        parse_values(args.parameter, args.values),
+        args.snr_field,
+    )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(f"Wrote {args.output}")
 
