@@ -587,7 +587,7 @@ def r_k(t, psr, binary):
     f, ra, dec = binary.f, binary.ra, binary.dec
     psi, phi0, iota, h0 = binary.psi, binary.phi0, binary.iota, binary.h0
 
-    psr_ra, psr_dec = psr._raj, psr._decj
+    psr_ra, psr_dec = _get_psr_radec(psr)
     Fp, Fx = antenna_response(psr_ra, psr_dec, ra, dec, psi)
 
     t_rel = t - t[0]
