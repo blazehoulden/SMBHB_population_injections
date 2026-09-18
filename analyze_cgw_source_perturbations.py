@@ -36,6 +36,7 @@ import numpy as np
 
 SOURCE_FIELDS = ("f", "ecc", "phi0", "iota", "h0", "ra", "dec", "psi")
 PERTURBABLE_FIELDS = ("f", "ecc", "phi0", "iota", "h0", "ra", "dec", "psi")
+SOURCE_DEFAULTS = {"ecc": 0.0}
 
 
 def load_summary(path: Path) -> dict:
@@ -113,10 +114,19 @@ def load_combined_residuals(sim_dir: Path, names: Iterable[str]) -> tuple[dict[s
 
 def make_source(summary: dict, index: int) -> SimpleNamespace:
     arrays = summary["arrays"]
-    missing = [field for field in SOURCE_FIELDS if field not in arrays]
+    missing = [
+        field for field in SOURCE_FIELDS
+        if field not in arrays and field not in SOURCE_DEFAULTS
+    ]
     if missing:
         raise KeyError(f"summary is missing source fields: {', '.join(missing)}")
-    return SimpleNamespace(**{field: float(np.asarray(arrays[field])[index]) for field in SOURCE_FIELDS})
+    source = {}
+    for field in SOURCE_FIELDS:
+        if field in arrays:
+            source[field] = float(np.asarray(arrays[field])[index])
+        else:
+            source[field] = SOURCE_DEFAULTS[field]
+    return SimpleNamespace(**source)
 
 
 def parse_values(parameter: str, text: str) -> list[dict[str, float]]:
