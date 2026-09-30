@@ -143,8 +143,10 @@ FIELD_DTYPES: Dict[str, type] = {
     "D_comov":  np.float32,
     "z":        np.float32,
     "h0":       np.float32,
-    "ra":       np.float16,
-    "dec":      np.float16,
+    # Sky coordinates are used in a potentially near-singular antenna
+    # denominator.  Preserve them at full precision for reproducibility.
+    "ra":       np.float64,
+    "dec":      np.float64,
     "psi":      np.float16,
     "iota":     np.float16,
     "phi0":     np.float16,

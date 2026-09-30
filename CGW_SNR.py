@@ -2,7 +2,12 @@ import numpy as np
 from enterprise_extensions.frequentist.Fe_statistic import innerProduct_rr
 from enterprise_extensions.deterministic import cw_delay
 from optimal_SNR_calc import measured_strain_all_binaries_all_pulsars
-from signal_injection import population_residuals, get_base_name, population_residuals_eccentric
+from signal_injection import (
+    population_residuals,
+    get_base_name,
+    population_residuals_eccentric,
+    antenna_response,
+)
 from scipy.linalg import cho_factor, cho_solve
 import time
 def compute_cgw_signal_enterprise(psr, binary):
@@ -80,6 +85,9 @@ def compute_cgw_snr_optimal_population_fast(
     regularisation=1e-10,
     power_tol=1e-4,
     n_max_cap=100,
+    debug=True,
+    debug_denominator_threshold=1e-3,
+    debug_rho_sq_threshold=1.0,
 ):
 
     import time
@@ -204,6 +212,7 @@ def compute_cgw_snr_optimal_population_fast(
         rho_sq     = 0.0
         per_pulsar = {} if return_breakdown else None
         n_failed   = 0
+        source_debugged = False
 
         for (psr_name, psr_obj, toas, psr_noise_params,
              Nvec, T, cf) in precomputed:
@@ -220,10 +229,96 @@ def compute_cgw_snr_optimal_population_fast(
                 print(f"  Warning: population_residuals failed for {psr_name}: {e}")
                 continue
 
+            psr_ra = float(psr_obj._raj)
+            psr_dec = float(psr_obj._decj)
+            src_ra = float(binary.ra)
+            src_dec = float(binary.dec)
+            psi = float(binary.psi)
+            fp, fx = antenna_response(psr_ra, psr_dec, src_ra, src_dec, psi)
+            source_direction = np.array([
+                -np.cos(src_dec) * np.cos(src_ra),
+                -np.cos(src_dec) * np.sin(src_ra),
+                -np.sin(src_dec),
+            ])
+            pulsar_direction = np.array([
+                np.cos(psr_dec) * np.cos(psr_ra),
+                np.cos(psr_dec) * np.sin(psr_ra),
+                np.sin(psr_dec),
+            ])
+            m_hat = np.array([np.sin(src_ra), -np.cos(src_ra), 0.0])
+            n_hat = np.array([
+                -np.sin(src_dec) * np.cos(src_ra),
+                -np.sin(src_dec) * np.sin(src_ra),
+                np.cos(src_dec),
+            ])
+            m_rot = np.cos(psi) * m_hat + np.sin(psi) * n_hat
+            n_rot = -np.sin(psi) * m_hat + np.cos(psi) * n_hat
+            p_m = float(np.dot(pulsar_direction, m_rot))
+            p_n = float(np.dot(pulsar_direction, n_rot))
+            denominator = float(1.0 + np.dot(pulsar_direction, source_direction))
+            separation = float(np.arccos(np.clip(
+                np.sin(psr_dec) * np.sin(src_dec)
+                + np.cos(psr_dec) * np.cos(src_dec)
+                * np.cos(psr_ra - src_ra),
+                -1.0,
+                1.0,
+            )))
             contrib = float(np.real(
                 fast_inner_product_rr_exact(s_a, s_a, Nvec, T, cf)
             ))
             rho_sq += contrib
+
+            if debug and (
+                abs(denominator) <= debug_denominator_threshold
+                or contrib >= debug_rho_sq_threshold
+            ):
+                if not source_debugged:
+                    print("\n" + "=" * 78)
+                    print(f"CGW debug source {i}")
+                    for field in ("f", "Mc", "Mtot", "D_comov", "z", "h0",
+                                  "ra", "dec", "psi", "iota", "phi0", "ecc"):
+                        if hasattr(binary, field):
+                            print(f"  source.{field:<8} = "
+                                  f"{getattr(binary, field)!r} "
+                                  f"(float64={float(getattr(binary, field)):.17g})")
+                    print("=" * 78)
+                    source_debugged = True
+                print(f"\n[CGW debug] source={i} pulsar={psr_name}")
+                print(f"  pulsar type       = {type(psr_obj).__name__}")
+                print(f"  pulsar RA/Dec     = {psr_ra:.17g}, {psr_dec:.17g} rad")
+                print(f"  pulsar RA/Dec     = {np.degrees(psr_ra):.12f}, "
+                      f"{np.degrees(psr_dec):.12f} deg")
+                print(f"  pulsar n_toa      = {len(toas)}")
+                print(f"  pulsar TOA range  = {np.min(toas):.17g} .. "
+                      f"{np.max(toas):.17g} s")
+                if hasattr(psr_obj, "toaerrs"):
+                    toaerrs = np.asarray(psr_obj.toaerrs, dtype=float)
+                    print(f"  TOA errors        = min {toaerrs.min():.6e}, "
+                          f"median {np.median(toaerrs):.6e}, "
+                          f"max {toaerrs.max():.6e} s")
+                print(f"  noise parameters  = {psr_noise_params}")
+                print(f"  Nvec              = min {np.min(Nvec):.6e}, "
+                      f"median {np.median(Nvec):.6e}, "
+                      f"max {np.max(Nvec):.6e}")
+                print(f"  T shape           = {np.shape(T)}")
+                print(f"  source separation = {np.degrees(separation):.12f} deg")
+                print(f"  antenna denom     = {denominator:.16e}")
+                print(f"  p·m_rot, p·n_rot = {p_m:.16e}, {p_n:.16e}")
+                print(f"  tensor numerators = F+ {0.5 * (p_m**2 - p_n**2):.16e}, "
+                      f"Fx {p_m * p_n:.16e}")
+                print(f"  F_plus/F_cross    = {float(fp):.16e}, {float(fx):.16e}")
+                residual_norm = float(binary.h0) / (2.0 * np.pi * float(binary.f))
+                print(f"  h0/(2πf)         = {residual_norm:.16e} s")
+                print(f"  h+ coefficient    = "
+                      f"{residual_norm * (1.0 + np.cos(float(binary.iota))**2):.16e} s")
+                print(f"  hx coefficient    = "
+                      f"{residual_norm * (-2.0 * np.cos(float(binary.iota))):.16e} s")
+                print(f"  residual stats    = min {np.min(s_a):.6e}, "
+                      f"rms {np.sqrt(np.mean(s_a**2)):.6e}, "
+                      f"max {np.max(s_a):.6e} s")
+                print(f"  inner product     = {contrib:.16e}")
+                print(f"  cumulative rho^2  = {rho_sq:.16e}")
+
             if return_breakdown:
                 base_name = get_base_name(psr_name)
                 per_pulsar[base_name] = per_pulsar.get(base_name, 0.0) + max(contrib, 0.0)
@@ -236,6 +331,9 @@ def compute_cgw_snr_optimal_population_fast(
             )
 
         results[i] = np.sqrt(max(rho_sq, 0.0))
+        if debug and source_debugged:
+            print(f"[CGW debug] source={i} final rho^2={rho_sq:.16e}, "
+                  f"rho={results[i]:.16e}")
         if return_breakdown:
             breakdowns.append(per_pulsar)
 

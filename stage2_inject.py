@@ -139,8 +139,8 @@ if not _STAGE1_SETUP_IMPORTED:
         "D_comov":  np.float32,
         "z":        np.float32,
         "h0":       np.float32,
-        "ra":       np.float16,
-        "dec":      np.float16,
+        "ra":       np.float64,
+        "dec":       np.float64,
         "psi":      np.float16,
         "iota":     np.float16,
         "phi0":     np.float16,
@@ -836,6 +836,7 @@ def _compute_cgw_snrs_baseline(
     parsed_noise_params: dict,
     Tspan_seconds:       float,
     meta_dir:            str,
+    debug_cgw:           bool = True,
 ) -> Tuple[List[Tuple[int, int, int, float]], np.ndarray]:
     """
     Two-pass CGW SNR for the baseline PTA over active shards.
@@ -857,6 +858,7 @@ def _compute_cgw_snrs_baseline(
         Tspan=Tspan_seconds,
         profile=True,
         return_breakdown=True,
+        debug=debug_cgw,
     )
     del top_binaries; gc.collect()
 
@@ -907,6 +909,7 @@ def _compute_cgw_snrs_scenario(
     baseline_candidates:  List[Tuple[int, int, int, float]],
     baseline_snrs:        np.ndarray,
     n_candidates:         int = N_SCENARIO_CGW_CANDIDATES,
+    debug_cgw:            bool = True,
 ) -> None:
     """
     Lightweight CGW pass for a synthetic scenario — uses top-N by baseline SNR.
@@ -933,6 +936,7 @@ def _compute_cgw_snrs_scenario(
         Tspan=Tspan_seconds,
         profile=True,
         return_breakdown=False,
+        debug=debug_cgw,
     )
     del top_binaries; gc.collect()
 
@@ -1249,6 +1253,7 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
             parsed_noise_params=parsed_noise_params,
             Tspan_seconds=Tspan_seconds,
             meta_dir=meta_dir,
+            debug_cgw=args.debug_cgw,
         )
         print('✓ Baseline CGW complete')
         mem.checkpoint('after baseline CGW SNR computation')
@@ -1409,6 +1414,7 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
             baseline_candidates=baseline_candidates,
             baseline_snrs=baseline_snrs,
             n_candidates=N_SCENARIO_CGW_CANDIDATES,
+            debug_cgw=args.debug_cgw,
         )
         mem.checkpoint('after scenario CGW SNR computation')
     elif args.cgw:
@@ -1503,6 +1509,10 @@ def process_sim(
         if args.track_memory:
             argv.append('--track-memory')
             argv += ['--memory-sample-interval', str(args.memory_sample_interval)]
+        if args.debug_cgw:
+            argv.append('--debug-cgw')
+        else:
+            argv.append('--no-debug-cgw')
         return argv
 
     try:
@@ -1772,6 +1782,22 @@ def parse_args():
     p.add_argument('--keep-intermediate',    action='store_true', default=False,
                    help='Skip the final cleanup step and keep populations/, '
                         'residuals*/, etc. alongside summary.pkl.gz and metadata/.')
+    p.add_argument(
+        '--debug-cgw',
+        dest='debug_cgw',
+        action='store_true',
+        default=True,
+        help='Print detailed CGW source/pulsar geometry, residual, noise, and '
+             'per-pulsar inner-product diagnostics for near-singular or large '
+             'contributions. Enabled by default while investigating high-S/N '
+             'sources.',
+    )
+    p.add_argument(
+        '--no-debug-cgw',
+        dest='debug_cgw',
+        action='store_false',
+        help='Disable detailed CGW diagnostics.',
+    )
     p.add_argument(
         '--track-memory',
         action='store_true',
