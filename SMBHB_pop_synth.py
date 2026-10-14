@@ -616,18 +616,18 @@ def sample_eccentricities(n_binaries: int,
     if normalize_components_separately:
         # Renormalize each piece over [0, e_max] so f_frac is an exact
         # mixing weight between two proper densities.
-        norm_low  = np.trapz(p_low,  e_grid)
-        norm_high = np.trapz(p_high, e_grid)
+        norm_low  = np.trapezoid(p_low,  e_grid)
+        norm_high = np.trapezoid(p_high, e_grid)
         p_low  = p_low  / norm_low
         p_high = p_high / norm_high
         p_mix  = (1.0 - f_frac) * p_low + f_frac * p_high
         # p_mix now integrates to ~1 already, but renormalize once more
         # to absorb residual truncation error at e_max.
-        p_mix /= np.trapz(p_mix, e_grid)
+        p_mix /= np.trapezoid(p_mix, e_grid)
     else:
         # Use the formula exactly as written, normalize only the combined result.
         p_mix = (1.0 - f_frac) * p_low + f_frac * p_high
-        p_mix /= np.trapz(p_mix, e_grid)
+        p_mix /= np.trapezoid(p_mix, e_grid)
 
     # Build CDF via cumulative trapezoidal integration
     cdf = np.zeros(n_grid)
