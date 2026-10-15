@@ -6,12 +6,15 @@ import gc
 import hashlib
 import tempfile
 from copy import deepcopy
+from pathlib import Path
 from enterprise.pulsar import Pulsar
 import sys
 from collections import defaultdict
 from config import NANOGRAV_PULSARS, PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, PULSAR_CACHE, NOISEFILE
 import libstempo as T
 from signal_injection import get_base_name
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def tim_has_toas(tim_path):
@@ -1731,6 +1734,7 @@ def load_single_pulsar(
     par_dir = None,
     tim_dir = None,
     skip_pulsars = None,
+    population_configuration = None,
 ):
     """
     Load libstempo pulsars for a given .par file.
@@ -1754,6 +1758,11 @@ def load_single_pulsar(
         )
 
     cfg = _scenarios[scenario]
+    resolved_population_configuration = (
+        _resolve_population_configuration(population_configuration)
+        if cfg.get("cgw_weighted_cadence", False)
+        else None
+    )
     best_only = cfg.get("best_only", True)
     best_psrs = cfg.get("best_psrs", BEST_PSRS)
     per_pulsar_cfg = cfg.get("per_pulsar", {})
@@ -1792,7 +1801,11 @@ def load_single_pulsar(
 
     cadence_factor, toaerr_factor = _resolve_pulsar_scenario_params(
         cfg, psr_name, best_only, best_psrs,
-        par_dir=_par_dir, tim_dir=_tim_dir, scenario_label=scenario)
+        par_dir=_par_dir,
+        tim_dir=_tim_dir,
+        scenario_label=scenario,
+        population_configuration=resolved_population_configuration,
+    )
     modified = _pulsar_needs_scenario_tim(cfg, cadence_factor, toaerr_factor)
 
 
@@ -1919,59 +1932,6 @@ def load_single_pulsar(
     return loaded
 
 
-def _resolve_global_extension_days(
-    cfg,
-    tim_dir,
-    par_dir,
-    selected_names=None,
-    skip_pulsars=None,
-):
-    """
-    Resolve the forecast extension duration.
-
-    Returns:
-      - one global duration in days when extension_to_longest_span=True;
-      - one fixed duration in days when extension_years is used;
-      - None when extension_fraction should remain per-pulsar.
-    """
-    extension_to_longest_span = bool(
-        cfg.get("extension_to_longest_span", False)
-    )
-    extension_years = cfg.get("extension_years", None)
-    extension_fraction = float(
-        cfg.get("extension_fraction", 0.0)
-    )
-
-    if extension_to_longest_span:
-        return _longest_real_pulsar_span_days(
-            tim_dir=tim_dir,
-            par_dir=par_dir,
-            selected_names=selected_names,
-            skip_pulsars=skip_pulsars,
-        )
-
-    if extension_years is not None:
-        extension_years = float(extension_years)
-
-        if extension_years < 0.0:
-            raise ValueError(
-                "extension_years must be non-negative, got "
-                f"{extension_years}"
-            )
-
-        return extension_years * 365.25
-
-    if extension_fraction < 0.0:
-        raise ValueError(
-            "extension_fraction must be non-negative, got "
-            f"{extension_fraction}"
-        )
-
-    # None means that _write_scenario_tim() will resolve the extension
-    # separately from each pulsar's real observing span.
-    return None
-
-
 def load_pulsars(
     verbose=True,
     scenario="baseline",
@@ -2014,14 +1974,7 @@ def load_pulsars(
     )
     _cache_path = cache_path or PULSAR_CACHE
     _scenarios = scenarios or SCENARIOS
-    
-    resolved_population_configuration = (
-        _resolve_population_configuration(
-            population_configuration
-        )
-        if cfg.get("cgw_weighted_cadence", False)
-        else None
-    )
+
     if scenario not in _scenarios:
         raise ValueError(
             f"Unknown scenario '{scenario}'. "
@@ -2029,6 +1982,11 @@ def load_pulsars(
         )
 
     cfg = _scenarios[scenario]
+    resolved_population_configuration = (
+        _resolve_population_configuration(population_configuration)
+        if cfg.get("cgw_weighted_cadence", False)
+        else None
+    )
 
     default_cadence = cfg.get("cadence_factor", 1)
     default_toaerr = cfg.get("toaerr_factor", 1.0)

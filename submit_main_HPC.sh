@@ -34,8 +34,10 @@
 #
 # Synthetic PTA scenarios
 # ───────────────────────
-#   --synthetic-ptas       enable the three default scenarios:
-#                            4x_cadence | 2x_precision | 4x_cad_2x_prec
+#   --synthetic-ptas       enable the default forecast scenarios. The
+#                          CGW-weighted cadence scenario is opt-in via
+#                          --synthetic-pta-config because it requires
+#                          config/cgw_cadence_weights/*.json.
 #   --synthetic-pta-config JSON string overriding default scenario definitions
 #                          e.g. '{"my_scenario": {"cadence_factor": 3,
 #                                                  "toaerr_factor": 0.5,
@@ -101,7 +103,7 @@ echo "=========================================="
 echo ""
 
 ENV_SETUP="module purge; unset PYTHONPATH; module load mamba; mamba activate smbhb312;"
-REPO_DIR="/fred/oz005/users/bhoulden/SMBHB_population_injections"
+REPO_DIR="${SMBHB_REPO_DIR:-/fred/oz005/users/bhoulden/SMBHB_population_injections}"
 
 # =============================================================================
 # DEFAULTS
@@ -379,6 +381,10 @@ log ""
 log "  # Custom scenario via JSON:"
 log "  bash submit_main_HPC.sh --cgw --synthetic-ptas --n-sub-chunks 5 \\"
 log "    --synthetic-pta-config '{\"3x_cadence\": {\"cadence_factor\": 3, \"toaerr_factor\": 1.0, \"best_only\": true}}'"
+log ""
+log "  # Configuration-weighted cadence (requires calibrated weights):"
+log "  bash submit_main_HPC.sh --cgw --synthetic-ptas \\"
+log "    --synthetic-pta-config '{\"cgw_weighted_cadence\": {\"cgw_weighted_cadence\": true, \"min_cadence_days\": 90.0, \"best_only\": false, \"extension_to_longest_span\": true}}'"
 log ""
 log "Monitor:"
 log "  squeue -u \$USER"
