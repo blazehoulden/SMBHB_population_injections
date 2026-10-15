@@ -1048,8 +1048,12 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     snr_low, snr_high = args.snr_range
 
     print('\n📡 [baseline] Loading pulsars...')
-    psrs_unfiltered = load_pulsars(verbose=True, scenario='baseline',
-                                   scenarios=combined_scenarios)
+    psrs_unfiltered = load_pulsars(
+        verbose=True,
+        scenario='baseline',
+        scenarios=combined_scenarios,
+        population_configuration=args.config,
+    )
     with suppress_enterprise_warnings():
         psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
             psrs_unfiltered, verbose=True)
@@ -1341,8 +1345,12 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
  
     print(f'\n📡 [{scenario_label}] Loading pulsars...')
-    psrs_unfiltered = load_pulsars(verbose=True, scenario=scenario_label,
-                                   scenarios=combined_scenarios)
+    psrs_unfiltered = load_pulsars(
+        verbose=True,
+        scenario=scenario_label,
+        scenarios=combined_scenarios,
+        population_configuration=args.config,
+    )
     with suppress_enterprise_warnings():
         psrs_clean, raw_noise_params, Tspan_seconds = filter_pulsars_15yr(
             psrs_unfiltered, verbose=False)
@@ -1431,7 +1439,11 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
                'sgwb_snr': snr_sgwb_scenario},
     )
 
-def _determine_reference_tspan(syn_scenarios, combined_scenarios) -> Optional[float]:
+def _determine_reference_tspan(
+    syn_scenarios,
+    combined_scenarios,
+    population_configuration,
+) -> Optional[float]:
     """
     Pick the Tspan (seconds) to use as the shared Fourier-basis reference for
     red/DM/chromatic noise across baseline + every forecast scenario. Must be
@@ -1444,7 +1456,10 @@ def _determine_reference_tspan(syn_scenarios, combined_scenarios) -> Optional[fl
     longest_tspan, longest_label = -1.0, None
     for label in syn_scenarios:
         psrs_unfiltered = load_pulsars(verbose=False, scenario=label,
-                                       scenarios=combined_scenarios)
+                                       scenarios=combined_scenarios,
+                                       population_configuration=(
+                                           population_configuration
+                                       ))
         with suppress_enterprise_warnings():
             _, _, tspan = filter_pulsars_15yr(psrs_unfiltered, verbose=False)
         del psrs_unfiltered; gc.collect()
@@ -1475,7 +1490,11 @@ def process_sim(
     print(f'  Each phase runs in its own subprocess (clean C heap)')
     print(f'{"="*60}')
 
-    reference_tspan_seconds = _determine_reference_tspan(syn_scenarios, combined_scenarios)
+    reference_tspan_seconds = _determine_reference_tspan(
+        syn_scenarios,
+        combined_scenarios,
+        args.config,
+    )
 
     config_path = os.path.join(sim_out_dir, 'metadata', 'config.json')
     if not os.path.isfile(config_path):
@@ -1854,8 +1873,10 @@ def main():
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
         else:
-            syn_scenarios = {k: v for k, v in DEFAULT_SCENARIOS.items()
-                             if k != 'baseline'}
+            syn_scenarios = {
+                k: v for k, v in DEFAULT_SCENARIOS.items()
+                if k not in ('baseline', 'cgw_weighted_cadence')
+            }
     else:
         syn_scenarios = {}
 

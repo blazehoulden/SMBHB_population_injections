@@ -943,7 +943,7 @@ def main():
         else:
             syn_scenarios = {
                 k: v for k, v in DEFAULT_SCENARIOS.items()
-                if k != 'baseline'
+                if k not in ('baseline', 'cgw_weighted_cadence')
             }
         print(f'  Synthetic scenarios: {list(syn_scenarios.keys())}')
     else:
@@ -970,7 +970,7 @@ def main():
         verbose=True,
         scenario='baseline',
         scenarios=combined_scenarios,
-        population_config=args.config,
+        population_configuration=args.config,
     )
     with suppress_enterprise_warnings():
         psrs_baseline, _, Tspan_seconds = filter_pulsars_15yr(
@@ -1049,6 +1049,7 @@ def main():
                 verbose=False,
                 scenario=scenario_label,
                 scenarios=combined_scenarios,
+                population_configuration=args.config,
             )
             for psr in psr_variants:
                 with suppress_enterprise_warnings():
