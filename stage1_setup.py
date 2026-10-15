@@ -147,10 +147,10 @@ FIELD_DTYPES: Dict[str, type] = {
     # denominator.  Preserve them at full precision for reproducibility.
     "ra":       np.float64,
     "dec":      np.float64,
-    "psi":      np.float16,
-    "iota":     np.float16,
-    "phi0":     np.float16,
-    "cgw_snr":  np.float16,
+    "psi":      np.float32,
+    "iota":     np.float32,
+    "phi0":     np.float32,
+    "cgw_snr":  np.float32,
 }
 SCALAR_FIELDS = list(FIELD_DTYPES.keys())
 N_PRE_FILTER_PER_CHUNK = 12_500
@@ -670,8 +670,8 @@ def parse_args():
     p = argparse.ArgumentParser(description='Stage 1: population synthesis (memory-efficient sub-chunk edition)')
     p.add_argument('--config', '-c', default='optimistic',
                    choices=list(config.POPULATION_CONFIGS.keys()))
-    p.add_argument('--target-snr',     type=float, default=4.0)
-    p.add_argument('--snr-range',      nargs=2, type=float, default=[3.5, 4.0])
+    p.add_argument('--target-snr',     type=float, default=3.2)
+    p.add_argument('--snr-range',      nargs=2, type=float, default=[3.0, 3.4])
     p.add_argument('--output-dir',     type=str, required=True)
     p.add_argument('--chunk-size',     type=int, default=1_000_000,
                    help='Total binaries per Slurm task. '
@@ -689,7 +689,7 @@ def parse_args():
     p.add_argument('--task-id',        type=int, default=None,
                    help='Flat array task ID (overrides $SLURM_ARRAY_TASK_ID).')
     p.add_argument('--sim-id',         type=int, required=True)
-    p.add_argument('--noise-seed-base', type=int, default=None)
+    p.add_argument('--noise-seed-base', type=int, default=26072001)
     p.add_argument('--n-sims',         type=int, default=1,
                    help='Total number of simulations (for seeding purposes).')
     p.add_argument(
@@ -970,6 +970,7 @@ def main():
         verbose=True,
         scenario='baseline',
         scenarios=combined_scenarios,
+        population_config=args.config,
     )
     with suppress_enterprise_warnings():
         psrs_baseline, _, Tspan_seconds = filter_pulsars_15yr(

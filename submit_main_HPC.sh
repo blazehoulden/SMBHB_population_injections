@@ -35,7 +35,7 @@
 # Synthetic PTA scenarios
 # ───────────────────────
 #   --synthetic-ptas       enable the three default scenarios:
-#                            5x_cadence | 4x_precision | 5x_cad_4x_prec
+#                            4x_cadence | 2x_precision | 4x_cad_2x_prec
 #   --synthetic-pta-config JSON string overriding default scenario definitions
 #                          e.g. '{"my_scenario": {"cadence_factor": 3,
 #                                                  "toaerr_factor": 0.5,
@@ -47,10 +47,10 @@
 #     sim000/
 #       populations/   subpop_000_000.pkl.gz  subpop_000_001.pkl.gz  ...
 #                      subpop_{chunk:03d}_{sub:03d}.pkl.gz
-#       stoas/         chunk_0000_0000.npz  chunk_0000_0000_5x_cadence.npz  ...
+#       stoas/         chunk_0000_0000.npz  chunk_0000_0000_4x_cadence.npz  ...
 #                      chunk_{chunk:04d}_{sub:04d}[_<scenario>].npz
 #       residuals/     noise/ population/ combined/  (baseline)
-#       residuals_5x_cadence/  ...                   (synthetic scenarios)
+#       residuals_4x_cadence/  ...                   (synthetic scenarios)
 #       metadata/      config.json  stage2_complete.json
 #     sim001/
 #       ...
@@ -66,8 +66,8 @@
 #
 # Options
 #   --config              population config name               [optimistic]
-#   --target-snr          target OS SNR                        [3.75]
-#   --snr-range           SNR acceptance window (low high)     [3.5 4.0]
+#   --target-snr          target OS SNR                        [3.2]
+#   --snr-range           SNR acceptance window (low high)     [3.0 3.4]
 #   --simulations         number of independent populations    [400]
 #   --n-chunks            chunks (Slurm tasks) per simulation  [10]
 #   --chunk-size          total binaries per Slurm task        [1000000]
@@ -77,7 +77,7 @@
 #   --cgw / --no-cgw      enable/disable CGW analysis          [on]
 #   --synthetic-ptas      enable synthetic PTA scenarios       [off]
 #   --synthetic-pta-config  JSON scenario override             [none]
-#   --noise-seed-base     base for per-sim noise seeds         [0]
+#   --noise-seed-base     base for per-sim noise seeds         [26072001]
 #   --max-retries         max full pipeline retries            [2]
 #   --dry-run             print sbatch commands only           [off]
 #   --proxy-only          validate proxy only (no scaling)     [off]
@@ -393,9 +393,9 @@ log "  cgw_snr                  (baseline, always)"
     if [[ -n "$SYNTHETIC_PTA_CONFIG" ]]; then
         log "  cgw_snr_<your_scenario>  (from --synthetic-pta-config)"
     else
-        log "  cgw_snr_5x_cadence"
-        log "  cgw_snr_4x_precision"
-        log "  cgw_snr_5x_cad_4x_prec"
+        log "  cgw_snr_4x_cadence"
+        log "  cgw_snr_2x_precision"
+        log "  cgw_snr_4x_cad_2x_prec"
     fi
 }
 

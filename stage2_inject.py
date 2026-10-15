@@ -121,7 +121,7 @@ N_GLOBAL_CGW_CANDIDATES   = 12_500
 N_SCENARIO_CGW_CANDIDATES = 1_000
 N_RESCUE                  = 500
 N_TOP_SOURCES             = 50
-MAX_SCALE_ITER            = 20       # max bisection steps for chunk-count search
+MAX_SCALE_ITER            = 30       # max bisection steps for chunk-count search
 
 HANDOFF_FILENAME = 'phase_handoff.json'
 
@@ -141,10 +141,10 @@ if not _STAGE1_SETUP_IMPORTED:
         "h0":       np.float32,
         "ra":       np.float64,
         "dec":       np.float64,
-        "psi":      np.float16,
-        "iota":     np.float16,
-        "phi0":     np.float16,
-        "cgw_snr":  np.float16,
+        "psi":      np.float32,
+        "iota":     np.float32,
+        "phi0":     np.float32,
+        "cgw_snr":  np.float32,
     }
     SCALAR_FIELDS = list(FIELD_DTYPES.keys())
 
@@ -1758,8 +1758,8 @@ def parse_args():
     p.add_argument('--output-dir',           type=str, required=True)
     p.add_argument('--config', '-c',         default='optimistic',
                    choices=list(config.POPULATION_CONFIGS.keys()))
-    p.add_argument('--target-snr',           type=float, default=4.0)
-    p.add_argument('--snr-range',            nargs=2, type=float, default=[3.5, 4.25])
+    p.add_argument('--target-snr',           type=float, default=3.2)
+    p.add_argument('--snr-range',            nargs=2, type=float, default=[3.0, 3.4])
     p.add_argument('--n-chunks',             type=int, required=True)
     p.add_argument('--n-sub-chunks',         type=int, default=1,
                    help='Number of sub-chunks per Slurm task (must match stage 1).')
@@ -1769,7 +1769,7 @@ def parse_args():
     p.add_argument('--proxy-only',           action='store_true')
     p.add_argument('--n-test',               type=int, default=1_000)
     p.add_argument('--clean-failed',         action='store_true')
-    p.add_argument('--noise-seed-base',      type=int, default=None)
+    p.add_argument('--noise-seed-base',      type=int, default=26072001)
     p.add_argument('--n-sims',              type=int, default=1)
     p.add_argument('--synthetic-ptas',       action='store_true', default=False)
     p.add_argument('--synthetic-pta-config', type=str, default=None)
