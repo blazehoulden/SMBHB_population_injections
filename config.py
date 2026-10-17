@@ -29,24 +29,24 @@ POPULATION_CONFIGS = {
         'description': 'Tiny population for local testing'
     },
     'pessimistic': {
-        'n_binaries': 200_000_000,
+        'n_binaries': 100_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(8.7),
-        'z_max': 2.0,
+        'z_max': 3.0,
         'description': 'Lower mass, higher population size'
     },
     'realistic': {
-        'n_binaries': 20_000_000,
+        'n_binaries': 10_000_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.0),
-        'z_max': 2.0,
+        'z_max': 3.0,
         'description': 'Medium mass, medium population size'
     },
     'optimistic': {
         'n_binaries': 1_250_000,
         'mass_distribution': 'exponential_damping',
         'mass_cutoff_0': 10**(9.3),
-        'z_max': 2.0,
+        'z_max': 3.0,
         'description': 'Higher mass, lower population size'
     }
 }
@@ -111,12 +111,11 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, compute_strain=False, seed=None, f_obs_min=2e-9):
+def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, compute_strain=False, seed=None, f_obs_min=3.52e-9):
     """
     Generate SMBHB population with given configuration.
-    Set minimum frequency of population to f_obs_min -- we leave it as 2 nHz for simplicity.
+    Set minimum frequency of population to f_obs_min -- we leave it as 3.52 nHz for simplicity.
     NANOGrav's lowest frequency is 1/T_obs ~ 2 nHz, while MPTA's is ~7 nHz for 4.5yrs, and ~3.5 nHz for 6yrs.
-    2 nHz allows for a slight buffer at the lowest frequency, and avoids requiring large numbers of binaries.
     """
     if compute_strain:
 

@@ -1516,7 +1516,10 @@ def process_sim(
         if args.cgw:              argv.append('--cgw')
         if args.validate_proxy:   argv.append('--validate-proxy')
         if args.proxy_only:       argv.append('--proxy-only')
-        if args.synthetic_ptas:   argv.append('--synthetic-ptas')
+        if args.synthetic_ptas:
+            argv.append('--synthetic-ptas')
+        if args.cgw_weighted_cadence:
+            argv.append('--cgw-weighted-cadence')
         if args.synthetic_pta_config:
             argv += ['--synthetic-pta-config', args.synthetic_pta_config]
         if reference_tspan_seconds is not None:
@@ -1791,6 +1794,13 @@ def parse_args():
     p.add_argument('--noise-seed-base',      type=int, default=26072001)
     p.add_argument('--n-sims',              type=int, default=1)
     p.add_argument('--synthetic-ptas',       action='store_true', default=False)
+    p.add_argument(
+        '--cgw-weighted-cadence',
+        action='store_true',
+        default=False,
+        help='Include the calibrated cgw_weighted_cadence scenario. '
+            'Requires config/cgw_cadence_weights/<config>.json.',
+    )
     p.add_argument('--synthetic-pta-config', type=str, default=None)
     p.add_argument('--phase',                type=str, default=None,
                    choices=['baseline', 'scenario'],

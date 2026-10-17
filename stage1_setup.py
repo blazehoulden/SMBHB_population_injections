@@ -707,6 +707,13 @@ def parse_args():
         help='Enable synthetic PTA scenarios alongside baseline.',
     )
     p.add_argument(
+    '--cgw-weighted-cadence',
+    action='store_true',
+    default=False,
+    help='Include the calibrated cgw_weighted_cadence scenario. '
+         'Requires config/cgw_cadence_weights/<config>.json.',
+    )
+    p.add_argument(
         '--n-keep-extremes',
         type=int,
         default=20,
@@ -937,7 +944,7 @@ def main():
     print(f'{"="*62}')
 
     # ── Resolve scenario configs ──────────────────────────────────────────────
-    if args.synthetic_ptas:
+    if args.synthetic_ptas or args.cgw_weighted_cadence:
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
         else:
@@ -945,6 +952,12 @@ def main():
                 k: v for k, v in DEFAULT_SCENARIOS.items()
                 if k not in ('baseline', 'cgw_weighted_cadence')
             }
+
+            if args.cgw_weighted_cadence:
+                syn_scenarios['cgw_weighted_cadence'] = (
+                    DEFAULT_SCENARIOS['cgw_weighted_cadence']
+                )
+
         print(f'  Synthetic scenarios: {list(syn_scenarios.keys())}')
     else:
         syn_scenarios = {}

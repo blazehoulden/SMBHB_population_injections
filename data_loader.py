@@ -2035,12 +2035,13 @@ def load_pulsars(
                 )
 
             if cfg.get("maximize_best_cadence", False):
+                min_cadence_days = cfg.get(
+                    "min_cadence_days",
+                    MIN_CADENCE_DAYS_DEFAULT,
+                )
                 print(
                     "  maximize_best_cadence=True "
-                    f"min_cadence_days={cfg.get(
-                        'min_cadence_days',
-                        MIN_CADENCE_DAYS_DEFAULT,
-                    )} "
+                    f"min_cadence_days={min_cadence_days} "
                     f"best_psrs={list(best_psrs)}"
                 )
 

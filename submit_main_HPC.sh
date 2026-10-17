@@ -118,6 +118,7 @@ CHUNK_SIZE="${SMBHB_CHUNK_SIZE:-1000000}"
 N_SUB_CHUNKS=1              # new: sub-chunks per Slurm task
 CGW_FLAG="${SMBHB_CGW_FLAG:---cgw}"
 SYNTHETIC_PTAS_FLAG=""
+CGW_WEIGHTED_CADENCE_FLAG=""
 SYNTHETIC_PTA_CONFIG=""
 NOISE_SEED_BASE=26072001
 MAX_RETRIES=2
@@ -155,6 +156,7 @@ while [[ $# -gt 0 ]]; do
         --no-cgw)                CGW_FLAG="";                      shift   ;;
         --synthetic-ptas)        SYNTHETIC_PTAS_FLAG="--synthetic-ptas"; shift ;;
         --synthetic-pta-config)  SYNTHETIC_PTA_CONFIG="$2";        shift 2 ;;
+        --cgw-weighted-cadence)  CGW_WEIGHTED_CADENCE_FLAG="--cgw-weighted-cadence"; shift 2 ;;
         --noise-seed-base)       NOISE_SEED_BASE="$2";             shift 2 ;;
         --max-retries)           MAX_RETRIES="$2";                 shift 2 ;;
         --dry-run)               DRY_RUN=1;                        shift   ;;
@@ -279,6 +281,7 @@ submit_attempt() {
                 --noise-seed-base ${NOISE_SEED_BASE} \
                 --n-sims ${N_SIMS} \
                 ${SYNTHETIC_PTAS_FLAG} \
+                ${CGW_WEIGHTED_CADENCE_FLAG} \
                 ${SYN_CONFIG_ARG}"
         )
         S1_JOB=$(echo "$S1_JOB" | tr -d '[:space:]')
@@ -307,6 +310,7 @@ submit_attempt() {
                 ${CGW_FLAG} \
                 ${PROXY_ONLY_FLAG} \
                 ${SYNTHETIC_PTAS_FLAG} \
+                ${CGW_WEIGHTED_CADENCE_FLAG} \
                 ${SYN_CONFIG_ARG}"
         )
         S2_JOB=$(echo "$S2_JOB" | tr -d '[:space:]')
@@ -339,8 +343,8 @@ log "  Shards/sim      : $(( N_CHUNKS * N_SUB_CHUNKS ))  (= N_CHUNKS × N_SUB_CH
 log "  S1 tasks/sim    : ${N_CHUNKS}  (one array per sim)"
 log "  S2 jobs         : ${N_SIMS}  (one per sim, independent)"
 log "  CGW             : $([[ -n "${CGW_FLAG}" ]] && echo on || echo off)"
-log "  Synthetic PTAs  : $([[ -n "${SYNTHETIC_PTAS_FLAG}" ]] && echo on || echo off)"
-[[ -n "$SYNTHETIC_PTA_CONFIG" ]] && log "  Syn config      : ${SYNTHETIC_PTA_CONFIG}"
+log "  Synthetic PTAs  : $([[ -n "${SYNTHETIC_PTAS_FLAG}" || -n "${CGW_WEIGHTED_CADENCE_FLAG}" ]] && echo on || echo off)"
+log "  CW-weighted cadence: $([[ -n "${CGW_WEIGHTED_CADENCE_FLAG}" ]] && echo on || echo off)"
 log "  Noise seed      : base=${NOISE_SEED_BASE}"
 log "  Proxy only      : $([[ -n "${PROXY_ONLY_FLAG}" ]] && echo on || echo off)"
 log "  N test          : ${N_TEST}"
@@ -405,7 +409,7 @@ log "  cgw_snr                  (baseline, always)"
     fi
 }
 
-EXIT_CODE=$?
+EXIT_CODE=0
 echo ""
 echo "=========================================="
 echo "Finished: $(date)  exit=${EXIT_CODE}"
