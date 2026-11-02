@@ -121,7 +121,8 @@ N_GLOBAL_CGW_CANDIDATES   = 12_500
 N_SCENARIO_CGW_CANDIDATES = 1_000
 N_RESCUE                  = 500
 N_TOP_SOURCES             = 50
-MAX_SCALE_ITER            = 30       # max bisection steps for chunk-count search
+MAX_SCALE_ITER            = 50       # max bisection steps for chunk-count search
+MAX_EXACT_PAIR_SEARCH     = 16
 
 HANDOFF_FILENAME = 'phase_handoff.json'
 
@@ -418,6 +419,100 @@ def _snr_for_shard_subset(
     )
     return float(snr)
 
+def _search_pair_combinations(
+    *,
+    floor_shards: List[Tuple[int, int]],
+    floor_snr: float,
+    candidate_snrs: List[Tuple[Tuple[int, int], float]],
+    sim_out_dir: str,
+    psr_names: List[str],
+    noise_stoas: Dict[str, np.ndarray],
+    psrs_clean,
+    raw_noise_params,
+    target_snr: float,
+    snr_low: float,
+    snr_high: float,
+    Tspan_seconds: float,
+    curn_components: int,
+    rn_components: int,
+) -> Optional[Tuple[List[Tuple[int, int]], float]]:
+    """
+    Search for two non-floor shards whose exact combined OS SNR is in-band.
+
+    Individual shard SNRs are already known exactly. Candidate pairs are
+    ranked using cheap approximations, then verified with the exact Enterprise
+    optimal-statistic calculation.
+    """
+    if len(candidate_snrs) < 2:
+        return None
+
+    floor_signal = max(float(floor_snr), 0.0)
+    ranked = []
+
+    for i, (shard_i, snr_i) in enumerate(candidate_snrs):
+        for shard_j, snr_j in candidate_snrs[i + 1:]:
+            # Ranking estimates only. The exact calculation below includes
+            # the real cross terms and covariance behaviour.
+            linear = max(0.0, snr_i - floor_signal)
+            linear += max(0.0, snr_j - floor_signal)
+            linear_pred = floor_signal + linear
+
+            power_i = max(0.0, snr_i**2 - floor_signal**2)
+            power_j = max(0.0, snr_j**2 - floor_signal**2)
+            quad_pred = float(
+                np.sqrt(floor_signal**2 + power_i + power_j)
+            )
+
+            rank = min(
+                abs(linear_pred - target_snr),
+                abs(quad_pred - target_snr),
+            )
+
+            ranked.append(
+                (rank, shard_i, shard_j, linear_pred, quad_pred)
+            )
+
+    ranked.sort(key=lambda row: row[0])
+    ranked = ranked[:MAX_EXACT_PAIR_SEARCH]
+
+    n_pairs = len(candidate_snrs) * (len(candidate_snrs) - 1) // 2
+    print(
+        f'  Pair search: verifying {len(ranked)} promising combinations '
+        f'(from {n_pairs} possible pairs)...'
+    )
+
+    for _, shard_i, shard_j, linear_pred, quad_pred in ranked:
+        trial_shards = floor_shards + [shard_i, shard_j]
+
+        snr_trial = _snr_for_shard_subset(
+            trial_shards,
+            sim_out_dir,
+            psr_names,
+            noise_stoas,
+            psrs_clean,
+            raw_noise_params,
+            Tspan_seconds,
+            curn_components,
+            rn_components,
+        )
+
+        print(
+            f'    pair={shard_i}+{shard_j}  '
+            f'proxy_linear={linear_pred:.4f}  '
+            f'proxy_quad={quad_pred:.4f}  '
+            f'OS SNR={snr_trial:.4f}'
+        )
+
+        if snr_low <= snr_trial <= snr_high:
+            print(
+                f'  ✓ Pair combination found: '
+                f'{shard_i}+{shard_j} with '
+                f'floor({len(floor_shards)}) '
+                f'→ SNR={snr_trial:.4f}'
+            )
+            return trial_shards, snr_trial
+
+    return None
 
 def _select_active_shards(
     all_shard_ids:   List[Tuple[int, int]],
@@ -445,9 +540,8 @@ def _select_active_shards(
       1. Find the largest valid prefix k* where SNR < snr_low  (the "floor").
       2. Scan every remaining chunk individually and evaluate SNR(floor_shards
          + [candidate_chunk]).
-      3. Accept the first candidate that lands in [snr_low, snr_high].
-         If multiple would overshoot, take the one that overshoots least
-         (closest to target from above) rather than giving up.
+      3. Scan remaining chunks in order and immediately accept the first
+         candidate that lands in [snr_low, snr_high].
 
     This way we never fail just because the population happens to be lumpy.
     """
@@ -603,44 +697,78 @@ def _select_active_shards(
             candidate_chunks = all_shard_ids[k_floor:]
             print(f'  Scanning {len(candidate_chunks)} candidate chunks...')
 
-            # We want floor_shards + [one extra chunk] to land in [snr_low, snr_high]
-            hits   = []   # (snr, chunk_id, sub_id) — landed in band
+            # Try each remaining chunk in order. As soon as one produces an S/N
+            # inside the target band, immediately accept it and stop scanning.
+            candidate_snrs = []
 
             for cid, sid in candidate_chunks:
                 trial_shards = floor_shards + [(cid, sid)]
+
                 snr_trial = _snr_for_shard_subset(
-                    trial_shards, sim_out_dir, psr_names,
-                    noise_stoas, psrs_clean, raw_noise_params, Tspan_seconds,
-                    curn_components, rn_components,
+                    trial_shards,
+                    sim_out_dir,
+                    psr_names,
+                    noise_stoas,
+                    psrs_clean,
+                    raw_noise_params,
+                    Tspan_seconds,
+                    curn_components,
+                    rn_components,
                 )
+
                 print(f'    chunk=({cid},{sid})  SNR={snr_trial:.4f}')
 
+                # Stop immediately on the first successful chunk.
                 if snr_low <= snr_trial <= snr_high:
-                    hits.append((snr_trial, cid, sid))
+                    active = floor_shards + [(cid, sid)]
 
-            # Done scanning all candidates — pick the best hit, if any
-            if hits:
-                hits.sort(key=lambda x: abs(x[0] - target_snr))  # closest to target
-                best_snr, best_c, best_s = hits[0]
-                active = floor_shards + [(best_c, best_s)]
-                print(f'  ✓ Chunk-addition found: floor({k_floor}) + '
-                      f'chunk({best_c},{best_s}) → SNR={best_snr:.4f} '
-                      f'(best of {len(hits)} candidates in band)')
-                return active, best_snr
+                    print(
+                        f'  ✓ Chunk-addition found: floor({k_floor}) + '
+                        f'chunk({cid},{sid}) → SNR={snr_trial:.4f}. '
+                        f'Accepting immediately without scanning remaining chunks.'
+                    )
 
-            # No candidate landed in band after checking all of them — hard fail
+                    return active, snr_trial
+
+                # Only unsuccessful candidates are needed for the later pair search.
+                candidate_snrs.append(((cid, sid), snr_trial))
+
+            # If no individual shard works, test pairs of individually
+            # sub-threshold shards. The helper ranks pairs cheaply and then
+            # performs exact OS calculations for only the best candidates.
+            pair_candidates = [
+                (shard, snr)
+                for shard, snr in candidate_snrs
+                if snr < snr_low
+            ]
+
+            pair_result = _search_pair_combinations(
+                floor_shards=floor_shards,
+                floor_snr=snr_floor,
+                candidate_snrs=pair_candidates,
+                sim_out_dir=sim_out_dir,
+                psr_names=psr_names,
+                noise_stoas=noise_stoas,
+                psrs_clean=psrs_clean,
+                raw_noise_params=raw_noise_params,
+                target_snr=target_snr,
+                snr_low=snr_low,
+                snr_high=snr_high,
+                Tspan_seconds=Tspan_seconds,
+                curn_components=curn_components,
+                rn_components=rn_components,
+            )
+
+            if pair_result is not None:
+                return pair_result
+
+            # Neither one shard nor a promising pair reached the target.
             raise RuntimeError(
-                f'Simulation failed: chunk-addition scan checked all '
-                f'{len(candidate_chunks)} remaining chunks and none brought '
+                f'Simulation failed: chunk-addition and pair scans checked '
+                f'{len(candidate_chunks)} remaining chunks, but none brought '
                 f'SNR from {snr_floor:.4f} (floor k={k_floor}) into '
-                f'[{snr_low},{snr_high}]. Aborting.')
-
-            # Every candidate undershot even when added to the floor — give up
-            raise RuntimeError(
-                f'Chunk-addition scan exhausted: no single chunk raises '
-                f'SNR from {snr_floor:.4f} (floor k={k_floor}) into or above '
-                f'[{snr_low},{snr_high}]. '
-                f'Consider generating more sub-chunks or widening the target band.')
+                f'[{snr_low},{snr_high}]. Aborting.'
+            )
 
         # Continue bisection
         k_guess = int(round(np.exp(0.5 * (np.log(k_lo + 1) + np.log(k_hi)))))
@@ -1879,7 +2007,7 @@ def main():
     rng      = np.random.default_rng(sim_seq)
     seed_int = rng.integers(2**31).item()
 
-    if args.synthetic_ptas:
+    if args.synthetic_ptas or args.cgw_weighted_cadence:
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
         else:
@@ -1887,6 +2015,14 @@ def main():
                 k: v for k, v in DEFAULT_SCENARIOS.items()
                 if k not in ('baseline', 'cgw_weighted_cadence')
             }
+
+        if (
+            args.cgw_weighted_cadence
+            and 'cgw_weighted_cadence' not in syn_scenarios
+        ):
+            syn_scenarios['cgw_weighted_cadence'] = (
+                DEFAULT_SCENARIOS['cgw_weighted_cadence']
+            )
     else:
         syn_scenarios = {}
 

@@ -19,37 +19,40 @@ G = 6.67430e-11       # Gravitational constant [m^3 kg^-1 s^-2]
 Msun = 1.98847e30     # Solar mass [kg]
 pc = 3.085677581e16   # Parsec [m]
 
-# Population configuration presets
 POPULATION_CONFIGS = {
-    'test': {
-        'n_binaries': 20_000,
-        'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(12.0),
-        'z_max': 0.5,
-        'description': 'Tiny population for local testing'
-    },
-    'pessimistic': {
-        'n_binaries': 100_000_000,
-        'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(8.7),
-        'z_max': 3.0,
-        'description': 'Lower mass, higher population size'
-    },
-    'realistic': {
-        'n_binaries': 10_000_000,
-        'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(9.0),
-        'z_max': 3.0,
-        'description': 'Medium mass, medium population size'
-    },
-    'optimistic': {
-        'n_binaries': 1_250_000,
-        'mass_distribution': 'exponential_damping',
-        'mass_cutoff_0': 10**(9.3),
-        'z_max': 3.0,
-        'description': 'Higher mass, lower population size'
-    }
-}
+      'test': {
+          'n_binaries': 20_000,
+          'mass_distribution': 'exponential_damping',
+          'mass_cutoff_0': 10**(12.0),
+          'z_max': 0.5,
+          'f_obs_min': 3.52e-9,  # [Hz]
+          'description': 'Tiny population for local testing'
+      },
+      'pessimistic': {
+          'n_binaries': 100_000_000,
+          'mass_distribution': 'exponential_damping',
+          'mass_cutoff_0': 10**(8.7),
+          'z_max': 3.0,
+          'f_obs_min': 3.52e-9,  # [Hz]
+          'description': 'Lower mass, higher population size'
+      },
+      'realistic': {
+          'n_binaries': 10_000_000,
+          'mass_distribution': 'exponential_damping',
+          'mass_cutoff_0': 10**(9.0),
+          'z_max': 3.0,
+          'f_obs_min': 3.52e-9,  # [Hz]
+          'description': 'Medium mass, medium population size'
+      },
+      'optimistic': {
+          'n_binaries': 1_250_000,
+          'mass_distribution': 'exponential_damping',
+          'mass_cutoff_0': 10**(9.3),
+          'z_max': 3.0,
+          'f_obs_min': 3.52e-9,  # [Hz]
+          'description': 'Higher mass, lower population size'
+      }
+  }
 
 # Data directories
 NANOGRAV_PULSARS = False
@@ -111,12 +114,15 @@ def load_smbhb_module(module_path="SMBHB_pop_synth.py"):
     return module
 
 
-def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, compute_strain=False, seed=None, f_obs_min=3.52e-9):
+
+def generate_population(config, smbhb_module, T_obs_seconds, n_binaries = None, compute_strain=False, seed=None, f_obs_min=None):
     """
     Generate SMBHB population with given configuration.
     Set minimum frequency of population to f_obs_min -- we leave it as 3.52 nHz for simplicity.
     NANOGrav's lowest frequency is 1/T_obs ~ 2 nHz, while MPTA's is ~7 nHz for 4.5yrs, and ~3.5 nHz for 6yrs.
     """
+    if f_obs_min is None:
+          f_obs_min = config.get('f_obs_min', 3.52e-9)
     if compute_strain:
 
         population, strain_data = smbhb_module.generate_smbhb_population(

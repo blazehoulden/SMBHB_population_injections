@@ -156,7 +156,21 @@ while [[ $# -gt 0 ]]; do
         --no-cgw)                CGW_FLAG="";                      shift   ;;
         --synthetic-ptas)        SYNTHETIC_PTAS_FLAG="--synthetic-ptas"; shift ;;
         --synthetic-pta-config)  SYNTHETIC_PTA_CONFIG="$2";        shift 2 ;;
-        --cgw-weighted-cadence)  CGW_WEIGHTED_CADENCE_FLAG="--cgw-weighted-cadence"; shift 2 ;;
+        --cgw-weighted-cadence)
+            CGW_WEIGHTED_CADENCE_FLAG="--cgw-weighted-cadence"
+
+            # Accept either:
+            #   --cgw-weighted-cadence
+            #   --cgw-weighted-cadence 1
+            if [[ "${2:-}" == "0" || "${2:-}" == "1" ]]; then
+                if [[ "$2" == "0" ]]; then
+                    CGW_WEIGHTED_CADENCE_FLAG=""
+                fi
+                shift 2
+            else
+                shift
+            fi
+            ;;
         --noise-seed-base)       NOISE_SEED_BASE="$2";             shift 2 ;;
         --max-retries)           MAX_RETRIES="$2";                 shift 2 ;;
         --dry-run)               DRY_RUN=1;                        shift   ;;

@@ -266,61 +266,61 @@ SCENARIOS = {
         extension_to_longest_span=True,
     ),
 
-    "4x_cadence": dict(
-        cadence_factor=4,
-        toaerr_factor=1.0,
-        best_only=True,
-        extension_to_longest_span=True,
-    ),
+    # "4x_cadence": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=1.0,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    # ),
 
-    "2x_precision": dict(
-        cadence_factor=1,
-        toaerr_factor=0.5,
-        best_only=True,
-        extension_to_longest_span=True,
-    ),
+    # "2x_precision": dict(
+    #     cadence_factor=1,
+    #     toaerr_factor=0.5,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    # ),
 
-    "4x_cad_2x_prec": dict(
-        cadence_factor=4,
-        toaerr_factor=0.5,
-        best_only=True,
-        extension_to_longest_span=True,
-    ),
+    # "4x_cad_2x_prec": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=0.5,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    # ),
 
-    "4x_cadence_conserved": dict(
-        cadence_factor=4,
-        toaerr_factor=1.0,
-        best_only=True,
-        extension_to_longest_span=True,
-        conserve_telescope_time=True,
-    ),
+    # "4x_cadence_conserved": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=1.0,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    #     conserve_telescope_time=True,
+    # ),
 
-    "2x_precision_conserved": dict(
-        cadence_factor=2,
-        toaerr_factor=1.0,
-        best_only=True,
-        extension_to_longest_span=True,
-        conserve_telescope_time=True,
-    ),
+    # "2x_precision_conserved": dict(
+    #     cadence_factor=2,
+    #     toaerr_factor=1.0,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    #     conserve_telescope_time=True,
+    # ),
 
-    "4x_cad_2x_prec_conserved": dict(
-        cadence_factor=4,
-        toaerr_factor=0.5,
-        best_only=True,
-        extension_to_longest_span=True,
-        conserve_telescope_time=True,
-    ),
-    "cgw_weighted_cadence": dict(
-        cgw_weighted_cadence=True,
-        min_cadence_days=90.0,
-        toaerr_factor=1.0,
-        best_only=False,
-        conserve_telescope_time=True,
-        extension_to_longest_span=True,
-        cgw_weight_dir=(
-            PROJECT_ROOT / "config" / "cgw_cadence_weights"
-        ),
-    ),
+    # "4x_cad_2x_prec_conserved": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=0.5,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    #     conserve_telescope_time=True,
+    # ),
+    # "cgw_weighted_cadence": dict(
+    #     cgw_weighted_cadence=True,
+    #     min_cadence_days=90.0,
+    #     toaerr_factor=1.0,
+    #     best_only=False,
+    #     conserve_telescope_time=True,
+    #     extension_to_longest_span=True,
+    #     cgw_weight_dir=(
+    #         PROJECT_ROOT / "config" / "cgw_cadence_weights"
+    #     ),
+    # ),
 }
 
 
@@ -450,8 +450,8 @@ def _parse_tim_lines(tim_path):
     return header_lines, toa_records
 
 
-def _rebuild_line(record, new_toa=None, new_err=None):
-    """Swap only TOA/error columns; everything else verbatim."""
+def _rebuild_line(record, new_toa=None, new_err=None, tobs_scale=1.0):
+    """Rebuild a TOA line, optionally scaling its -tobs flag."""
     parts = record['line'].split()
 
     if new_toa is not None:
@@ -461,6 +461,15 @@ def _rebuild_line(record, new_toa=None, new_err=None):
     if new_err is not None:
         nd = record.get('err_decimals', 4)
         parts[record['err_col']] = f'{new_err:.{nd}f}'
+
+    if tobs_scale != 1.0:
+        for i, token in enumerate(parts[:-1]):
+            if token == '-tobs':
+                try:
+                    parts[i + 1] = f'{float(parts[i + 1]) * tobs_scale:g}'
+                except ValueError:
+                    pass
+                break
 
     return ' '.join(parts)
 
@@ -1604,10 +1613,19 @@ def _write_scenario_tim(orig_tim_path,
 
             for epoch_toa, t_idx in zip(future_epoch_toas, template_epoch_idx):
                 template_epoch = epochs[int(t_idx)]
+                # Halving the TOA error requires four times the integration time:
+                # effective observing time scales as 1 / toaerr_factor**2.
+                future_tobs_scale = 1.0 / toaerr_factor**2
+
                 for rec in template_epoch:
                     new_err = rec['err'] * toaerr_factor
                     fout.write(
-                        _rebuild_line(rec, new_toa=epoch_toa, new_err=new_err) + '\n'
+                        _rebuild_line(
+                            rec,
+                            new_toa=epoch_toa,
+                            new_err=new_err,
+                            tobs_scale=future_tobs_scale,
+                        ) + '\n'
                     )
                     n_future_written += 1
 
@@ -2405,9 +2423,9 @@ def _make_max_cadence_scenario(best_psrs, min_cadence_days=MIN_CADENCE_DAYS_DEFA
     )
 
 
-SCENARIOS.update({
-    'max_cadence_top10': _make_max_cadence_scenario(top10),
-    'max_cadence_top20': _make_max_cadence_scenario(top20),
-    'max_cadence_top30': _make_max_cadence_scenario(top30),
-    'max_cadence_top40': _make_max_cadence_scenario(top40),
-})
+# SCENARIOS.update({
+#     'max_cadence_top10': _make_max_cadence_scenario(top10),
+#     'max_cadence_top20': _make_max_cadence_scenario(top20),
+#     'max_cadence_top30': _make_max_cadence_scenario(top30),
+#     'max_cadence_top40': _make_max_cadence_scenario(top40),
+# })
