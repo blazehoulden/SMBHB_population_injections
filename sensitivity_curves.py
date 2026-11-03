@@ -184,6 +184,7 @@ def add_chromatic_corr(corr, freqs, toas, radio_freqs_mhz, log10_A, gamma,
 
 def build_real_curves(ePsrs, parsed_noise_params, raw_noise_params, freqs,
                        thin=10, include_dm=False, include_chrom=False,
+                       gwb_log10_A = np.log10(4.8e-15), gwb_gamma = 13.0/3.0,
                        ref_freq_mhz=1400.0):
     """
     Build sensitivity curves from ePulsar objects, whatever TOAs they
@@ -197,7 +198,10 @@ def build_real_curves(ePsrs, parsed_noise_params, raw_noise_params, freqs,
 
     for ePsr in ePsrs:
         corr = make_corr(ePsr, raw_noise_params, thin=thin)
-        plaw = hsen.red_noise_powerlaw(A=9e-16, gamma=13/3., freqs=freqs)
+        if gwb_log10_A is None:
+            plaw = np.zeros_like(freqs)
+        else:
+            plaw = hsen.red_noise_powerlaw(A=10**gwb_log10_A, gamma=gwb_gamma, freqs=freqs)
 
         psr_params = parsed_noise_params.get(ePsr.name, {})
 
