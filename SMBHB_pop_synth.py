@@ -616,18 +616,18 @@ def sample_eccentricities(n_binaries: int,
     if normalize_components_separately:
         # Renormalize each piece over [0, e_max] so f_frac is an exact
         # mixing weight between two proper densities.
-        norm_low  = np.trapz(p_low,  e_grid)
-        norm_high = np.trapz(p_high, e_grid)
+        norm_low  = np.trapezoid(p_low,  e_grid)
+        norm_high = np.trapezoid(p_high, e_grid)
         p_low  = p_low  / norm_low
         p_high = p_high / norm_high
         p_mix  = (1.0 - f_frac) * p_low + f_frac * p_high
         # p_mix now integrates to ~1 already, but renormalize once more
         # to absorb residual truncation error at e_max.
-        p_mix /= np.trapz(p_mix, e_grid)
+        p_mix /= np.trapezoid(p_mix, e_grid)
     else:
         # Use the formula exactly as written, normalize only the combined result.
         p_mix = (1.0 - f_frac) * p_low + f_frac * p_high
-        p_mix /= np.trapz(p_mix, e_grid)
+        p_mix /= np.trapezoid(p_mix, e_grid)
 
     # Build CDF via cumulative trapezoidal integration
     cdf = np.zeros(n_grid)
@@ -781,7 +781,7 @@ def bin_characteristic_strain(gw_frequencies: np.ndarray,
 def generate_smbhb_population(
         n_binaries: int,
         T_obs_seconds: float,
-        z_max: float = 2.0,
+        z_max: float = 3.0,
         mass_distribution: str = 'power_law',
         alpha_0: float = 1.21,
         alpha_z: float = 0.03,
@@ -793,6 +793,7 @@ def generate_smbhb_population(
         f_obs_max: float = 300e-9,
         f_obs_min: Optional[float] = None,
         random_seed: Optional[int] = None,
+        ecc_population: bool = False,
         ecc_tol: float = ECC_ENHANCEMENT_TOL_DEFAULT,
         f_frac: float = 0.3,
         sigma_low: float = 0.1,
@@ -837,6 +838,7 @@ def generate_smbhb_population(
     compute_strain   : if True also return strain_data dict
     T_obs_seconds    : PTA observation span [s] — sets f_obs_min = 1/T_obs
     f_obs_max        : upper PTA band limit [Hz]  (default 300 nHz)
+    ecc_population   : if True, generate eccentricities for the binaries
     random_seed      : seed for reproducibility
 
     Returns
@@ -884,8 +886,11 @@ def generate_smbhb_population(
         )
 
     Mtot, Mc = compute_chirp_mass(M1, rng=rng)
-
-    ecc = sample_eccentricities(n_binaries, f_frac=f_frac, sigma_low=sigma_low, scale_high=scale_high, rng=rng)
+    
+    if ecc_population:
+        ecc = sample_eccentricities(n_binaries, f_frac=f_frac, sigma_low=sigma_low, scale_high=scale_high, rng=rng)
+    else:
+        ecc = np.zeros(n_binaries)
 
     # ── sky positions & orientations ──────────────────────────────────────────
     ra   = rng.uniform(0,       2*np.pi, n_binaries)

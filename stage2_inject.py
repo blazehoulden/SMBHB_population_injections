@@ -121,7 +121,8 @@ N_GLOBAL_CGW_CANDIDATES   = 12_500
 N_SCENARIO_CGW_CANDIDATES = 1_000
 N_RESCUE                  = 500
 N_TOP_SOURCES             = 50
-MAX_SCALE_ITER            = 20       # max bisection steps for chunk-count search
+MAX_SCALE_ITER            = 50       # max bisection steps for chunk-count search
+MAX_EXACT_PAIR_SEARCH     = 16
 
 HANDOFF_FILENAME = 'phase_handoff.json'
 
@@ -141,10 +142,10 @@ if not _STAGE1_SETUP_IMPORTED:
         "h0":       np.float32,
         "ra":       np.float64,
         "dec":       np.float64,
-        "psi":      np.float16,
-        "iota":     np.float16,
-        "phi0":     np.float16,
-        "cgw_snr":  np.float16,
+        "psi":      np.float32,
+        "iota":     np.float32,
+        "phi0":     np.float32,
+        "cgw_snr":  np.float32,
     }
     SCALAR_FIELDS = list(FIELD_DTYPES.keys())
 
@@ -418,6 +419,100 @@ def _snr_for_shard_subset(
     )
     return float(snr)
 
+def _search_pair_combinations(
+    *,
+    floor_shards: List[Tuple[int, int]],
+    floor_snr: float,
+    candidate_snrs: List[Tuple[Tuple[int, int], float]],
+    sim_out_dir: str,
+    psr_names: List[str],
+    noise_stoas: Dict[str, np.ndarray],
+    psrs_clean,
+    raw_noise_params,
+    target_snr: float,
+    snr_low: float,
+    snr_high: float,
+    Tspan_seconds: float,
+    curn_components: int,
+    rn_components: int,
+) -> Optional[Tuple[List[Tuple[int, int]], float]]:
+    """
+    Search for two non-floor shards whose exact combined OS SNR is in-band.
+
+    Individual shard SNRs are already known exactly. Candidate pairs are
+    ranked using cheap approximations, then verified with the exact Enterprise
+    optimal-statistic calculation.
+    """
+    if len(candidate_snrs) < 2:
+        return None
+
+    floor_signal = max(float(floor_snr), 0.0)
+    ranked = []
+
+    for i, (shard_i, snr_i) in enumerate(candidate_snrs):
+        for shard_j, snr_j in candidate_snrs[i + 1:]:
+            # Ranking estimates only. The exact calculation below includes
+            # the real cross terms and covariance behaviour.
+            linear = max(0.0, snr_i - floor_signal)
+            linear += max(0.0, snr_j - floor_signal)
+            linear_pred = floor_signal + linear
+
+            power_i = max(0.0, snr_i**2 - floor_signal**2)
+            power_j = max(0.0, snr_j**2 - floor_signal**2)
+            quad_pred = float(
+                np.sqrt(floor_signal**2 + power_i + power_j)
+            )
+
+            rank = min(
+                abs(linear_pred - target_snr),
+                abs(quad_pred - target_snr),
+            )
+
+            ranked.append(
+                (rank, shard_i, shard_j, linear_pred, quad_pred)
+            )
+
+    ranked.sort(key=lambda row: row[0])
+    ranked = ranked[:MAX_EXACT_PAIR_SEARCH]
+
+    n_pairs = len(candidate_snrs) * (len(candidate_snrs) - 1) // 2
+    print(
+        f'  Pair search: verifying {len(ranked)} promising combinations '
+        f'(from {n_pairs} possible pairs)...'
+    )
+
+    for _, shard_i, shard_j, linear_pred, quad_pred in ranked:
+        trial_shards = floor_shards + [shard_i, shard_j]
+
+        snr_trial = _snr_for_shard_subset(
+            trial_shards,
+            sim_out_dir,
+            psr_names,
+            noise_stoas,
+            psrs_clean,
+            raw_noise_params,
+            Tspan_seconds,
+            curn_components,
+            rn_components,
+        )
+
+        print(
+            f'    pair={shard_i}+{shard_j}  '
+            f'proxy_linear={linear_pred:.4f}  '
+            f'proxy_quad={quad_pred:.4f}  '
+            f'OS SNR={snr_trial:.4f}'
+        )
+
+        if snr_low <= snr_trial <= snr_high:
+            print(
+                f'  ✓ Pair combination found: '
+                f'{shard_i}+{shard_j} with '
+                f'floor({len(floor_shards)}) '
+                f'→ SNR={snr_trial:.4f}'
+            )
+            return trial_shards, snr_trial
+
+    return None
 
 def _select_active_shards(
     all_shard_ids:   List[Tuple[int, int]],
@@ -445,9 +540,8 @@ def _select_active_shards(
       1. Find the largest valid prefix k* where SNR < snr_low  (the "floor").
       2. Scan every remaining chunk individually and evaluate SNR(floor_shards
          + [candidate_chunk]).
-      3. Accept the first candidate that lands in [snr_low, snr_high].
-         If multiple would overshoot, take the one that overshoots least
-         (closest to target from above) rather than giving up.
+      3. Scan remaining chunks in order and immediately accept the first
+         candidate that lands in [snr_low, snr_high].
 
     This way we never fail just because the population happens to be lumpy.
     """
@@ -603,44 +697,78 @@ def _select_active_shards(
             candidate_chunks = all_shard_ids[k_floor:]
             print(f'  Scanning {len(candidate_chunks)} candidate chunks...')
 
-            # We want floor_shards + [one extra chunk] to land in [snr_low, snr_high]
-            hits   = []   # (snr, chunk_id, sub_id) — landed in band
+            # Try each remaining chunk in order. As soon as one produces an S/N
+            # inside the target band, immediately accept it and stop scanning.
+            candidate_snrs = []
 
             for cid, sid in candidate_chunks:
                 trial_shards = floor_shards + [(cid, sid)]
+
                 snr_trial = _snr_for_shard_subset(
-                    trial_shards, sim_out_dir, psr_names,
-                    noise_stoas, psrs_clean, raw_noise_params, Tspan_seconds,
-                    curn_components, rn_components,
+                    trial_shards,
+                    sim_out_dir,
+                    psr_names,
+                    noise_stoas,
+                    psrs_clean,
+                    raw_noise_params,
+                    Tspan_seconds,
+                    curn_components,
+                    rn_components,
                 )
+
                 print(f'    chunk=({cid},{sid})  SNR={snr_trial:.4f}')
 
+                # Stop immediately on the first successful chunk.
                 if snr_low <= snr_trial <= snr_high:
-                    hits.append((snr_trial, cid, sid))
+                    active = floor_shards + [(cid, sid)]
 
-            # Done scanning all candidates — pick the best hit, if any
-            if hits:
-                hits.sort(key=lambda x: abs(x[0] - target_snr))  # closest to target
-                best_snr, best_c, best_s = hits[0]
-                active = floor_shards + [(best_c, best_s)]
-                print(f'  ✓ Chunk-addition found: floor({k_floor}) + '
-                      f'chunk({best_c},{best_s}) → SNR={best_snr:.4f} '
-                      f'(best of {len(hits)} candidates in band)')
-                return active, best_snr
+                    print(
+                        f'  ✓ Chunk-addition found: floor({k_floor}) + '
+                        f'chunk({cid},{sid}) → SNR={snr_trial:.4f}. '
+                        f'Accepting immediately without scanning remaining chunks.'
+                    )
 
-            # No candidate landed in band after checking all of them — hard fail
+                    return active, snr_trial
+
+                # Only unsuccessful candidates are needed for the later pair search.
+                candidate_snrs.append(((cid, sid), snr_trial))
+
+            # If no individual shard works, test pairs of individually
+            # sub-threshold shards. The helper ranks pairs cheaply and then
+            # performs exact OS calculations for only the best candidates.
+            pair_candidates = [
+                (shard, snr)
+                for shard, snr in candidate_snrs
+                if snr < snr_low
+            ]
+
+            pair_result = _search_pair_combinations(
+                floor_shards=floor_shards,
+                floor_snr=snr_floor,
+                candidate_snrs=pair_candidates,
+                sim_out_dir=sim_out_dir,
+                psr_names=psr_names,
+                noise_stoas=noise_stoas,
+                psrs_clean=psrs_clean,
+                raw_noise_params=raw_noise_params,
+                target_snr=target_snr,
+                snr_low=snr_low,
+                snr_high=snr_high,
+                Tspan_seconds=Tspan_seconds,
+                curn_components=curn_components,
+                rn_components=rn_components,
+            )
+
+            if pair_result is not None:
+                return pair_result
+
+            # Neither one shard nor a promising pair reached the target.
             raise RuntimeError(
-                f'Simulation failed: chunk-addition scan checked all '
-                f'{len(candidate_chunks)} remaining chunks and none brought '
+                f'Simulation failed: chunk-addition and pair scans checked '
+                f'{len(candidate_chunks)} remaining chunks, but none brought '
                 f'SNR from {snr_floor:.4f} (floor k={k_floor}) into '
-                f'[{snr_low},{snr_high}]. Aborting.')
-
-            # Every candidate undershot even when added to the floor — give up
-            raise RuntimeError(
-                f'Chunk-addition scan exhausted: no single chunk raises '
-                f'SNR from {snr_floor:.4f} (floor k={k_floor}) into or above '
-                f'[{snr_low},{snr_high}]. '
-                f'Consider generating more sub-chunks or widening the target band.')
+                f'[{snr_low},{snr_high}]. Aborting.'
+            )
 
         # Continue bisection
         k_guess = int(round(np.exp(0.5 * (np.log(k_lo + 1) + np.log(k_hi)))))
@@ -1048,8 +1176,12 @@ def _phase_baseline(args, syn_scenarios, combined_scenarios, noise_seed):
     snr_low, snr_high = args.snr_range
 
     print('\n📡 [baseline] Loading pulsars...')
-    psrs_unfiltered = load_pulsars(verbose=True, scenario='baseline',
-                                   scenarios=combined_scenarios)
+    psrs_unfiltered = load_pulsars(
+        verbose=True,
+        scenario='baseline',
+        scenarios=combined_scenarios,
+        population_configuration=args.config,
+    )
     with suppress_enterprise_warnings():
         psrs_clean, raw_noise_params, _ = filter_pulsars_15yr(
             psrs_unfiltered, verbose=True)
@@ -1341,8 +1473,12 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
     parsed_noise_params = parse_pulsar_parameters(config.NOISEFILE)
  
     print(f'\n📡 [{scenario_label}] Loading pulsars...')
-    psrs_unfiltered = load_pulsars(verbose=True, scenario=scenario_label,
-                                   scenarios=combined_scenarios)
+    psrs_unfiltered = load_pulsars(
+        verbose=True,
+        scenario=scenario_label,
+        scenarios=combined_scenarios,
+        population_configuration=args.config,
+    )
     with suppress_enterprise_warnings():
         psrs_clean, raw_noise_params, Tspan_seconds = filter_pulsars_15yr(
             psrs_unfiltered, verbose=False)
@@ -1431,7 +1567,11 @@ def _phase_scenario(args, scenario_label, combined_scenarios):
                'sgwb_snr': snr_sgwb_scenario},
     )
 
-def _determine_reference_tspan(syn_scenarios, combined_scenarios) -> Optional[float]:
+def _determine_reference_tspan(
+    syn_scenarios,
+    combined_scenarios,
+    population_configuration,
+) -> Optional[float]:
     """
     Pick the Tspan (seconds) to use as the shared Fourier-basis reference for
     red/DM/chromatic noise across baseline + every forecast scenario. Must be
@@ -1444,7 +1584,10 @@ def _determine_reference_tspan(syn_scenarios, combined_scenarios) -> Optional[fl
     longest_tspan, longest_label = -1.0, None
     for label in syn_scenarios:
         psrs_unfiltered = load_pulsars(verbose=False, scenario=label,
-                                       scenarios=combined_scenarios)
+                                       scenarios=combined_scenarios,
+                                       population_configuration=(
+                                           population_configuration
+                                       ))
         with suppress_enterprise_warnings():
             _, _, tspan = filter_pulsars_15yr(psrs_unfiltered, verbose=False)
         del psrs_unfiltered; gc.collect()
@@ -1475,7 +1618,11 @@ def process_sim(
     print(f'  Each phase runs in its own subprocess (clean C heap)')
     print(f'{"="*60}')
 
-    reference_tspan_seconds = _determine_reference_tspan(syn_scenarios, combined_scenarios)
+    reference_tspan_seconds = _determine_reference_tspan(
+        syn_scenarios,
+        combined_scenarios,
+        args.config,
+    )
 
     config_path = os.path.join(sim_out_dir, 'metadata', 'config.json')
     if not os.path.isfile(config_path):
@@ -1497,7 +1644,10 @@ def process_sim(
         if args.cgw:              argv.append('--cgw')
         if args.validate_proxy:   argv.append('--validate-proxy')
         if args.proxy_only:       argv.append('--proxy-only')
-        if args.synthetic_ptas:   argv.append('--synthetic-ptas')
+        if args.synthetic_ptas:
+            argv.append('--synthetic-ptas')
+        if args.cgw_weighted_cadence:
+            argv.append('--cgw-weighted-cadence')
         if args.synthetic_pta_config:
             argv += ['--synthetic-pta-config', args.synthetic_pta_config]
         if reference_tspan_seconds is not None:
@@ -1758,8 +1908,8 @@ def parse_args():
     p.add_argument('--output-dir',           type=str, required=True)
     p.add_argument('--config', '-c',         default='optimistic',
                    choices=list(config.POPULATION_CONFIGS.keys()))
-    p.add_argument('--target-snr',           type=float, default=4.0)
-    p.add_argument('--snr-range',            nargs=2, type=float, default=[3.5, 4.25])
+    p.add_argument('--target-snr',           type=float, default=3.2)
+    p.add_argument('--snr-range',            nargs=2, type=float, default=[3.0, 3.4])
     p.add_argument('--n-chunks',             type=int, required=True)
     p.add_argument('--n-sub-chunks',         type=int, default=1,
                    help='Number of sub-chunks per Slurm task (must match stage 1).')
@@ -1769,9 +1919,16 @@ def parse_args():
     p.add_argument('--proxy-only',           action='store_true')
     p.add_argument('--n-test',               type=int, default=1_000)
     p.add_argument('--clean-failed',         action='store_true')
-    p.add_argument('--noise-seed-base',      type=int, default=None)
+    p.add_argument('--noise-seed-base',      type=int, default=26072001)
     p.add_argument('--n-sims',              type=int, default=1)
     p.add_argument('--synthetic-ptas',       action='store_true', default=False)
+    p.add_argument(
+        '--cgw-weighted-cadence',
+        action='store_true',
+        default=False,
+        help='Include the calibrated cgw_weighted_cadence scenario. '
+            'Requires config/cgw_cadence_weights/<config>.json.',
+    )
     p.add_argument('--synthetic-pta-config', type=str, default=None)
     p.add_argument('--phase',                type=str, default=None,
                    choices=['baseline', 'scenario'],
@@ -1850,12 +2007,22 @@ def main():
     rng      = np.random.default_rng(sim_seq)
     seed_int = rng.integers(2**31).item()
 
-    if args.synthetic_ptas:
+    if args.synthetic_ptas or args.cgw_weighted_cadence:
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
         else:
-            syn_scenarios = {k: v for k, v in DEFAULT_SCENARIOS.items()
-                             if k != 'baseline'}
+            syn_scenarios = {
+                k: v for k, v in DEFAULT_SCENARIOS.items()
+                if k not in ('baseline', 'cgw_weighted_cadence')
+            }
+
+        if (
+            args.cgw_weighted_cadence
+            and 'cgw_weighted_cadence' not in syn_scenarios
+        ):
+            syn_scenarios['cgw_weighted_cadence'] = (
+                DEFAULT_SCENARIOS['cgw_weighted_cadence']
+            )
     else:
         syn_scenarios = {}
 

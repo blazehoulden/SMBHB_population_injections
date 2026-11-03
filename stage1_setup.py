@@ -147,10 +147,10 @@ FIELD_DTYPES: Dict[str, type] = {
     # denominator.  Preserve them at full precision for reproducibility.
     "ra":       np.float64,
     "dec":      np.float64,
-    "psi":      np.float16,
-    "iota":     np.float16,
-    "phi0":     np.float16,
-    "cgw_snr":  np.float16,
+    "psi":      np.float32,
+    "iota":     np.float32,
+    "phi0":     np.float32,
+    "cgw_snr":  np.float32,
 }
 SCALAR_FIELDS = list(FIELD_DTYPES.keys())
 N_PRE_FILTER_PER_CHUNK = 12_500
@@ -670,8 +670,8 @@ def parse_args():
     p = argparse.ArgumentParser(description='Stage 1: population synthesis (memory-efficient sub-chunk edition)')
     p.add_argument('--config', '-c', default='optimistic',
                    choices=list(config.POPULATION_CONFIGS.keys()))
-    p.add_argument('--target-snr',     type=float, default=4.0)
-    p.add_argument('--snr-range',      nargs=2, type=float, default=[3.5, 4.0])
+    p.add_argument('--target-snr',     type=float, default=3.2)
+    p.add_argument('--snr-range',      nargs=2, type=float, default=[3.0, 3.4])
     p.add_argument('--output-dir',     type=str, required=True)
     p.add_argument('--chunk-size',     type=int, default=1_000_000,
                    help='Total binaries per Slurm task. '
@@ -689,7 +689,7 @@ def parse_args():
     p.add_argument('--task-id',        type=int, default=None,
                    help='Flat array task ID (overrides $SLURM_ARRAY_TASK_ID).')
     p.add_argument('--sim-id',         type=int, required=True)
-    p.add_argument('--noise-seed-base', type=int, default=None)
+    p.add_argument('--noise-seed-base', type=int, default=26072001)
     p.add_argument('--n-sims',         type=int, default=1,
                    help='Total number of simulations (for seeding purposes).')
     p.add_argument(
@@ -705,6 +705,13 @@ def parse_args():
         action='store_true',
         default=False,
         help='Enable synthetic PTA scenarios alongside baseline.',
+    )
+    p.add_argument(
+    '--cgw-weighted-cadence',
+    action='store_true',
+    default=False,
+    help='Include the calibrated cgw_weighted_cadence scenario. '
+         'Requires config/cgw_cadence_weights/<config>.json.',
     )
     p.add_argument(
         '--n-keep-extremes',
@@ -937,14 +944,20 @@ def main():
     print(f'{"="*62}')
 
     # ── Resolve scenario configs ──────────────────────────────────────────────
-    if args.synthetic_ptas:
+    if args.synthetic_ptas or args.cgw_weighted_cadence:
         if args.synthetic_pta_config:
             syn_scenarios = json.loads(args.synthetic_pta_config)
         else:
             syn_scenarios = {
                 k: v for k, v in DEFAULT_SCENARIOS.items()
-                if k != 'baseline'
+                if k not in ('baseline', 'cgw_weighted_cadence')
             }
+
+            if args.cgw_weighted_cadence:
+                syn_scenarios['cgw_weighted_cadence'] = (
+                    DEFAULT_SCENARIOS['cgw_weighted_cadence']
+                )
+
         print(f'  Synthetic scenarios: {list(syn_scenarios.keys())}')
     else:
         syn_scenarios = {}
@@ -970,6 +983,7 @@ def main():
         verbose=True,
         scenario='baseline',
         scenarios=combined_scenarios,
+        population_configuration=args.config,
     )
     with suppress_enterprise_warnings():
         psrs_baseline, _, Tspan_seconds = filter_pulsars_15yr(
@@ -1048,6 +1062,7 @@ def main():
                 verbose=False,
                 scenario=scenario_label,
                 scenarios=combined_scenarios,
+                population_configuration=args.config,
             )
             for psr in psr_variants:
                 with suppress_enterprise_warnings():

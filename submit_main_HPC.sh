@@ -34,8 +34,10 @@
 #
 # Synthetic PTA scenarios
 # ───────────────────────
-#   --synthetic-ptas       enable the three default scenarios:
-#                            5x_cadence | 4x_precision | 5x_cad_4x_prec
+#   --synthetic-ptas       enable the default forecast scenarios. The
+#                          CGW-weighted cadence scenario is opt-in via
+#                          --synthetic-pta-config because it requires
+#                          config/cgw_cadence_weights/*.json.
 #   --synthetic-pta-config JSON string overriding default scenario definitions
 #                          e.g. '{"my_scenario": {"cadence_factor": 3,
 #                                                  "toaerr_factor": 0.5,
@@ -47,10 +49,10 @@
 #     sim000/
 #       populations/   subpop_000_000.pkl.gz  subpop_000_001.pkl.gz  ...
 #                      subpop_{chunk:03d}_{sub:03d}.pkl.gz
-#       stoas/         chunk_0000_0000.npz  chunk_0000_0000_5x_cadence.npz  ...
+#       stoas/         chunk_0000_0000.npz  chunk_0000_0000_4x_cadence.npz  ...
 #                      chunk_{chunk:04d}_{sub:04d}[_<scenario>].npz
 #       residuals/     noise/ population/ combined/  (baseline)
-#       residuals_5x_cadence/  ...                   (synthetic scenarios)
+#       residuals_4x_cadence/  ...                   (synthetic scenarios)
 #       metadata/      config.json  stage2_complete.json
 #     sim001/
 #       ...
@@ -66,8 +68,8 @@
 #
 # Options
 #   --config              population config name               [optimistic]
-#   --target-snr          target OS SNR                        [3.75]
-#   --snr-range           SNR acceptance window (low high)     [3.5 4.0]
+#   --target-snr          target OS SNR                        [3.2]
+#   --snr-range           SNR acceptance window (low high)     [3.0 3.4]
 #   --simulations         number of independent populations    [400]
 #   --n-chunks            chunks (Slurm tasks) per simulation  [10]
 #   --chunk-size          total binaries per Slurm task        [1000000]
@@ -77,7 +79,7 @@
 #   --cgw / --no-cgw      enable/disable CGW analysis          [on]
 #   --synthetic-ptas      enable synthetic PTA scenarios       [off]
 #   --synthetic-pta-config  JSON scenario override             [none]
-#   --noise-seed-base     base for per-sim noise seeds         [0]
+#   --noise-seed-base     base for per-sim noise seeds         [26072001]
 #   --max-retries         max full pipeline retries            [2]
 #   --dry-run             print sbatch commands only           [off]
 #   --proxy-only          validate proxy only (no scaling)     [off]
@@ -101,7 +103,7 @@ echo "=========================================="
 echo ""
 
 ENV_SETUP="module purge; unset PYTHONPATH; module load mamba; mamba activate smbhb312;"
-REPO_DIR="/fred/oz005/users/bhoulden/SMBHB_population_injections"
+REPO_DIR="${SMBHB_REPO_DIR:-/fred/oz005/users/bhoulden/SMBHB_population_injections}"
 
 # =============================================================================
 # DEFAULTS
@@ -116,6 +118,7 @@ CHUNK_SIZE="${SMBHB_CHUNK_SIZE:-1000000}"
 N_SUB_CHUNKS=1              # new: sub-chunks per Slurm task
 CGW_FLAG="${SMBHB_CGW_FLAG:---cgw}"
 SYNTHETIC_PTAS_FLAG=""
+CGW_WEIGHTED_CADENCE_FLAG=""
 SYNTHETIC_PTA_CONFIG=""
 NOISE_SEED_BASE=26072001
 MAX_RETRIES=2
@@ -153,6 +156,21 @@ while [[ $# -gt 0 ]]; do
         --no-cgw)                CGW_FLAG="";                      shift   ;;
         --synthetic-ptas)        SYNTHETIC_PTAS_FLAG="--synthetic-ptas"; shift ;;
         --synthetic-pta-config)  SYNTHETIC_PTA_CONFIG="$2";        shift 2 ;;
+        --cgw-weighted-cadence)
+            CGW_WEIGHTED_CADENCE_FLAG="--cgw-weighted-cadence"
+
+            # Accept either:
+            #   --cgw-weighted-cadence
+            #   --cgw-weighted-cadence 1
+            if [[ "${2:-}" == "0" || "${2:-}" == "1" ]]; then
+                if [[ "$2" == "0" ]]; then
+                    CGW_WEIGHTED_CADENCE_FLAG=""
+                fi
+                shift 2
+            else
+                shift
+            fi
+            ;;
         --noise-seed-base)       NOISE_SEED_BASE="$2";             shift 2 ;;
         --max-retries)           MAX_RETRIES="$2";                 shift 2 ;;
         --dry-run)               DRY_RUN=1;                        shift   ;;
@@ -277,6 +295,7 @@ submit_attempt() {
                 --noise-seed-base ${NOISE_SEED_BASE} \
                 --n-sims ${N_SIMS} \
                 ${SYNTHETIC_PTAS_FLAG} \
+                ${CGW_WEIGHTED_CADENCE_FLAG} \
                 ${SYN_CONFIG_ARG}"
         )
         S1_JOB=$(echo "$S1_JOB" | tr -d '[:space:]')
@@ -305,6 +324,7 @@ submit_attempt() {
                 ${CGW_FLAG} \
                 ${PROXY_ONLY_FLAG} \
                 ${SYNTHETIC_PTAS_FLAG} \
+                ${CGW_WEIGHTED_CADENCE_FLAG} \
                 ${SYN_CONFIG_ARG}"
         )
         S2_JOB=$(echo "$S2_JOB" | tr -d '[:space:]')
@@ -337,8 +357,8 @@ log "  Shards/sim      : $(( N_CHUNKS * N_SUB_CHUNKS ))  (= N_CHUNKS × N_SUB_CH
 log "  S1 tasks/sim    : ${N_CHUNKS}  (one array per sim)"
 log "  S2 jobs         : ${N_SIMS}  (one per sim, independent)"
 log "  CGW             : $([[ -n "${CGW_FLAG}" ]] && echo on || echo off)"
-log "  Synthetic PTAs  : $([[ -n "${SYNTHETIC_PTAS_FLAG}" ]] && echo on || echo off)"
-[[ -n "$SYNTHETIC_PTA_CONFIG" ]] && log "  Syn config      : ${SYNTHETIC_PTA_CONFIG}"
+log "  Synthetic PTAs  : $([[ -n "${SYNTHETIC_PTAS_FLAG}" || -n "${CGW_WEIGHTED_CADENCE_FLAG}" ]] && echo on || echo off)"
+log "  CW-weighted cadence: $([[ -n "${CGW_WEIGHTED_CADENCE_FLAG}" ]] && echo on || echo off)"
 log "  Noise seed      : base=${NOISE_SEED_BASE}"
 log "  Proxy only      : $([[ -n "${PROXY_ONLY_FLAG}" ]] && echo on || echo off)"
 log "  N test          : ${N_TEST}"
@@ -380,6 +400,10 @@ log "  # Custom scenario via JSON:"
 log "  bash submit_main_HPC.sh --cgw --synthetic-ptas --n-sub-chunks 5 \\"
 log "    --synthetic-pta-config '{\"3x_cadence\": {\"cadence_factor\": 3, \"toaerr_factor\": 1.0, \"best_only\": true}}'"
 log ""
+log "  # Configuration-weighted cadence (requires calibrated weights):"
+log "  bash submit_main_HPC.sh --cgw --synthetic-ptas \\"
+log "    --synthetic-pta-config '{\"cgw_weighted_cadence\": {\"cgw_weighted_cadence\": true, \"min_cadence_days\": 90.0, \"best_only\": false, \"extension_to_longest_span\": true}}'"
+log ""
 log "Monitor:"
 log "  squeue -u \$USER"
 log "  tail -f ${OUTPUT_DIR}/logs/stage2_sim000_try1_*.out"
@@ -393,13 +417,13 @@ log "  cgw_snr                  (baseline, always)"
     if [[ -n "$SYNTHETIC_PTA_CONFIG" ]]; then
         log "  cgw_snr_<your_scenario>  (from --synthetic-pta-config)"
     else
-        log "  cgw_snr_5x_cadence"
-        log "  cgw_snr_4x_precision"
-        log "  cgw_snr_5x_cad_4x_prec"
+        log "  cgw_snr_4x_cadence"
+        log "  cgw_snr_2x_precision"
+        log "  cgw_snr_4x_cad_2x_prec"
     fi
 }
 
-EXIT_CODE=$?
+EXIT_CODE=0
 echo ""
 echo "=========================================="
 echo "Finished: $(date)  exit=${EXIT_CODE}"

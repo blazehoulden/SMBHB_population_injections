@@ -6,12 +6,15 @@ import gc
 import hashlib
 import tempfile
 from copy import deepcopy
+from pathlib import Path
 from enterprise.pulsar import Pulsar
 import sys
 from collections import defaultdict
 from config import NANOGRAV_PULSARS, PAR_DIR, TIM_DIR, USE_PULSAR_CACHE, PULSAR_CACHE, NOISEFILE
 import libstempo as T
 from signal_injection import get_base_name
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def tim_has_toas(tim_path):
@@ -248,64 +251,78 @@ MIN_CADENCE_DAYS_DEFAULT = 90.0
 #   best_only       bool   — apply only to BEST_PSRS if True
 #   best_psrs       tuple  — override BEST_PSRS for this scenario (optional)
 SCENARIOS = {
-    'baseline': dict(
-        cadence_factor = 1,
-        toaerr_factor  = 1.0,
-        best_only      = True,
-        # no extension_years -> stays real-only 4.5yr, used for the
-        # SGWB consistency check + CW candidate baseline
+    "baseline": dict(
+        cadence_factor=1,
+        toaerr_factor=1.0,
+        best_only=True,
+        # No forecast extension. Uses the real observing data.
     ),
 
-    'baseline_forecast': dict(
-        cadence_factor  = 1,
-        toaerr_factor   = 1.0,
-        best_only       = True,
-        extension_years = 4.46,
+    "baseline_forecast": dict(
+        cadence_factor=1,
+        toaerr_factor=1.0,
+        best_only=True,
+        # Add one shared extension equal to the longest real pulsar span.
+        extension_to_longest_span=True,
     ),
 
-    '4x_cadence': dict(
-        cadence_factor  = 4,
-        toaerr_factor   = 1.0,
-        best_only       = True,
-        extension_years = 4.46,
-    ),
-
-    '2x_precision': dict(
-        cadence_factor  = 1,
-        toaerr_factor   = 0.5,
-        best_only       = True,
-        extension_years = 4.46,
-    ),
-
-    '4x_cad_2x_prec': dict(
-        cadence_factor  = 4,
-        toaerr_factor   = 0.5,
-        best_only       = True,
-        extension_years = 4.46,
-    ),
-    # '4x_cadence_conserved': dict(
-    #     cadence_factor          = 4,
-    #     toaerr_factor           = 1.0,
-    #     best_only               = True,
-    #     extension_years         = 4.46,
-    #     conserve_telescope_time = True,
+    # "4x_cadence": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=1.0,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
     # ),
-    # '2x_precision_conserved': dict(
-    #     cadence_factor          = 2,
-    #     toaerr_factor           = 1.0,
-    #     best_only               = True,
-    #     extension_years         = 4.46,
-    #     conserve_telescope_time = True,
+
+    # "2x_precision": dict(
+    #     cadence_factor=1,
+    #     toaerr_factor=0.5,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
     # ),
-    # '4x_cad_2x_prec_conserved': dict(
-    #     cadence_factor  = 4,
-    #     toaerr_factor   = 0.5,
-    #    
-    #  best_only       = True,
-    #     extension_years = 4.46,
-    #     conserve_telescope_time = True,
+
+    # "4x_cad_2x_prec": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=0.5,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    # ),
+
+    # "4x_cadence_conserved": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=1.0,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    #     conserve_telescope_time=True,
+    # ),
+
+    # "2x_precision_conserved": dict(
+    #     cadence_factor=2,
+    #     toaerr_factor=1.0,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    #     conserve_telescope_time=True,
+    # ),
+
+    # "4x_cad_2x_prec_conserved": dict(
+    #     cadence_factor=4,
+    #     toaerr_factor=0.5,
+    #     best_only=True,
+    #     extension_to_longest_span=True,
+    #     conserve_telescope_time=True,
+    # ),
+    # "cgw_weighted_cadence": dict(
+    #     cgw_weighted_cadence=True,
+    #     min_cadence_days=90.0,
+    #     toaerr_factor=1.0,
+    #     best_only=False,
+    #     conserve_telescope_time=True,
+    #     extension_to_longest_span=True,
+    #     cgw_weight_dir=(
+    #         PROJECT_ROOT / "config" / "cgw_cadence_weights"
+    #     ),
     # ),
 }
+
 
 def _bounded_maxobs(tim_path: str) -> int:
     """
@@ -433,8 +450,8 @@ def _parse_tim_lines(tim_path):
     return header_lines, toa_records
 
 
-def _rebuild_line(record, new_toa=None, new_err=None):
-    """Swap only TOA/error columns; everything else verbatim."""
+def _rebuild_line(record, new_toa=None, new_err=None, tobs_scale=1.0):
+    """Rebuild a TOA line, optionally scaling its -tobs flag."""
     parts = record['line'].split()
 
     if new_toa is not None:
@@ -444,6 +461,15 @@ def _rebuild_line(record, new_toa=None, new_err=None):
     if new_err is not None:
         nd = record.get('err_decimals', 4)
         parts[record['err_col']] = f'{new_err:.{nd}f}'
+
+    if tobs_scale != 1.0:
+        for i, token in enumerate(parts[:-1]):
+            if token == '-tobs':
+                try:
+                    parts[i + 1] = f'{float(parts[i + 1]) * tobs_scale:g}'
+                except ValueError:
+                    pass
+                break
 
     return ' '.join(parts)
 
@@ -862,11 +888,338 @@ def _get_max_cadence_budget(cfg: dict, scenario_label: str, best_psrs,
     return _MAX_CADENCE_BUDGET_CACHE[key]
 
 
+
+def _load_cgw_cadence_weights(
+    configuration=None,
+    weight_dir=None,
+):
+    """
+    Load and validate the fixed median CGW contribution weights for the
+    active population configuration.
+    """
+    resolved_configuration = _resolve_population_configuration(
+        configuration
+    )
+
+    directory = Path(weight_dir) if weight_dir else CGW_CADENCE_WEIGHT_DIR
+    path = directory / f"{resolved_configuration}.json"
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"No CGW cadence-weight file exists for population "
+            f"configuration {resolved_configuration!r}: {path}. "
+            "Run the population-analysis calibration cell first."
+        )
+
+    cache_key = (
+        str(path.resolve()),
+        path.stat().st_mtime_ns,
+    )
+
+    if cache_key in _CGW_CADENCE_WEIGHT_CACHE:
+        return (
+            resolved_configuration,
+            _CGW_CADENCE_WEIGHT_CACHE[cache_key].copy(),
+        )
+
+    with path.open() as fh:
+        payload = json.load(fh)
+
+    file_configuration = payload.get("configuration")
+    if file_configuration is not None:
+        file_configuration = _resolve_population_configuration(
+            file_configuration
+        )
+
+        if file_configuration != resolved_configuration:
+            raise ValueError(
+                f"Weight file {path} is labelled "
+                f"{file_configuration!r}, but the active population "
+                f"configuration is {resolved_configuration!r}."
+            )
+
+    raw_weights = payload.get("weights")
+
+    if not isinstance(raw_weights, dict) or not raw_weights:
+        raise ValueError(
+            f"Weight file {path} does not contain a non-empty "
+            "'weights' mapping."
+        )
+
+    weights = {}
+
+    for pulsar, value in raw_weights.items():
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid weight for pulsar {pulsar!r} in {path}: "
+                f"{value!r}"
+            ) from exc
+
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(
+                f"Weight for pulsar {pulsar!r} in {path} is invalid: "
+                f"{value!r}"
+            )
+
+        weights[str(pulsar)] = value
+
+    total = float(sum(weights.values()))
+
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError(
+            f"CGW cadence weights in {path} have invalid total {total!r}."
+        )
+
+    weights = {
+        pulsar: value / total
+        for pulsar, value in weights.items()
+    }
+
+    _CGW_CADENCE_WEIGHT_CACHE.clear()
+    _CGW_CADENCE_WEIGHT_CACHE[cache_key] = weights.copy()
+
+    return resolved_configuration, weights
+
+def _compute_cgw_weighted_cadence_budget(
+    cfg,
+    scenario_label,
+    par_dir,
+    tim_dir,
+    population_configuration=None,
+):
+    """
+    Allocate the baseline telescope-time budget according to fixed,
+    configuration-level median CGW rho^2 contribution weights.
+
+    Every pulsar receives its minimum cadence floor first. The remaining
+    telescope time is allocated proportionally to the calibrated CGW
+    weights.
+
+    Pulsars absent from the weight file receive zero weight and therefore
+    receive only their minimum cadence.
+    """
+    all_names = _list_base_pulsar_names(par_dir)
+
+    if not all_names:
+        raise ValueError(
+            f"No pulsars found in par directory {par_dir}"
+        )
+
+    dwell_flag_key = cfg.get("dwell_flag_key", "tobs")
+
+    baseline_cost = {
+        name: float(_pulsar_mean_tobs(
+            name,
+            tim_dir,
+            flag_key=dwell_flag_key,
+        ))
+        for name in all_names
+    }
+
+    if any(value <= 0.0 for value in baseline_cost.values()):
+        bad = [
+            name for name, value in baseline_cost.items()
+            if value <= 0.0
+        ]
+        raise ValueError(
+            f"Non-positive baseline telescope-time cost for pulsars: "
+            f"{bad}"
+        )
+
+    total_budget = float(sum(baseline_cost.values()))
+
+    min_cadence_days = float(cfg.get(
+        "min_cadence_days",
+        MIN_CADENCE_DAYS_DEFAULT,
+    ))
+
+    floor_factor = {
+        name: float(_pulsar_min_cadence_factor(
+            name,
+            tim_dir,
+            min_cadence_days,
+        ))
+        for name in all_names
+    }
+
+    floor_cost = {
+        name: baseline_cost[name] * floor_factor[name]
+        for name in all_names
+    }
+
+    minimum_cost = float(sum(floor_cost.values()))
+
+    if minimum_cost > total_budget + 1e-8:
+        raise ValueError(
+            f"Minimum cadence floor for {scenario_label!r} costs "
+            f"{minimum_cost:.6g}, exceeding the baseline telescope-time "
+            f"budget {total_budget:.6g}."
+        )
+
+    configuration, calibrated_weights = _load_cgw_cadence_weights(
+        configuration=population_configuration,
+        weight_dir=cfg.get(
+            "cgw_weight_dir",
+            CGW_CADENCE_WEIGHT_DIR,
+        ),
+    )
+
+    # Zero weight is intentional for pulsars absent from the calibration
+    # file: they receive the minimum cadence only.
+    weights = {
+        name: max(
+            float(calibrated_weights.get(name, 0.0)),
+            0.0,
+        )
+        for name in all_names
+    }
+
+    weight_sum = float(sum(weights.values()))
+
+    if weight_sum <= 0.0:
+        raise ValueError(
+            f"None of the pulsars in {par_dir} appear in the "
+            f"{configuration!r} CGW weight file."
+        )
+
+    weights = {
+        name: value / weight_sum
+        for name, value in weights.items()
+    }
+
+    remaining_budget = total_budget - minimum_cost
+
+    cadence_factor = {}
+
+    for name in all_names:
+        extra_cost = remaining_budget * weights[name]
+        cadence_factor[name] = (
+            floor_factor[name]
+            + extra_cost / baseline_cost[name]
+        )
+
+    achieved_budget = float(sum(
+        baseline_cost[name] * cadence_factor[name]
+        for name in all_names
+    ))
+
+    relative_error = (
+        achieved_budget - total_budget
+    ) / max(total_budget, 1e-30)
+
+    if abs(relative_error) > 1e-8:
+        raise RuntimeError(
+            f"CGW weighted cadence failed telescope-time conservation: "
+            f"relative error={relative_error:.3e}"
+        )
+
+    if cfg.get("max_cadence_cap") is not None:
+        cap = float(cfg["max_cadence_cap"])
+
+        if cap <= 0.0:
+            raise ValueError(
+                f"max_cadence_cap must be positive, got {cap}"
+            )
+
+        over_cap = [
+            name for name in all_names
+            if cadence_factor[name] > cap
+        ]
+
+        if over_cap:
+            raise ValueError(
+                f"CGW weighted cadence exceeds max_cadence_cap={cap} "
+                f"for pulsars {over_cap}. A cap requires a redistribution "
+                "solver; refusing to silently violate telescope-time "
+                "conservation."
+            )
+
+    print(
+        f"  weighted_cadence [{scenario_label}]: "
+        f"configuration={configuration}, "
+        f"{len(all_names)} pulsars, "
+        f"{len(calibrated_weights)} calibrated weights, "
+        f"minimum cost={minimum_cost:.0f}s, "
+        f"budget={total_budget:.0f}s, "
+        f"relative error={relative_error:.3e}"
+    )
+
+    return {
+        "configuration": configuration,
+        "weights": weights,
+        "floor_factor": floor_factor,
+        "cadence_factor": cadence_factor,
+        "baseline_cost": baseline_cost,
+        "minimum_cost": minimum_cost,
+        "budget_total": total_budget,
+        "achieved_budget": achieved_budget,
+        "relative_error": relative_error,
+    }
+
+
+CGW_CADENCE_WEIGHT_DIR = (
+    PROJECT_ROOT / "config" / "cgw_cadence_weights"
+)
+
+_CGW_CADENCE_WEIGHT_CACHE = {}
+_CGW_WEIGHTED_CADENCE_BUDGET_CACHE = {}
+
+def _get_cgw_weighted_cadence_budget(
+    cfg,
+    scenario_label,
+    par_dir,
+    tim_dir,
+    population_configuration=None,
+):
+    configuration = _resolve_population_configuration(
+        population_configuration
+        or cfg.get("population_configuration")
+    )
+
+    weight_dir = Path(cfg.get(
+        "cgw_weight_dir",
+        CGW_CADENCE_WEIGHT_DIR,
+    ))
+
+    weight_path = weight_dir / f"{configuration}.json"
+
+    key = (
+        id(cfg),
+        str(Path(par_dir).resolve()),
+        str(Path(tim_dir).resolve()),
+        configuration,
+        str(weight_path.resolve()),
+        weight_path.stat().st_mtime_ns
+        if weight_path.is_file()
+        else None,
+        float(cfg.get(
+            "min_cadence_days",
+            MIN_CADENCE_DAYS_DEFAULT,
+        )),
+        cfg.get("dwell_flag_key", "tobs"),
+    )
+
+    if key not in _CGW_WEIGHTED_CADENCE_BUDGET_CACHE:
+        _CGW_WEIGHTED_CADENCE_BUDGET_CACHE[key] = (
+            _compute_cgw_weighted_cadence_budget(
+                cfg=cfg,
+                scenario_label=scenario_label,
+                par_dir=par_dir,
+                tim_dir=tim_dir,
+                population_configuration=configuration,
+            )
+        )
+
+    return _CGW_WEIGHTED_CADENCE_BUDGET_CACHE[key]
+
 def _resolve_pulsar_scenario_params(cfg: dict, psr_name: str,
                                      best_only: bool, best_psrs,
                                      par_dir: str = None,
                                      tim_dir: str = None,
-                                     scenario_label: str = 'scenario') -> tuple:
+                                     scenario_label: str = 'scenario',
+                                     population_configuration=None) -> tuple:
     """
     Resolve (cadence_factor, toaerr_factor) for a given base pulsar name.
 
@@ -890,7 +1243,23 @@ def _resolve_pulsar_scenario_params(cfg: dict, psr_name: str,
     if override:
         return (override.get('cadence_factor', cfg.get('cadence_factor', 1)),
                 override.get('toaerr_factor',  cfg.get('toaerr_factor', 1.0)))
+    
+    if cfg.get("cgw_weighted_cadence", False):
+        budget = _get_cgw_weighted_cadence_budget(
+            cfg=cfg,
+            scenario_label=scenario_label,
+            par_dir=par_dir or PAR_DIR,
+            tim_dir=tim_dir or TIM_DIR,
+            population_configuration=population_configuration or cfg.get(
+                "population_configuration"
+            ),
+        )
 
+        return (
+            budget["cadence_factor"].get(psr_name, 1.0),
+            cfg.get("toaerr_factor", 1.0),
+        )
+    
     if cfg.get('maximize_best_cadence', False):
         min_cadence_days = cfg.get('min_cadence_days', MIN_CADENCE_DAYS_DEFAULT)
         budget = _get_max_cadence_budget(
@@ -913,29 +1282,245 @@ def _resolve_pulsar_scenario_params(cfg: dict, psr_name: str,
     return cfg.get('cadence_factor', 1), cfg.get('toaerr_factor', 1.0)
 
 
-def _scenario_params_cache_key(cadence_factor, toaerr_factor,
-                                extension_years, extension_fraction) -> str:
-    ext_key = (f'{extension_years:.4f}y' if extension_years is not None
-               else f'{extension_fraction:.4f}xspan')
-    # Rounded to 2 decimals — merges near-duplicate floor multipliers from
-    # small real-cadence differences between pulsars (<1% effect on
-    # forecast epoch spacing, negligible vs. real scheduling irregularity)
-    return f'cad{round(cadence_factor, 2):.2f}_err{round(toaerr_factor, 2):.2f}_{ext_key}'
-
-
-def _pulsar_needs_scenario_tim(cfg: dict, cadence_factor, toaerr_factor) -> bool:
+def _resolve_population_configuration(configuration=None):
     """
-    True if this pulsar needs a scenario .tim written — either because its
-    resolved cadence/precision differ from (1, 1.0), OR because the
-    scenario has a forecast extension configured (in which case EVERY
-    pulsar in the scenario gets a forecast segment appended, even ones
-    continuing at today's cadence/precision).
+    Resolve the active population configuration.
+
+    The preferred route is an explicit value passed from Stage 1/Stage 2.
+    SMBHB_CONFIG is supported for shell/HPC workflows.
+
+    Do not infer this from the pulsar scenario name: 'baseline',
+    'baseline_forecast', and 'cgw_weighted_cadence' are observing scenarios,
+    not population configurations.
     """
-    modified_rate = not (cadence_factor == 1 and toaerr_factor == 1.0)
-    has_extension = (
-        cfg.get('extension_years') is not None
-        or bool(cfg.get('extension_fraction', 0.0))
+    value = (
+        configuration
+        or os.environ.get("SMBHB_CONFIG")
     )
+
+    if value is None:
+        raise ValueError(
+            "The population configuration is unknown. Pass "
+            "population_configuration='optimistic'/'realistic'/"
+            "'pessimistic' to load_pulsars(), or set SMBHB_CONFIG."
+        )
+
+    value = str(value).strip().lower()
+
+    aliases = {
+        "intermediate": "realistic",
+        "realistic": "realistic",
+        "optimistic": "optimistic",
+        "pessimistic": "pessimistic",
+    }
+
+    try:
+        return aliases[value]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown population configuration {value!r}. "
+            f"Expected one of {sorted(aliases)}."
+        ) from exc
+
+def _scenario_params_cache_key(
+    cadence_factor,
+    toaerr_factor,
+    extension_years,
+    extension_fraction,
+    extension_to_longest_span=False,
+    global_extension_days=None,
+):
+    """
+    Build a cache key for a scenario timing transformation.
+
+    The actual global extension is included in the key so that timing files
+    generated from a different data release or pulsar baseline are not reused.
+    """
+    if extension_to_longest_span:
+        if global_extension_days is None:
+            raise ValueError(
+                "global_extension_days is required when "
+                "extension_to_longest_span=True"
+            )
+        ext_key = f"longest-span-{float(global_extension_days):.4f}d"
+    elif extension_years is not None:
+        ext_key = f"{float(extension_years):.4f}y"
+    else:
+        ext_key = f"{float(extension_fraction):.4f}xspan"
+
+    return (
+        f"cad{float(cadence_factor):.2f}_"
+        f"err{float(toaerr_factor):.2f}_"
+        f"{ext_key}"
+    )
+
+
+def _longest_real_pulsar_span_days(
+    tim_dir,
+    par_dir,
+    selected_names=None,
+    skip_pulsars=None,
+):
+    """
+    Return the longest real observing span among eligible pulsars.
+
+    The span is measured in days from the actual real TOAs:
+
+        max(real TOA) - min(real TOA)
+
+    The returned value is a single global duration. It is not calculated
+    separately for each pulsar.
+    """
+    selected_names = (
+        set(selected_names)
+        if selected_names is not None
+        else None
+    )
+    skip_pulsars = set(skip_pulsars or ())
+
+    suffixes = ("ao", "gbt", "vla", "fast")
+    parfiles = sorted(
+        filename
+        for filename in os.listdir(par_dir)
+        if filename.endswith(".par")
+    )
+
+    seen_names = set()
+    spans_days = []
+
+    for par_filename in parfiles:
+        stem = par_filename.replace(".par", "").split("_")[0]
+        base_name = stem
+
+        for suffix in suffixes:
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
+                break
+
+        if base_name in seen_names:
+            continue
+        seen_names.add(base_name)
+
+        if base_name in skip_pulsars:
+            continue
+
+        if (
+            selected_names is not None
+            and base_name not in selected_names
+        ):
+            continue
+
+        tim_paths = [
+            tim_path
+            for tim_path in _find_tim_files(tim_dir, base_name)
+            if tim_has_toas(tim_path)
+        ]
+
+        for tim_path in tim_paths:
+            try:
+                _, records = _parse_tim_lines(tim_path)
+            except (OSError, ValueError):
+                continue
+
+            if len(records) < 2:
+                continue
+
+            toas = np.asarray(
+                [record["toa"] for record in records],
+                dtype=float,
+            )
+
+            if not np.all(np.isfinite(toas)):
+                continue
+
+            span_days = float(np.max(toas) - np.min(toas))
+
+            if span_days > 0.0:
+                spans_days.append(span_days)
+
+    if not spans_days:
+        raise RuntimeError(
+            "Could not determine a valid real observing span from the "
+            "eligible pulsar timing files."
+        )
+
+    return max(spans_days)
+
+def _resolve_global_extension_days(
+    cfg,
+    tim_dir,
+    par_dir,
+    selected_names=None,
+    skip_pulsars=None,
+):
+    """
+    Resolve the single extension duration used by every pulsar in a scenario.
+
+    Precedence:
+      1. extension_to_longest_span=True
+      2. extension_years
+      3. extension_fraction, which remains per-pulsar behavior
+    """
+    extension_to_longest_span = bool(
+        cfg.get("extension_to_longest_span", False)
+    )
+
+    extension_years = cfg.get("extension_years", None)
+    extension_fraction = float(
+        cfg.get("extension_fraction", 0.0)
+    )
+
+    if extension_to_longest_span:
+        return _longest_real_pulsar_span_days(
+            tim_dir=tim_dir,
+            par_dir=par_dir,
+            selected_names=selected_names,
+            skip_pulsars=skip_pulsars,
+        )
+
+    if extension_years is not None:
+        extension_years = float(extension_years)
+
+        if extension_years < 0.0:
+            raise ValueError(
+                f"extension_years must be non-negative, got {extension_years}"
+            )
+
+        return extension_years * 365.25
+
+    # None means _write_scenario_tim() may use extension_fraction and
+    # calculate a separate extension from each pulsar's own span.
+    if extension_fraction < 0.0:
+        raise ValueError(
+            "extension_fraction must be non-negative"
+        )
+
+    return None
+
+
+def _pulsar_needs_scenario_tim(
+    cfg,
+    cadence_factor,
+    toaerr_factor,
+):
+    """
+    Return True if this scenario requires a generated timing file.
+
+    A generated file is needed when cadence, TOA precision, or forecast
+    duration changes. A longest-span extension is global, but it still
+    applies to every pulsar and therefore must force scenario generation.
+    """
+    modified_rate = not (
+        cadence_factor == 1
+        and toaerr_factor == 1.0
+    )
+
+    has_extension = (
+        cfg.get("extension_years") is not None
+        or bool(cfg.get("extension_fraction", 0.0))
+        or bool(cfg.get("extension_to_longest_span", False))
+    )
+
     return modified_rate or has_extension
 
 
@@ -1028,10 +1613,19 @@ def _write_scenario_tim(orig_tim_path,
 
             for epoch_toa, t_idx in zip(future_epoch_toas, template_epoch_idx):
                 template_epoch = epochs[int(t_idx)]
+                # Halving the TOA error requires four times the integration time:
+                # effective observing time scales as 1 / toaerr_factor**2.
+                future_tobs_scale = 1.0 / toaerr_factor**2
+
                 for rec in template_epoch:
                     new_err = rec['err'] * toaerr_factor
                     fout.write(
-                        _rebuild_line(rec, new_toa=epoch_toa, new_err=new_err) + '\n'
+                        _rebuild_line(
+                            rec,
+                            new_toa=epoch_toa,
+                            new_err=new_err,
+                            tobs_scale=future_tobs_scale,
+                        ) + '\n'
                     )
                     n_future_written += 1
 
@@ -1074,44 +1668,79 @@ def _write_scenario_tim(orig_tim_path,
     return meta
 
 
-def _scenario_tim_is_valid(scen_tim, orig_tim, cadence_factor, toaerr_factor,
-                            extension_days=None, extension_fraction=1.0):
+def _scenario_tim_is_valid(
+    scen_tim,
+    orig_tim,
+    cadence_factor,
+    toaerr_factor,
+    extension_days=None,
+    extension_fraction=1.0,
+):
     """
-    A cached scenario .tim is valid iff it exists, is non-empty, and its
-    sidecar metadata matches the forecast parameters currently requested.
+    Check whether a cached scenario timing file matches the requested
+    transformation.
+
+    If extension_days is supplied, it is treated as a global duration and
+    compared directly. If it is None, extension_fraction is evaluated from
+    the individual original timing file.
     """
     if not os.path.exists(scen_tim):
         return False
 
-    meta_path = scen_tim + '.meta.json'
+    meta_path = scen_tim + ".meta.json"
     if not os.path.exists(meta_path):
         return False
 
     try:
         with open(meta_path) as fh:
             meta = json.load(fh)
-    except Exception:
+    except (OSError, ValueError, TypeError):
         return False
 
     if extension_days is None:
-        _, toa_records = _parse_tim_lines(orig_tim)
+        try:
+            _, toa_records = _parse_tim_lines(orig_tim)
+        except (OSError, ValueError):
+            return False
+
         if not toa_records:
             return False
-        orig_toas = np.array([r['toa'] for r in toa_records])
-        real_span = float(np.max(orig_toas) - np.min(orig_toas))
-        extension_days = extension_fraction * real_span
+
+        orig_toas = np.asarray(
+            [record["toa"] for record in toa_records],
+            dtype=float,
+        )
+
+        if not np.all(np.isfinite(orig_toas)):
+            return False
+
+        real_span = float(
+            np.max(orig_toas) - np.min(orig_toas)
+        )
+        extension_days = float(extension_fraction) * real_span
 
     n_scen = _tim_nobs(scen_tim)
-    if n_scen == 0:
+
+    if n_scen <= 0:
         return False
 
-    ok = (
-        abs(meta.get('cadence_factor', -1) - cadence_factor) < 1e-9
-        and abs(meta.get('toaerr_factor', -1) - toaerr_factor) < 1e-9
-        and abs(meta.get('extension_days', -1) - extension_days) < 1.0
-        and n_scen == meta.get('n_real', -1) + meta.get('n_future', -1)
+    return (
+        abs(
+            float(meta.get("cadence_factor", -1))
+            - float(cadence_factor)
+        ) < 1e-9
+        and abs(
+            float(meta.get("toaerr_factor", -1))
+            - float(toaerr_factor)
+        ) < 1e-9
+        and abs(
+            float(meta.get("extension_days", -1))
+            - float(extension_days)
+        ) < 1.0
+        and n_scen
+        == int(meta.get("n_real", -1))
+        + int(meta.get("n_future", -1))
     )
-    return ok
 
 
 def load_single_pulsar(
@@ -1123,6 +1752,7 @@ def load_single_pulsar(
     par_dir = None,
     tim_dir = None,
     skip_pulsars = None,
+    population_configuration = None,
 ):
     """
     Load libstempo pulsars for a given .par file.
@@ -1145,14 +1775,34 @@ def load_single_pulsar(
             f"Available: {list(_scenarios.keys())}"
         )
 
-    cfg                = _scenarios[scenario]
-    best_only          = cfg.get('best_only', True)
-    best_psrs          = cfg.get('best_psrs', BEST_PSRS)
-    per_pulsar_cfg     = cfg.get('per_pulsar', {})
-    extension_years    = cfg.get('extension_years', None)
-    extension_fraction = cfg.get('extension_fraction', 0.0)
-    extension_days     = (extension_years * 365.25
-                           if extension_years is not None else None)
+    cfg = _scenarios[scenario]
+    resolved_population_configuration = (
+        _resolve_population_configuration(population_configuration)
+        if cfg.get("cgw_weighted_cadence", False)
+        else None
+    )
+    best_only = cfg.get("best_only", True)
+    best_psrs = cfg.get("best_psrs", BEST_PSRS)
+    per_pulsar_cfg = cfg.get("per_pulsar", {})
+
+    extension_years = cfg.get("extension_years", None)
+    extension_fraction = float(
+        cfg.get("extension_fraction", 0.0)
+    )
+    extension_to_longest_span = bool(
+        cfg.get("extension_to_longest_span", False)
+    )
+
+    # load_single_pulsar() is normally used for one pulsar at a time, so resolve
+    # the shared extension from the complete data set rather than from this one
+    # pulsar's own TOAs.
+    global_extension_days = _resolve_global_extension_days(
+        cfg=cfg,
+        tim_dir=_tim_dir,
+        par_dir=_par_dir,
+        selected_names=None,
+        skip_pulsars=_skip,
+    )
 
     _suffixes = ('ao', 'gbt', 'vla', 'fast')
     par_stem     = par.replace('.par', '').split('_')[0]
@@ -1169,7 +1819,11 @@ def load_single_pulsar(
 
     cadence_factor, toaerr_factor = _resolve_pulsar_scenario_params(
         cfg, psr_name, best_only, best_psrs,
-        par_dir=_par_dir, tim_dir=_tim_dir, scenario_label=scenario)
+        par_dir=_par_dir,
+        tim_dir=_tim_dir,
+        scenario_label=scenario,
+        population_configuration=resolved_population_configuration,
+    )
     modified = _pulsar_needs_scenario_tim(cfg, cadence_factor, toaerr_factor)
 
 
@@ -1214,16 +1868,32 @@ def load_single_pulsar(
 
         if modified:
             cache_key = _scenario_params_cache_key(
-                cadence_factor, toaerr_factor, extension_years, extension_fraction)
+                cadence_factor=cadence_factor,
+                toaerr_factor=toaerr_factor,
+                extension_years=extension_years,
+                extension_fraction=extension_fraction,
+                extension_to_longest_span=extension_to_longest_span,
+                global_extension_days=global_extension_days,
+            )
             scen_dir = os.path.join(scenario_tim_dir, '_by_params', cache_key)
             os.makedirs(scen_dir, exist_ok=True)
             scen_tim = os.path.join(scen_dir, f'{load_name}.tim')
 
-            if (not os.path.exists(scen_tim)
-                    or not _scenario_tim_is_valid(
-                        scen_tim, tim_path, cadence_factor, toaerr_factor,
-                        extension_days=extension_days,
-                        extension_fraction=extension_fraction)):
+            if (
+                not os.path.exists(scen_tim)
+                or not _scenario_tim_is_valid(
+                    scen_tim,
+                    tim_path,
+                    cadence_factor,
+                    toaerr_factor,
+                    extension_days=global_extension_days,
+                    extension_fraction=(
+                        0.0
+                        if global_extension_days is not None
+                        else extension_fraction
+                    ),
+                )
+            ):
                 if verbose:
                     print(f'  ✎ Writing scenario tim for {load_name}...',
                           end=' ', flush=True)
@@ -1232,12 +1902,19 @@ def load_single_pulsar(
                         parfile=par_path, timfile=tim_path,
                         maxobs=maxobs, dofit=False)
                     meta = _write_scenario_tim(
-                        tim_path, load_name, scen_tim,
+                        tim_path,
+                        load_name,
+                        scen_tim,
                         cadence_factor=cadence_factor,
                         toaerr_factor=toaerr_factor,
-                        extension_days=extension_days,
-                        extension_fraction=extension_fraction,
-                        scenario_label=cache_key)
+                        extension_days=global_extension_days,
+                        extension_fraction=(
+                            0.0
+                            if global_extension_days is not None
+                            else extension_fraction
+                        ),
+                        scenario_label=cache_key,
+                    )
                     if verbose:
                         print(f'✓ ({meta["n_real"]} real + {meta["n_future"]} '
                               f'forecast = {meta["n_real"] + meta["n_future"]} TOAs)')
@@ -1274,39 +1951,47 @@ def load_single_pulsar(
 
 
 def load_pulsars(
-    verbose          = True,
-    scenario         = 'baseline',
-    scenarios        = None,
-    scenario_tim_dir = 'scenario_tims',
-    par_dir          = None,
-    tim_dir          = None,
-    skip_pulsars     = None,
-    use_cache        = None,
-    cache_path       = None,
+    verbose=True,
+    scenario="baseline",
+    scenarios=None,
+    scenario_tim_dir="scenario_tims",
+    par_dir=None,
+    tim_dir=None,
+    skip_pulsars=None,
+    use_cache=None,
+    cache_path=None,
+    population_configuration=None,
 ):
     """
     Load NANOGrav pulsars as libstempo tempopulsar objects.
 
-    For 'baseline' (no per_pulsar block, cadence_factor=toaerr_factor=1,
-    and maximize_best_cadence not set) behaviour is identical to before,
-    pickle cache included. For other scenarios, cadence_factor/toaerr_factor
-    are resolved per pulsar and modified pulsars get a real-data-preserved
-    forecast tim written via _write_scenario_tim.
+    For scenarios using extension_to_longest_span=True, one shared forecast
+    duration is calculated from the longest eligible real pulsar span. That
+    same duration is appended to every pulsar.
 
-    Scenario tim caching is keyed by the RESOLVED PARAMETERS for each
-    pulsar (cadence_factor, toaerr_factor, extension), not by scenario
-    name.
+    Therefore, if the longest real pulsar has span T_max, its final span is:
 
-    Returns
-    -------
-    list of libstempo.tempopulsar
+        T_max + T_max = 2 * T_max
+
+    Shorter pulsars receive the same number of future days, rather than an
+    extension calculated from each pulsar's own baseline.
+
+    For baseline scenarios, the existing pickle-cache behavior is preserved.
     """
-    _par_dir    = par_dir      or PAR_DIR
-    _tim_dir    = tim_dir      or TIM_DIR
-    _skip       = skip_pulsars if skip_pulsars is not None else SKIP_PULSARS
-    _use_cache  = use_cache    if use_cache    is not None else USE_PULSAR_CACHE
-    _cache_path = cache_path   or PULSAR_CACHE
-    _scenarios  = scenarios    if scenarios    is not None else SCENARIOS
+    _par_dir = par_dir or PAR_DIR
+    _tim_dir = tim_dir or TIM_DIR
+    _skip = (
+        skip_pulsars
+        if skip_pulsars is not None
+        else SKIP_PULSARS
+    )
+    _use_cache = (
+        use_cache
+        if use_cache is not None
+        else USE_PULSAR_CACHE
+    )
+    _cache_path = cache_path or PULSAR_CACHE
+    _scenarios = scenarios or SCENARIOS
 
     if scenario not in _scenarios:
         raise ValueError(
@@ -1314,212 +1999,403 @@ def load_pulsars(
             f"Available: {list(_scenarios.keys())}"
         )
 
-    cfg                 = _scenarios[scenario]
-    default_cadence     = cfg.get('cadence_factor', 1)
-    default_toaerr      = cfg.get('toaerr_factor',  1.0)
-    best_only           = cfg.get('best_only',       True)
-    best_psrs           = cfg.get('best_psrs',       BEST_PSRS)
-    per_pulsar_cfg      = cfg.get('per_pulsar', {})
-    extension_years     = cfg.get('extension_years', None)
-    extension_fraction  = cfg.get('extension_fraction', 0.0)
-    extension_days      = (extension_years * 365.25
-                            if extension_years is not None else None)
+    cfg = _scenarios[scenario]
+    resolved_population_configuration = (
+        _resolve_population_configuration(population_configuration)
+        if cfg.get("cgw_weighted_cadence", False)
+        else None
+    )
 
-    # A scenario is a true no-op baseline only if the top-level defaults
-    # are unmodified, there's no per-pulsar override, AND it isn't a
-    # maximize_best_cadence scenario (which resolves its own per-pulsar
-    # factors even though it has no top-level cadence_factor/toaerr_factor
-    # set) — this is what gates the pickle cache below.
+    default_cadence = cfg.get("cadence_factor", 1)
+    default_toaerr = cfg.get("toaerr_factor", 1.0)
+    best_only = cfg.get("best_only", True)
+    best_psrs = cfg.get("best_psrs", BEST_PSRS)
+    per_pulsar_cfg = cfg.get("per_pulsar", {})
+
+    extension_years = cfg.get("extension_years", None)
+    extension_fraction = float(
+        cfg.get("extension_fraction", 0.0)
+    )
+    extension_to_longest_span = bool(
+        cfg.get("extension_to_longest_span", False)
+    )
+
+    # A scenario is a true no-op baseline only when it does not modify
+    # cadence, precision, per-pulsar settings, or observing duration.
     is_scenario_baseline = (
-        default_cadence == 1 and default_toaerr == 1.0
+        default_cadence == 1
+        and default_toaerr == 1.0
         and not per_pulsar_cfg
-        and not cfg.get('maximize_best_cadence', False)
+        and not cfg.get("maximize_best_cadence", False)
+        and extension_years is None
+        and extension_fraction == 0.0
+        and not extension_to_longest_span
     )
 
     if verbose:
-        print('=' * 70)
-        print(f'LOADING NANOGRAV PULSARS (libstempo)  —  scenario: {scenario}')
+        print("=" * 70)
+        print(
+            "LOADING NANOGRAV PULSARS "
+            f"(libstempo)  —  scenario: {scenario}"
+        )
+
         if not is_scenario_baseline:
-            print(f'  default: cadence×{default_cadence}  err×{default_toaerr}'
-                  f'  best_only={best_only}')
+            print(
+                f"  default: cadence×{default_cadence} "
+                f"err×{default_toaerr} "
+                f"best_only={best_only}"
+            )
+
             if per_pulsar_cfg:
-                print(f'  per-pulsar overrides: {list(per_pulsar_cfg.keys())}')
-            if cfg.get('maximize_best_cadence', False):
-                print(f'  maximize_best_cadence=True  '
-                      f'min_cadence_days={cfg.get("min_cadence_days", MIN_CADENCE_DAYS_DEFAULT)}  '
-                      f'best_psrs={list(best_psrs)}')
-        print('=' * 70)
+                print(
+                    "  per-pulsar overrides: "
+                    f"{list(per_pulsar_cfg.keys())}"
+                )
+
+            if cfg.get("maximize_best_cadence", False):
+                min_cadence_days = cfg.get(
+                    "min_cadence_days",
+                    MIN_CADENCE_DAYS_DEFAULT,
+                )
+                print(
+                    "  maximize_best_cadence=True "
+                    f"min_cadence_days={min_cadence_days} "
+                    f"best_psrs={list(best_psrs)}"
+                )
+
+            if extension_to_longest_span:
+                print(
+                    "  forecast extension: one shared duration equal "
+                    "to the longest eligible real pulsar span"
+                )
+            elif extension_years is not None:
+                print(
+                    f"  forecast extension: {float(extension_years):.4f} years"
+                )
+            elif extension_fraction != 0.0:
+                print(
+                    "  forecast extension: "
+                    f"{extension_fraction:.4f} × each pulsar span"
+                )
+
+        print("=" * 70)
 
     # ------------------------------------------------------------------
-    # Baseline path: identical to original, cache included
+    # Baseline path: preserve the original pickle cache behavior.
     # ------------------------------------------------------------------
-    if is_scenario_baseline:
-        if _use_cache and os.path.exists(_cache_path):
+    if is_scenario_baseline and _use_cache:
+        if _cache_path is None:
+            raise ValueError(
+                "use_cache=True but no pulsar cache path was provided."
+            )
+
+        if os.path.exists(_cache_path):
             if verbose:
-                print(f'\n📦 Loading from cache: {_cache_path}')
+                print(f"\n📦 Loading from cache: {_cache_path}")
+
             try:
-                with open(_cache_path, 'rb') as f:
-                    psrs = pickle.load(f)
+                with open(_cache_path, "rb") as fh:
+                    psrs = pickle.load(fh)
+
                 if verbose:
-                    print(f'✓ Loaded {len(psrs)} pulsars from cache\n')
+                    print(f"✓ Loaded {len(psrs)} pulsars from cache\n")
+
                 return psrs
-            except Exception as e:
+
+            except (OSError, EOFError, pickle.PickleError) as exc:
                 if verbose:
-                    print(f'⚠ Cache load failed: {e}')
+                    print(f"⚠ Cache load failed: {exc}")
 
     # ------------------------------------------------------------------
-    # Build sorted list of unique base pulsar names from par directory
+    # Build sorted unique base-pulsar names.
     # ------------------------------------------------------------------
-    _suffixes = ('ao', 'gbt', 'vla', 'fast')
-    parfiles   = sorted([f for f in os.listdir(_par_dir) if f.endswith('.par')])
+    suffixes = ("ao", "gbt", "vla", "fast")
 
-    seen_set   = set()
+    parfiles = sorted(
+        filename
+        for filename in os.listdir(_par_dir)
+        if filename.endswith(".par")
+    )
+
+    seen_names = set()
     base_names = []
-    for par in parfiles:
-        stem = par.replace('.par', '').split('_')[0]
-        base = stem
-        for sfx in _suffixes:
-            if base.endswith(sfx):
-                base = base[:-len(sfx)]
+
+    for par_filename in parfiles:
+        stem = par_filename.replace(".par", "").split("_")[0]
+        base_name = stem
+
+        for suffix in suffixes:
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
                 break
-        if base not in seen_set:
-            seen_set.add(base)
-            base_names.append(base)
+
+        if base_name not in seen_names:
+            seen_names.add(base_name)
+            base_names.append(base_name)
 
     if verbose:
-        print(f'Found {len(parfiles)} .par files → {len(base_names)} unique pulsars')
+        print(
+            f"Found {len(parfiles)} .par files "
+            f"→ {len(base_names)} unique pulsars"
+        )
 
-    psrs           = []
+    # ------------------------------------------------------------------
+    # Resolve the one shared extension after the available pulsars are known.
+    # This must not be done at module import time.
+    # ------------------------------------------------------------------
+    global_extension_days = _resolve_global_extension_days(
+        cfg=cfg,
+        tim_dir=_tim_dir,
+        par_dir=_par_dir,
+        selected_names=set(base_names),
+        skip_pulsars=_skip,
+    )
+
+    if global_extension_days is not None and verbose:
+        print(
+            "  Shared forecast extension: "
+            f"{global_extension_days / 365.25:.4f} years "
+            "(based on the longest eligible real pulsar span)"
+        )
+
+    psrs = []
     failed_pulsars = []
 
     for psr_name in base_names:
         if psr_name in _skip:
             if verbose:
-                print(f'⚠ Skipping {psr_name} (in SKIP_PULSARS)')
+                print(
+                    f"⚠ Skipping {psr_name} "
+                    "(in SKIP_PULSARS)"
+                )
             continue
 
-        par_map   = _find_par_files(_par_dir, psr_name)
-        tim_paths = [t for t in _find_tim_files(_tim_dir, psr_name) if tim_has_toas(t)]
+        par_map = _find_par_files(_par_dir, psr_name)
+        tim_paths = [
+            tim_path
+            for tim_path in _find_tim_files(_tim_dir, psr_name)
+            if tim_has_toas(tim_path)
+        ]
 
         if not par_map:
             if verbose:
-                print(f'⚠ No par file found for {psr_name}')
+                print(f"⚠ No par file found for {psr_name}")
             failed_pulsars.append(psr_name)
             continue
+
         if not tim_paths:
             if verbose:
-                print(f'⚠ No valid tim for {psr_name}')
+                print(f"⚠ No valid tim for {psr_name}")
             failed_pulsars.append(psr_name)
             continue
 
         cadence_factor, toaerr_factor = _resolve_pulsar_scenario_params(
-            cfg, psr_name, best_only, best_psrs,
-            par_dir=_par_dir, tim_dir=_tim_dir, scenario_label=scenario)
-        modified = _pulsar_needs_scenario_tim(cfg, cadence_factor, toaerr_factor)
+            cfg,
+            psr_name,
+            best_only,
+            best_psrs,
+            par_dir=_par_dir,
+            tim_dir=_tim_dir,
+            scenario_label=scenario,
+            population_configuration=(
+                resolved_population_configuration
+            ),
+        )
+
+        modified = _pulsar_needs_scenario_tim(
+            cfg,
+            cadence_factor,
+            toaerr_factor,
+        )
 
         cache_key = _scenario_params_cache_key(
-            cadence_factor, toaerr_factor, extension_years, extension_fraction)
-        scen_dir  = os.path.join(scenario_tim_dir, '_by_params', cache_key)
+            cadence_factor=cadence_factor,
+            toaerr_factor=toaerr_factor,
+            extension_years=extension_years,
+            extension_fraction=extension_fraction,
+            extension_to_longest_span=extension_to_longest_span,
+            global_extension_days=global_extension_days,
+        )
 
+        scen_dir = os.path.join(
+            scenario_tim_dir,
+            "_by_params",
+            cache_key,
+        )
 
         for tim_path in tim_paths:
-            tim_stem  = os.path.basename(tim_path).replace('.tim', '').split('_')[0]
-            variant   = tim_stem[len(psr_name):]
-            load_name = f'{psr_name}{variant}'
+            tim_stem = (
+                os.path.basename(tim_path)
+                .replace(".tim", "")
+                .split("_")[0]
+            )
+            variant = tim_stem[len(psr_name):]
+            load_name = f"{psr_name}{variant}"
 
-            par_path = par_map.get(variant) or par_map.get('')
+            par_path = (
+                par_map.get(variant)
+                or par_map.get("")
+            )
+
             if par_path is None:
                 if verbose:
-                    print(f'⚠ No par for variant {load_name}, skipping')
+                    print(
+                        f"⚠ No par for variant {load_name}, skipping"
+                    )
                 failed_pulsars.append(load_name)
                 continue
 
             effective_tim = tim_path
             maxobs = _bounded_maxobs(tim_path)
-            
+
             if modified:
                 os.makedirs(scen_dir, exist_ok=True)
-                scen_tim = os.path.join(scen_dir, f'{load_name}.tim')
+                scen_tim = os.path.join(
+                    scen_dir,
+                    f"{load_name}.tim",
+                )
 
-                if (not os.path.exists(scen_tim)
-                        or not _scenario_tim_is_valid(
-                            scen_tim, tim_path, cadence_factor, toaerr_factor,
-                            extension_days=extension_days,
-                            extension_fraction=extension_fraction)):
+                validation_extension_fraction = (
+                    0.0
+                    if global_extension_days is not None
+                    else extension_fraction
+                )
+
+                needs_rebuild = (
+                    not os.path.exists(scen_tim)
+                    or not _scenario_tim_is_valid(
+                        scen_tim,
+                        tim_path,
+                        cadence_factor,
+                        toaerr_factor,
+                        extension_days=global_extension_days,
+                        extension_fraction=(
+                            validation_extension_fraction
+                        ),
+                    )
+                )
+
+                if needs_rebuild:
                     if verbose:
-                        print(f'  ✎ Writing scenario tim for {load_name} '
-                              f'[{cache_key}]...', end=' ', flush=True)
+                        print(
+                            f"  ✎ Writing scenario tim for {load_name} "
+                            f"[{cache_key}]...",
+                            end=" ",
+                            flush=True,
+                        )
+
                     try:
+                        # This construction checks that the original timing
+                        # file is usable before generating the scenario file.
                         psr_tmp = T.tempopulsar(
-                            parfile=par_path, timfile=tim_path,
-                            maxobs=maxobs, dofit=False)
+                            parfile=par_path,
+                            timfile=tim_path,
+                            maxobs=maxobs,
+                            dofit=False,
+                        )
+
                         meta = _write_scenario_tim(
-                            tim_path, load_name, scen_tim,
+                            tim_path,
+                            load_name,
+                            scen_tim,
                             cadence_factor=cadence_factor,
                             toaerr_factor=toaerr_factor,
-                            extension_days=extension_days,
-                            extension_fraction=extension_fraction,
-                            scenario_label=cache_key)
+                            extension_days=global_extension_days,
+                            extension_fraction=(
+                                validation_extension_fraction
+                            ),
+                            scenario_label=cache_key,
+                        )
+
                         if verbose:
-                            print(f'✓ ({meta["n_real"]} real + {meta["n_future"]} '
-                                  f'forecast = {meta["n_real"] + meta["n_future"]} TOAs)')
+                            print(
+                                f"✓ ({meta['n_real']} real + "
+                                f"{meta['n_future']} forecast = "
+                                f"{meta['n_real'] + meta['n_future']} TOAs)"
+                            )
+
                         del psr_tmp
-                    except Exception as e:
+
+                    except (OSError, ValueError, RuntimeError) as exc:
                         if verbose:
-                            print(f'✗ failed: {e}')
+                            print(f"✗ failed: {exc}")
                         failed_pulsars.append(load_name)
                         continue
-                else:
-                    if verbose:
-                        print(f'  ✓ {load_name:20s} [{cache_key}] '
-                              f'scenario tim exists, reusing')
+
+                elif verbose:
+                    print(
+                        f"  ✓ {load_name:20s} "
+                        f"[{cache_key}] scenario tim exists, reusing"
+                    )
 
                 effective_tim = scen_tim
 
-            elif verbose and (cfg.get('cadence_factor', 1) != 1
-                       or cfg.get('toaerr_factor', 1.0) != 1.0
-                       or per_pulsar_cfg):
-                print(f'  ✓ {load_name:20s} not upgraded (best_only) — original tim')
+            elif verbose and (
+                cfg.get("cadence_factor", 1) != 1
+                or cfg.get("toaerr_factor", 1.0) != 1.0
+                or per_pulsar_cfg
+            ):
+                print(
+                    f"  ✓ {load_name:20s} not upgraded "
+                    "(best_only) — original tim"
+                )
 
             try:
-                raw_n  = _tim_nobs(effective_tim)
                 psr = T.tempopulsar(
                     parfile=par_path,
                     timfile=effective_tim,
                     maxobs=maxobs,
                     dofit=False,
                 )
+
                 if psr.nobs == 0:
                     if verbose:
-                        print(f'⚠ Zero TOAs for {load_name}')
+                        print(f"⚠ Zero TOAs for {load_name}")
                     failed_pulsars.append(load_name)
                     continue
 
                 psrs.append(psr)
-                if verbose:
-                    print(f'✓ Loaded {psr.name} ({psr.nobs} TOAs) [tim={tim_stem}]')
 
-            except Exception as e:
                 if verbose:
-                    print(f'✗ Failed {load_name}: {e}')
+                    print(
+                        f"✓ Loaded {psr.name} "
+                        f"({psr.nobs} TOAs) "
+                        f"[tim={tim_stem}]"
+                    )
+
+            except (OSError, ValueError, RuntimeError) as exc:
+                if verbose:
+                    print(f"✗ Failed {load_name}: {exc}")
                 failed_pulsars.append(load_name)
 
     # ------------------------------------------------------------------
-    # Cache true baseline only
+    # Cache true baseline only.
     # ------------------------------------------------------------------
     if is_scenario_baseline and _use_cache and psrs:
         try:
-            with open(_cache_path, 'wb') as f:
-                pickle.dump(psrs, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(_cache_path, "wb") as fh:
+                pickle.dump(
+                    psrs,
+                    fh,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+
             if verbose:
-                print(f'\n💾 Saved cache: {_cache_path}')
-        except Exception as e:
+                print(f"\n💾 Saved cache: {_cache_path}")
+
+        except (OSError, pickle.PickleError) as exc:
             if verbose:
-                print(f'⚠ Could not save cache: {e}')
+                print(f"⚠ Could not save cache: {exc}")
 
     if verbose:
-        print(f'\n✓ Loaded {len(psrs)} pulsars [scenario={scenario}]')
-        print(f'✗ Failed: {len(failed_pulsars)} — {failed_pulsars}')
+        print(
+            f"\n✓ Loaded {len(psrs)} pulsars "
+            f"[scenario={scenario}]"
+        )
+        print(
+            f"✗ Failed: {len(failed_pulsars)} "
+            f"— {failed_pulsars}"
+        )
 
     return psrs
 

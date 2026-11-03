@@ -2694,7 +2694,7 @@ def get_enterprise_noise_per_mode(
 
     # Set GWB and BayesEphem params explicitly
     param_defaults = {
-        'gw_log10_A':        np.log10(2.4e-15),
+        'gw_log10_A':        np.log10(4.8e-15),
         'gw_gamma':          13.0 / 3.0,
         'd_jupiter_mass':     0.0,
         'd_saturn_mass':      0.0,
